@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 330" width="1000" height="330" role="img" aria-label="Two machines. On the agent's machine, the hook writes the chain. At session end the chain's receipts and its head go to the receiver on another machine the agent cannot reach. The harness also sends its own record of each tool call there. The receiver only adds.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 330" width="1000" height="330" role="img" aria-label="Two machines. On the agent's machine, the hook writes the chain. Each receipt goes to the receiver on another machine the agent cannot reach as it is written, and the chain's head at session end. The harness also sends its own record of each tool call there. The receiver only adds.">
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; fill: #111827; white-space: pre; }
     .title { font-size: 14px; }
@@ -53,8 +53,8 @@
   <text class="key" x="500" y="80" text-anchor="middle">its own events</text>
   <path class="arrow" d="M204,90 L596,90"/>
 
-  <text class="key" x="500" y="186" text-anchor="middle">receipts and head</text>
-  <text class="key" x="500" y="202" text-anchor="middle">at session end</text>
+  <text class="key" x="500" y="186" text-anchor="middle">each receipt as written,</text>
+  <text class="key" x="500" y="202" text-anchor="middle">the head at session end</text>
   <path class="arrow" d="M204,212 L596,212"/>
 
   <text class="cap" x="500" y="292" text-anchor="middle">Wipe the agent's machine and the copy survives as of the last send. It is out of reach only</text>

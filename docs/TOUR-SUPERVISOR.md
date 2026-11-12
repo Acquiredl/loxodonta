@@ -136,11 +136,15 @@ Since ADR-0041 the same witness also reads a second record out of the
 writer's reach. `read_events` is the transcript reader's twin in
 shape: from the harness's own `tool_result` events, as a receiver kept
 them, it returns per session the dict `read_witness` returns, so
-`reconcile` and `classify` judge both records by one rule, and
+`classify` judges both records by one rule. At the receiver
+`pair_calls` pairs them, by the call's id where both name it and
+otherwise by `reconcile`'s count by tool (ADR-0046), and
 `watch_receiver` runs that reading over a receiver's folder (`scan
---receiver`, docs/RECEIVER.md section 7) with three words of its own:
-PENDING inside the settle window, SECOND-RECORD-ABSENT for receipts
-with no events, SECOND-RECORD-GAP for a counter with holes.
+--receiver`, docs/RECEIVER.md section 7) with four words of its own:
+PENDING inside the settle window, PENDING-OVERDUE when a call or a
+counter number older than the window is still unpaid there (`overdue`,
+ADR-0046 ruling 6), SECOND-RECORD-ABSENT for receipts with no events,
+SECOND-RECORD-GAP for a counter with holes.
 
 Two field findings calibrate the count (2026-08-29): the witness counts
 only tools the *wired matchers* cover (`hook_matchers` reads the
@@ -290,9 +294,11 @@ The exit ladder is a `max()`, worst wins: 1–4 the gravest verify exit
 a chain verify could not judge at all counts as 4, ADR-0037),
 5 a baseline event appends cannot explain, or a baseline that cannot be
 read or kept, 6 a *live* completeness
-alarm. Only live alarms raise the exit: an ended deficit is evidence,
-and a siren that never stops sounding trains the operator to ignore
-the band (the dogfood's lesson). The recorder notice never raises it —
+alarm. On the agent's machine only live alarms raise the exit: an ended
+deficit is evidence, and a siren that never stops sounding trains the
+operator to ignore the band (the dogfood's lesson). At the receiver a
+settled deficit, an absent or a gapped second record raises it too,
+until it is acknowledged there (ADR-0046). The recorder notice never raises it —
 drift is the operator's to resolve, deliberately.
 
 Two subtleties. Baseline events **stand**: the baseline keeps the head
@@ -350,9 +356,12 @@ and exit 0: the hook must stay quiet, not nag.
 **Entry addresses** follow git's rules: 4–64 lowercase hex, any
 unambiguous prefix resolves, an ambiguous one is refused with
 candidates named. `show` re-hashes the fetched entry against its
-address — recall's pointers are self-verifying, and the one hash
-recall ever computes is still not a verdict: a mismatch prints a
-warning that names the real judge. `search` reaches the whole repo's
+address — recall's pointers are self-verifying, and a hash recall
+computes is still not a verdict: a mismatch prints a
+warning that names the real judge. For a receipt that names its call
+and hashes its input, `show` also hashes the transcript's record of
+that call and says whether it matches, differs, or is not there,
+testimony from a file in the writer's reach (ADR-0047). `search` reaches the whole repo's
 memory (`--all`: the whole store), counts every match, and caps only
 what it shows — no silent caps. `timeline` renders the rows around one
 address: how the moment unfolded.

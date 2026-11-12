@@ -24,9 +24,9 @@ Where a line of a chain ends (SPEC section 1, #299): the recorder verifies by it
 
 Names: `NAMED_ESCAPES`, `STEERING_CATEGORIES`, `visible`.
 
-Original: `loxodonta.py`. Copies: `supervisor.py`.
+Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
 
-The recorder shows receipt text in report, explain and verify's messages, the supervisor on every recall surface, and both must make the same hidden characters visible (#295).
+The recorder shows receipt text in report, explain and verify's messages, the supervisor on every recall surface, and the receiver in the reason it gives for a line it refuses, and all must make the same hidden characters visible (#295).
 
 ### Which hook entries are the recorder's
 
@@ -110,19 +110,35 @@ The supervisor writes a package and the recorder, and the verifier cut from it, 
 
 ### Reading a sidecar
 
-Names: `read_log`, `sidecar_path`, `published_path`, `IS_A_FOLDER`, `NOT_REGULAR`, `open_regular`, `file_problem`, `KeyGivenTwice`, `object_with_each_key_once`, `NotStrictJson`, `not_json`, `finite_float`, `read_sidecar_records`.
+Names: `read_log`, `sidecar_path`, `published_path`, `IS_A_FOLDER`, `NOT_REGULAR`, `open_regular`, `file_problem`, `read_sidecar_records`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 Where each sidecar lives beside its chain, and how its lines are read: a line that is not a JSON object, past the digit or recursion limit, or not UTF-8, or that a strict parser refuses (a key given twice, NaN, Infinity or 1e999), reads as unreadable and never stops the reader, and so does a sidecar that is not a file, a folder or a pipe in its place. The recorder judges by it; the supervisor's scan and keeper report and schedule by it (#299, #331, #344, #364, #365).
 
+### A strict JSON reading
+
+Names: `KeyGivenTwice`, `object_with_each_key_once`, `NotStrictJson`, `not_json`, `finite_float`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
+
+A line a strict JSON parser refuses (a key given twice, NaN, Infinity or 1e999) is no row: the recorder and the supervisor read every sidecar line by it, and the receiver refuses a sidecar batch holding one, so the receiver keeps no row the recorder's `verify` would not read (#365, ADR-0045).
+
 ### What a sidecar row is
 
-Names: `ATTEMPT_KIND`, `CHAIN_KIND`, `ANCHOR_KIND`, `STAMP_KIND`, `HEAD_KIND`, `SIDECAR_KINDS`, `UNREADABLE_ROW`, `UNKNOWN_ROW`, `row_kind`, `is_chain_record`.
+Names: `ATTEMPT_KIND`, `CHAIN_KIND`, `HEAD_KIND`, `SIDECAR_KINDS`, `UNREADABLE_ROW`, `UNKNOWN_ROW`, `row_kind`, `is_chain_record`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 A row names its kind, a row with none reads as its sidecar's evidence, and a kind unknown there counts for nothing (ADR-0038). The recorder's judges and the supervisor's scan and keeper ask the one answer, so the scan never counts a proof, a token or a sent head that `verify` or `publish` would not, and every judge and scheduler skips an `attempt` row alike (#240, #344).
+
+### A sidecar's evidence kinds
+
+Names: `ANCHOR_KIND`, `STAMP_KIND`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
+
+The kind of a proof row and of a token row (ADR-0038): the recorder writes and judges them by it, the supervisor counts them by it, and the receiver takes a sidecar batch only of rows of that kind, or of none (ADR-0045 ruling 5).
 
 ### An anchor row's shape
 
@@ -140,21 +156,13 @@ Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 Whether a stamp row's reply says granted with a token after it, read offline and the token never parsed: `verify --stamps` calls a reply that does not STAMP-INVALID, `stamp` asks about its head again, and the supervisor's scan counts only a granted reply as a departure, so none of them counts a row the others would not (#366, #370). A shape and status reader, not proof replay: judging stays with verify.
 
-### Where the chain route left off
-
-Names: `chain_cursor`.
-
-Original: `loxodonta.py`. Copies: `supervisor.py`.
-
-The keeper runs the recorder's `publish --chain` only when the recorder's cursor for that remote is behind the chain's end, so both read the memo alike, and a memo neither can read leaves a note rather than a send from genesis (#263, #344).
-
 ### Naming a remote
 
 Names: `remote_id`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
-The recorder writes a fingerprint of the receiver's URL into the publish memo, and the supervisor's keeper compares against it to find where the chain route left off (#263).
+The recorder writes a fingerprint of the receiver's URL into the publish memo, and the supervisor's keeper compares against it to find whether the memo says that remote holds the chain's last entry (#263, ADR-0045).
 
 ### A URL the tools send to
 
@@ -180,6 +188,22 @@ Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 `install-hook --managed` writes the hook entries to this one file among the harness's managed settings, and the supervisor reads what is wired from the same file, so both name one path (ADR-0040).
 
+### What the environment may say
+
+Names: `MANAGED_READS`, `MANAGED_RUN`, `environment`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+A managed install writes `--managed` on the hook's and the digest's commands, and under it both read no variable but the ones the harness sets, so the store and the managed file they name are the built-in ones (ADR-0043).
+
+### Finding a helper program
+
+Names: `helper_path`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
+
+openssl, ssh-keygen, git, gh and claude run by the full path a walk of PATH finds, never from the working directory, in every file that runs one (ADR-0043 ruling 4).
+
 ### A chain batch's content type
 
 Names: `CHAIN_TYPE`.
@@ -187,6 +211,38 @@ Names: `CHAIN_TYPE`.
 Original: `loxodonta.py`. Copies: `receiver.py`.
 
 The recorder sends a batch of the chain under this content type, and the receiver takes a batch only under it (ADR-0031).
+
+### A sidecar batch's content type
+
+Names: `SIDECAR_TYPE`.
+
+Original: `loxodonta.py`. Copies: `receiver.py`.
+
+The recorder sends a chain's anchor and stamp rows under this content type, and the receiver keeps them beside its copy of the chain only under it (ADR-0045 ruling 5).
+
+### Canonical form
+
+Names: `canonical_bytes`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
+
+SPEC section 4's bytes, frozen across format versions (ADR-0036): the recorder hashes entries by them, the supervisor hashes a call's input by them to compare with a receipt's suffix (ADR-0047), and the receiver recomputes the hash of every line it is sent (ADR-0045 ruling 1).
+
+### What an entry is
+
+Names: `ENTRY_FIELDS`, `GENESIS_FIELDS`, `entry_hash`, `path_leaving_base`, `shape_problem`, `entry_of`.
+
+Original: `loxodonta.py`. Copies: `receiver.py`.
+
+The receiver keeps a line only when it is an entry: SPEC section 2's fields of their types, an n of 0 or more, and an entry_hash that recomputes from the line (ADR-0045 ruling 1). The recorder asks the same of a line of its own chain before it sends it, so it never sends a line the receiver refuses, and names the line it stopped at instead.
+
+### A receipt's suffix
+
+Names: `CALL_ID_CHARACTERS`, `CALL_ID_LONGEST`, `UNHASHED_INPUT`, `is_call_id`, `holds_fraction`, `input_form`, `split_suffix`, `listed_action`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+The hook writes the call's id and a hash of the call's input in SPEC section 4's canonical form at the end of its action line, and the supervisor reads that suffix, setting it aside to name the tool and, in `show`, hashing the transcript's record of the call by the same form to compare; both fold it out of the lines they list for a person (ADR-0047).
 
 ## Same name, not a twin
 
@@ -197,3 +253,4 @@ These names are defined in more than one file, and each file means its own thing
 | `main` | `loxodonta.py`, `supervisor.py`, `receiver.py` | Each file's own command line. |
 | `cmd_verify` | `loxodonta.py`, `supervisor.py` | The recorder's `verify` judges the chain at a path; the supervisor's finds the chain holding an entry address, then prints the recorder's verdict on it. |
 | `cmd_serve` | `supervisor.py`, `receiver.py` | The supervisor serves its dashboard and recall; the receiver serves the URL published chains are sent to. |
+| `MANAGED_VERB` | `loxodonta.py`, `supervisor.py` | The verb whose `--managed` sets the bit: the recorder's `hook`, the supervisor's `digest` (ADR-0043). |

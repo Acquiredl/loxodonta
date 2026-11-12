@@ -25,7 +25,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import LOXODONTA, SUPERVISOR, run  # noqa: E402
 
+from test_anchor import block_header, replayed_root  # noqa: E402
 from test_package_anchor import SESSION, SIDECAR, AnchoredStoreCase
+
+
+def manifest_header(case, folder):
+    """The header of the block the manifest's completed proof claims, as
+    hex: the rung is earned only with it (ADR-0044)."""
+    return block_header(replayed_root(
+        case.manifest_digest(folder), case.server.nonce, case.server.prefix,
+        case.server.suffix)).hex()
 
 SIGNATURE = "manifest.json.sig"
 PUBLIC_KEY = "manifest.json.pub"
@@ -167,7 +176,8 @@ class SignedPackageTest(AnchoredStoreCase):
         self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
         fingerprint = fingerprint_of(self.keyfile)
 
-        judged = self.verify_package(folder)
+        judged = self.verify_package(folder, "--block-header",
+                                     manifest_header(self, folder))
 
         out = judged.stdout
         self.assertEqual(judged.returncode, 0, out + judged.stderr)
@@ -267,7 +277,9 @@ class SignedPackageTest(AnchoredStoreCase):
                       str(folder / "manifest.json"), env=self.env)
         self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
 
+        header = manifest_header(self, folder)
         judged = run(LOXODONTA, "verify-package", str(folder),
+                     "--block-header", header,
                      env=self.bare_path(), cwd=str(self.work))
 
         out = judged.stdout
@@ -284,7 +296,7 @@ class SignedPackageTest(AnchoredStoreCase):
         self.assertIn("not judged", lines[-2])
         self.assertNotIn("Traceback", judged.stderr)
 
-        judged = self.verify_package(folder)
+        judged = self.verify_package(folder, "--block-header", header)
 
         self.assertTrue(judged.stdout.strip().splitlines()[-1].startswith(
             "SELF-CONSISTENT + ANCHORED + SIGNED (key: "), judged.stdout)

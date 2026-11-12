@@ -353,7 +353,13 @@ class PublishKeeperTest(ReceiverFixture):
         self.assertIn([json.loads(line)["entry_hash"] for line in intact],
                       batches, "the intact prefix landed, whole")
         self.assertEqual([row.get("kind") for row in memo_of(log)],
-                         ["chain"], "a chain row and no head row")
+                         ["chain", "attempt"], "a chain row and no head row")
+        # This fake answers as a webhook would, saying nothing of what it
+        # holds, so the send follows the memo and says so once, in a row
+        # that is no failed step (ADR-0045 ruling 4).
+        self.assertEqual((memo_of(log)[-1]["outcome"],
+                          memo_of(log)[-1]["note"]),
+                         ("sent", "the remote does not say what it holds"))
 
 
 class LeftReadingTest(ReceiverFixture):
@@ -813,6 +819,25 @@ class DashboardLeftTest(ReceiverFixture):
         self.assertIn("c.last_failed", tiles)
         self.assertIn("last left", tiles)
         self.assertIn("last failed", tiles)
+
+    def test_the_tile_and_the_drawer_say_when_entries_leave_as_written(self):
+        # ADR-0045 ruling 3: a chain whose entries leave as each is
+        # written carries `left.as_written`, and the page says so in the
+        # recorder's own words where it would say nothing left, or when
+        # something last left.
+        make_chain(self.root / "alpha" / "receipts", "sess-live")
+        url = self.serve()
+
+        page = self.get(url, "/")
+
+        tiles = page[page.index("function renderTiles"):
+                     page.index("function renderSpark")]
+        self.assertIn("c.left.as_written", tiles)
+        self.assertIn("AS_WRITTEN", tiles)
+        self.assertIn("left.as_written", page[page.index("const left = "
+                                                         "chain.left"):])
+        self.assertIn("entries leave as each is written, by the recorder's "
+                      "own note", page)
 
 
 class HeadlessKeeperTest(ReceiverFixture):

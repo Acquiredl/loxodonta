@@ -457,8 +457,14 @@ class HeadsTest(MetricsFixture):
             scrape.value("loxodonta_heads_unanchored"),
             sum(1 for c in chains if c["anchors"]["head"]
                 and not c["anchors"]["head"]["anchored"]))
-        self.assertEqual(scrape.value("loxodonta_heads_unanchored"), 2,
-                         "the bare chain and the published one")
+        # The scan gives verify no block header, so the anchored chain's
+        # block is claimed and nobody checked it: unanchored here, and
+        # counted on a gauge of its own (ADR-0044).
+        self.assertEqual(scrape.value("loxodonta_heads_unanchored"), 3,
+                         "the bare chain, the published one, and the one "
+                         "whose anchor only claims its block")
+        self.assertEqual(scrape.value("loxodonta_heads_anchor_claimed"), 1,
+                         "the anchored chain, its block not checked")
         self.assertEqual(
             scrape.value("loxodonta_heads_unpublished"),
             sum(1 for c in chains if c["head_published"] is False))
@@ -516,6 +522,43 @@ class HeadsTest(MetricsFixture):
         self.assertIsNotNone(report["published"]["note"])
         self.assertEqual(
             scrape.value("loxodonta_publishing_wired_nothing_sent"), 1)
+
+    def test_entries_that_leave_as_written_are_not_nothing_sent(self):
+        # ADR-0045 ruling 3: the recording command sends each entry and
+        # writes no chain row, so a live session at `full` has left
+        # something by the chain route; a failed send is the failure.
+        # The sends before it landed and wrote nothing, so the memo cannot
+        # say they left: the gauge reads 1 and its help says it counts
+        # what is written down, never that nothing left.
+        install_witness_hook(
+            self.witness, sessionend=True,
+            command="python loxodonta.py hook --publish-chain "
+                    "https://receipts.example.test/hook")
+        # The install's own record of when it wired that (ADR-0030): a
+        # chain written before it was never sent as written.
+        self.home.mkdir(parents=True, exist_ok=True)
+        (self.home / "coverage.json").write_text(json.dumps({"epochs": [
+            {"since": ago(600), "harness": "claude-code",
+             "profile": "custom"}]}), encoding="utf-8")
+        log = make_chain(self.root / "alpha" / "receipts", "sess-live")
+        self.serve(extra_env={"SUPERVISOR_SCAN_TTL_SECONDS": "0"})
+
+        _, _, live = self.scrape()
+        write_attempt_row(log, "publish-chain", "no answer within 1 seconds",
+                          when=ago(30), budget=1.0)
+        _, _, failed = self.scrape()
+
+        self.assertEqual(
+            live.value("loxodonta_publishing_wired_nothing_sent"), 0)
+        self.assertEqual(
+            failed.value("loxodonta_publishing_wired_nothing_sent"), 1)
+        said = failed.help["loxodonta_publishing_wired_nothing_sent"]
+        self.assertIn("nothing is written down as having left", said)
+        self.assertIn("entries that left before a failed send are not "
+                      "counted", said)
+        self.assertNotIn("nothing has left", said)
+        self.assertEqual(failed.value("loxodonta_last_attempt_failed",
+                                      step="publish-chain"), 1)
 
 
 class LastAttemptFailedTest(MetricsFixture):

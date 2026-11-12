@@ -81,10 +81,11 @@ TWINS = (
          "by it."),
     Twin("Escaping receipt text",
          ("NAMED_ESCAPES", "STEERING_CATEGORIES", "visible"),
-         ORIGINAL, SUPERVISOR,
+         ORIGINAL, BOTH,
          "The recorder shows receipt text in report, explain and verify's "
-         "messages, the supervisor on every recall surface, and both must "
-         "make the same hidden characters visible (#295)."),
+         "messages, the supervisor on every recall surface, and the "
+         "receiver in the reason it gives for a line it refuses, and all "
+         "must make the same hidden characters visible (#295)."),
     Twin("Which hook entries are the recorder's",
          ("RECORDER_NAMES", "DIGEST_NAMES", "WIRED_VERB", "command_words",
           "file_name", "is_interpreter", "owned_script",
@@ -149,8 +150,7 @@ TWINS = (
     Twin("Reading a sidecar",
          ("read_log", "sidecar_path", "published_path", "IS_A_FOLDER",
           "NOT_REGULAR", "open_regular", "file_problem",
-          "KeyGivenTwice", "object_with_each_key_once", "NotStrictJson",
-          "not_json", "finite_float", "read_sidecar_records"),
+          "read_sidecar_records"),
          ORIGINAL, SUPERVISOR,
          "Where each sidecar lives beside its chain, and how its lines "
          "are read: a line that is not a JSON object, past the digit or "
@@ -160,9 +160,17 @@ TWINS = (
          "file, a folder or a pipe in its place. The recorder judges by "
          "it; the supervisor's scan and keeper report and schedule by it "
          "(#299, #331, #344, #364, #365)."),
+    Twin("A strict JSON reading",
+         ("KeyGivenTwice", "object_with_each_key_once", "NotStrictJson",
+          "not_json", "finite_float"),
+         ORIGINAL, BOTH,
+         "A line a strict JSON parser refuses (a key given twice, NaN, "
+         "Infinity or 1e999) is no row: the recorder and the supervisor "
+         "read every sidecar line by it, and the receiver refuses a "
+         "sidecar batch holding one, so the receiver keeps no row the "
+         "recorder's `verify` would not read (#365, ADR-0045)."),
     Twin("What a sidecar row is",
-         ("ATTEMPT_KIND", "CHAIN_KIND", "ANCHOR_KIND", "STAMP_KIND",
-          "HEAD_KIND",
+         ("ATTEMPT_KIND", "CHAIN_KIND", "HEAD_KIND",
           "SIDECAR_KINDS", "UNREADABLE_ROW", "UNKNOWN_ROW", "row_kind",
           "is_chain_record"),
          ORIGINAL, SUPERVISOR,
@@ -173,6 +181,12 @@ TWINS = (
          "token or a sent head that `verify` or `publish` would not, and "
          "every judge and scheduler skips an `attempt` row alike (#240, "
          "#344)."),
+    Twin("A sidecar's evidence kinds", ("ANCHOR_KIND", "STAMP_KIND"),
+         ORIGINAL, BOTH,
+         "The kind of a proof row and of a token row (ADR-0038): the "
+         "recorder writes and judges them by it, the supervisor counts "
+         "them by it, and the receiver takes a sidecar batch only of "
+         "rows of that kind, or of none (ADR-0045 ruling 5)."),
     Twin("An anchor row's shape",
          ("JSON_TYPE_WORDS", "json_type", "anchor_row_problem"),
          ORIGINAL, SUPERVISOR,
@@ -193,16 +207,11 @@ TWINS = (
          "a departure, so none of them counts a row the others would not "
          "(#366, #370). A shape and status reader, not proof replay: "
          "judging stays with verify."),
-    Twin("Where the chain route left off", ("chain_cursor",),
-         ORIGINAL, SUPERVISOR,
-         "The keeper runs the recorder's `publish --chain` only when the "
-         "recorder's cursor for that remote is behind the chain's end, so "
-         "both read the memo alike, and a memo neither can read leaves a "
-         "note rather than a send from genesis (#263, #344)."),
     Twin("Naming a remote", ("remote_id",), ORIGINAL, SUPERVISOR,
          "The recorder writes a fingerprint of the receiver's URL into the "
          "publish memo, and the supervisor's keeper compares against it "
-         "to find where the chain route left off (#263)."),
+         "to find whether the memo says that remote holds the chain's "
+         "last entry (#263, ADR-0045)."),
     Twin("A URL the tools send to",
          ("PUBLISH_SCHEMES", "SHELL_HAZARDS", "publish_url"),
          ORIGINAL, SUPERVISOR,
@@ -219,9 +228,52 @@ TWINS = (
          "file among the harness's managed settings, and the supervisor "
          "reads what is wired from the same file, so both name one path "
          "(ADR-0040)."),
+    Twin("What the environment may say",
+         ("MANAGED_READS", "MANAGED_RUN", "environment"),
+         ORIGINAL, SUPERVISOR,
+         "A managed install writes `--managed` on the hook's and the "
+         "digest's commands, and under it both read no variable but the "
+         "ones the harness sets, so the store and the managed file they "
+         "name are the built-in ones (ADR-0043)."),
+    Twin("Finding a helper program", ("helper_path",), ORIGINAL, BOTH,
+         "openssl, ssh-keygen, git, gh and claude run by the full path a walk of PATH "
+         "finds, never from the working directory, in every file that "
+         "runs one (ADR-0043 ruling 4)."),
     Twin("A chain batch's content type", ("CHAIN_TYPE",), ORIGINAL, RECEIVER,
          "The recorder sends a batch of the chain under this content type, "
          "and the receiver takes a batch only under it (ADR-0031)."),
+    Twin("A sidecar batch's content type", ("SIDECAR_TYPE",), ORIGINAL,
+         RECEIVER,
+         "The recorder sends a chain's anchor and stamp rows under this "
+         "content type, and the receiver keeps them beside its copy of the "
+         "chain only under it (ADR-0045 ruling 5)."),
+    Twin("Canonical form", ("canonical_bytes",), ORIGINAL, BOTH,
+         "SPEC section 4's bytes, frozen across format versions "
+         "(ADR-0036): the recorder hashes entries by them, the supervisor "
+         "hashes a call's input by them to compare with a receipt's "
+         "suffix (ADR-0047), and the receiver recomputes the hash of "
+         "every line it is sent (ADR-0045 ruling 1)."),
+    Twin("What an entry is",
+         ("ENTRY_FIELDS", "GENESIS_FIELDS", "entry_hash",
+          "path_leaving_base", "shape_problem", "entry_of"),
+         ORIGINAL, RECEIVER,
+         "The receiver keeps a line only when it is an entry: SPEC "
+         "section 2's fields of their types, an n of 0 or more, and an "
+         "entry_hash that recomputes from the line (ADR-0045 ruling 1). "
+         "The recorder asks the same of a line of its own chain before it "
+         "sends it, so it never sends a line the receiver refuses, and "
+         "names the line it stopped at instead."),
+    Twin("A receipt's suffix",
+         ("CALL_ID_CHARACTERS", "CALL_ID_LONGEST",
+          "UNHASHED_INPUT", "is_call_id", "holds_fraction", "input_form",
+          "split_suffix", "listed_action"),
+         ORIGINAL, SUPERVISOR,
+         "The hook writes the call's id and a hash of the call's input in "
+         "SPEC section 4's canonical form at the end of its action line, "
+         "and the supervisor reads that suffix, setting it aside to name "
+         "the tool and, in `show`, hashing the transcript's record of the "
+         "call by the same form to compare; both fold it out of the lines "
+         "they list for a person (ADR-0047)."),
 )
 
 DIFFERENT = (
@@ -234,6 +286,9 @@ DIFFERENT = (
     Different("cmd_serve", ("supervisor.py", "receiver.py"),
               "The supervisor serves its dashboard and recall; the "
               "receiver serves the URL published chains are sent to."),
+    Different("MANAGED_VERB", ("loxodonta.py", "supervisor.py"),
+              "The verb whose `--managed` sets the bit: the recorder's "
+              "`hook`, the supervisor's `digest` (ADR-0043)."),
 )
 
 

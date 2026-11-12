@@ -238,7 +238,8 @@ class StrictRowTest(StoreCase):
         result = self.verify("--anchors", anchor_line(self.head))
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertTrue(result.stdout.startswith("ANCHORED: entries 0..1"),
+        self.assertTrue(result.stdout.startswith(
+            "ANCHOR-CLAIMED: entries 0..1"),
                         result.stdout)
 
 

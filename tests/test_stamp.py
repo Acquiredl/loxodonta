@@ -41,8 +41,8 @@ from types import SimpleNamespace
 # when the module runs alone (`python -m unittest tests.test_stamp`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import (LOXODONTA, StoreCase, isolated_env, run,  # noqa: E402
-                     temp_folder)
+from support import (LOXODONTA, StoreCase, clean_env, isolated_env,  # noqa: E402
+                     run, temp_folder)
 
 from test_anchor import (HOSTILE, HOSTILE_HEAD, SHOWN, SHOWN_HEAD,
                          FakeCalendar, FakeCalendarHandler,
@@ -538,6 +538,68 @@ class StampCommandTest(StoreCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("stamp not judged: openssl is not on PATH", result.stdout)
         self.assertRegex(result.stdout, r"(?m)^VALID$")
+
+    def plant_openssl(self, folder):
+        """A program named openssl in `folder` that is not openssl: on
+        Windows a copy of the system's where.exe, a real executable, so
+        Windows' own lookup would run it by a bare name; on POSIX a
+        script that exits 1. Either way, when verify runs it, verify
+        does not say openssl is missing."""
+        if sys.platform == "win32":
+            system = os.environ.get("SystemRoot", r"C:\Windows")
+            shutil.copyfile(os.path.join(system, "System32", "where.exe"),
+                            folder / "openssl.exe")
+        else:
+            script = folder / "openssl"
+            script.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            script.chmod(0o755)
+
+    def spellings(self, folder):
+        """The working folder under names other than its own: a symlink
+        on POSIX; a junction and the long-path form on Windows."""
+        linked = temp_folder(self) / "linked"
+        if sys.platform == "win32":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(linked),
+                            str(folder)], capture_output=True, check=True,
+                           timeout=30)
+            return [str(linked), "\\\\?\\" + str(folder)]
+        linked.symlink_to(folder, target_is_directory=True)
+        return [str(linked)]
+
+    def test_an_openssl_in_the_working_folder_is_never_run(self):
+        # ADR-0043 ruling 4: PATH names the working folder as ".", as an
+        # empty entry, by its full path and under other spellings, and a
+        # program named openssl sits there. It is not run: verify says
+        # what it says when there is no openssl, and exits 0.
+        self.stamp()
+        chain_file = self.workdir / "authority.pem"
+        chain_file.write_text("not read\n", encoding="utf-8")
+        self.plant_openssl(self.workdir)
+        path = os.pathsep.join([".", "", str(self.workdir),
+                                *self.spellings(self.workdir),
+                                str(temp_folder(self))])
+
+        result = self.verify("--authority-chain", str(chain_file),
+                             env=clean_env(PATH=path))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("stamp not judged: openssl is not on PATH", result.stdout)
+
+    def test_an_openssl_elsewhere_on_path_is_run(self):
+        # The same program in a folder PATH names that is not the
+        # working folder is the openssl verify runs, so the test above
+        # is not passing because the program never runs anywhere.
+        self.stamp()
+        chain_file = self.workdir / "authority.pem"
+        chain_file.write_text("not read\n", encoding="utf-8")
+        elsewhere = temp_folder(self)
+        self.plant_openssl(elsewhere)
+
+        result = self.verify("--authority-chain", str(chain_file),
+                             env=clean_env(PATH=str(elsewhere)))
+
+        self.assertNotIn("openssl is not on PATH", result.stdout)
+        self.assertIn("stamp", result.stdout)
 
     def test_verify_never_asks_the_authority(self):
         self.stamp()
@@ -1425,12 +1487,23 @@ class SessionEndStampTest(PublishBase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")   # quiet, every step of it
-        head, batch = self.receiver.received
+        # The chain's last entry goes first (ADR-0045 ruling 4); this
+        # fake says nothing of what it holds, so the chain follows from
+        # the memo, from genesis.
+        head, probe, batch, tokens, proofs = self.receiver.received
         self.assertEqual(head["content_type"], "application/json")
+        self.assertEqual(probe["content_type"], "application/x-ndjson")
         self.assertEqual(batch["content_type"], "application/x-ndjson")
+        # The token and then the proof follow their steps to the chain's
+        # URL (ADR-0045 ruling 5).
+        self.assertEqual([(sent["content_type"], sent["stamps_seen"],
+                           sent["calendar_asks"]) for sent in (tokens, proofs)],
+                         [("application/x-loxodonta-sidecar", 1, 0),
+                          ("application/x-loxodonta-sidecar", 1, 1)])
         # Neither publish waited on the stamp or on the calendar.
         self.assertEqual([(sent["stamps_seen"], sent["calendar_asks"])
-                          for sent in (head, batch)], [(0, 0), (0, 0)])
+                          for sent in (head, probe, batch)],
+                         [(0, 0), (0, 0), (0, 0)])
         # The batch ends in the seal, so the commitment came first, and
         # what the remote holds is the chain as it sits on disk.
         sealed = json.loads(batch["chain_tail"])
@@ -1440,9 +1513,10 @@ class SessionEndStampTest(PublishBase):
         # The query came after both publishes and before any digest.
         (query,) = self.authority.received
         self.assertEqual((query["publishes_seen"], query["calendar_asks"]),
-                         (2, 0))
-        # And the calendar last of all, of the same sealed head.
-        self.assertEqual(calendar.seen_before, [(2, 1)])
+                         (3, 0))
+        # And the calendar last of all, of the same sealed head, after
+        # the two publishes and the token's rows.
+        self.assertEqual(calendar.seen_before, [(4, 1)])
         self.assertEqual([d.hex() for d in calendar.submitted],
                          [sealed["entry_hash"]])
         self.assertEqual(self.body()["head"], sealed["entry_hash"])

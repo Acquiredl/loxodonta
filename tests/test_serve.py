@@ -30,9 +30,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
                      temp_folder)
 
-from test_supervisor import (FIXTURE_SESSION, assert_replaced_whole,
-                             chain_copy, hold, read_line_within,
-                             receiver_folder, unreadable_depth)
+from test_supervisor import (FIXTURE_RECEIPTS, FIXTURE_SESSION,
+                             assert_replaced_whole, chain_copy, hold,
+                             read_line_within, receiver_folder,
+                             unreadable_depth)
 
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
@@ -66,7 +67,8 @@ def ots_varint(n):
 def write_completed_anchor(log, height=850000):
     """A minimal but genuine OTS timestamp: one sha256 op, then a Bitcoin
     attestation — enough for `verify --anchors` to replay offline and
-    report ANCHORED, with no network and no calendar (ANCHORING.md §4)."""
+    report ANCHOR-CLAIMED, with no network and no calendar (ANCHORING.md
+    §4)."""
     # Both ends of every pipe in this file pinned to UTF-8 (PYTHONIOENCODING
     # for the child, encoding= for the parent) — `text=True` alone decodes
     # with the locale codec, cp1252 on Windows, and disagrees with a
@@ -934,6 +936,29 @@ class ServeTest(ServerFixture):
         served.pop("scanned"), printed.pop("scanned")
         self.assertEqual(served, printed)
 
+    def test_a_claimed_anchor_is_served_as_claimed_never_anchored(self):
+        # The scan gives verify no block header, so a completed proof is
+        # a block nobody checked: the chain the page reads is claimed and
+        # not anchored, with verify's ANCHOR-CLAIMED line as its claim
+        # (ADR-0044 ruling 4).
+        claimed = make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        write_completed_anchor(claimed)
+        self.serve()
+
+        report = json.loads(self.get("/api/status")[2])
+
+        (chain,) = [c for repo in report["repos"] for s in repo["sessions"]
+                    for c in s["chains"]]
+        self.assertTrue(chain["claimed"], chain["detail"])
+        self.assertFalse(chain["anchored"], chain["detail"])
+        self.assertEqual(chain["anchors"]["anchored"], [])
+        self.assertEqual(chain["anchors"]["claimed"],
+                         [{"upto": 2, "height": 850000}])
+        self.assertTrue(any(line.startswith("ANCHOR-CLAIMED: entries 0..2: ")
+                            for line in chain["detail"]), chain["detail"])
+        self.assertFalse(any(line.startswith("ANCHORED")
+                             for line in chain["detail"]), chain["detail"])
+
     def test_front_page_is_inline_html_with_no_outside_dependencies(self):
         self.serve()
 
@@ -952,14 +977,16 @@ class ServeTest(ServerFixture):
             "http://www.w3.org/2000/svg", ""), "no external references")
 
     def test_front_page_renders_tiers_as_distinct_claims(self):
-        # The strings the band is built from: VALID and ANCHORED are
-        # different claims, the exit-3 tier reads gravest, and superseded
-        # damage is quiet evidence rather than a live alarm.
+        # The strings the band is built from: VALID, ANCHOR-CLAIMED and
+        # ANCHORED are different claims, the exit-3 tier reads gravest,
+        # and superseded damage is quiet evidence rather than a live
+        # alarm.
         self.serve()
 
         _, _, page = self.get("/")
 
         self.assertIn("ANCHORED", page)
+        self.assertIn('claimed: () => "ANCHOR-CLAIMED"', page)
         self.assertIn("VALID", page)
         self.assertIn("not the recorded history", page)
         self.assertIn("superseded", page)
@@ -1389,7 +1416,7 @@ class RecallTest(ServerFixture):
         self.assertIn("what was attempted", report["testimony"])
         (story,) = report["sessions"]
         self.assertEqual(story["entries"], 3, "the readable receipts remain")
-        for verdict_word in ("VALID", "BROKEN", "ANCHORED"):
+        for verdict_word in ("VALID", "BROKEN", "ANCHORED", "ANCHOR-CLAIMED"):
             self.assertNotIn(verdict_word, body)
 
 
@@ -1435,7 +1462,7 @@ class ActivityTest(ServerFixture):
 
         self.assertIn("testimony", report)
         blob = json.dumps(report)
-        for verdict in ("VALID", "BROKEN", "ANCHORED"):
+        for verdict in ("VALID", "BROKEN", "ANCHORED", "ANCHOR-CLAIMED"):
             self.assertNotIn(verdict, blob,
                              "activity counts what was attempted, "
                              "never what verify decided")
@@ -1544,6 +1571,21 @@ class SearchTest(ServerFixture):
         self.assertEqual({h["repo"] for h in both["hits"]},
                          {"alpha", "beta"})
 
+    def test_a_hit_keeps_the_line_whole_and_lists_it_folded(self):
+        # ADR-0047: the JSON keeps the line whole; `listed` is what the
+        # page shows, the suffix folded.
+        alpha = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        log_entry(alpha, "Bash: deploy the albatross [call=toolu_1 "
+                         "input=unhashed]")
+        self.serve()
+
+        (hit,) = self.search(q="albatross")["hits"]
+
+        self.assertEqual(
+            (hit["action"], hit["listed"]),
+            ("Bash: deploy the albatross [call=toolu_1 input=unhashed]",
+             "Bash: deploy the albatross"))
+
     def test_search_is_case_insensitive(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         log_entry(log, "Write: Notes.md")
@@ -1584,7 +1626,7 @@ class SearchTest(ServerFixture):
 
         report = json.loads(body)
         self.assertIn("what was attempted", report["testimony"])
-        for verdict_word in ("VALID", "BROKEN", "ANCHORED"):
+        for verdict_word in ("VALID", "BROKEN", "ANCHORED", "ANCHOR-CLAIMED"):
             self.assertNotIn(verdict_word, body)
 
     def test_front_page_carries_the_search_box(self):
@@ -1680,6 +1722,33 @@ class ReceiverServeTest(ServerFixture):
         self.assertTrue(os.path.isfile(shelf / "daybook.json"))
         self.assertTrue(os.path.isfile(shelf / "baseline.json"))
         self.assertFalse(os.path.exists(self.root / ".supervisor-daybook.json"))
+
+    def test_a_finding_no_one_has_accepted_has_its_own_strip_words(self):
+        # ADR-0046 ruling 2: a settled deficit at the receiver raises the
+        # exit, and the strip says what it is, not a change the baseline
+        # saw nor a live session gone quiet. The strip is drawn by the
+        # page's script, so what is pinned is the field it reads in the
+        # status and the branch in the page that reads it.
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 6)
+        self.assertEqual(served["baseline"]["events"], [])
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["raises"]),
+                         ("ENDED-DEFICIT", True))
+        self.assertIn("sessions.filter(s => s.raises)", page)
+        self.assertIn("A FINDING NO ONE HAS ACCEPTED", page)
+        # A session still arriving with a call overdue is not settled,
+        # and the strip has words for it too (ADR-0046 ruling 6).
+        self.assertIn("CALLS OVERDUE AT THE RECEIVER", page)
+        self.assertIn('s.state === "PENDING-OVERDUE"', page)
+        self.assertIn("acknowledged here with supervisor acknowledge "
+                      "--receiver DIR", page)
 
     def test_the_startup_line_says_no_keeper_runs_at_the_far_end(self):
         # #487 item 12.

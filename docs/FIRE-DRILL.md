@@ -53,7 +53,7 @@ Once per drill session, walk through:
    non-ASCII text (em-dashes were the field's lesson). Browser and CLI
    must hash the same bytes.
 3. **Tier rendering** — on the status band, confirm the drill has not
-   blurred the claims: `VALID` and `ANCHORED` read as different claims,
+   blurred the claims: `VALID` and `ANCHOR-CLAIMED` read as different claims,
    the exit-3 tier ("not the recorded history") reads gravest, and a
    superseded torn tail sits quiet while fresh damage shouts.
 4. **The tripwire** (optional, uses a scratch root): regenerate a scratch

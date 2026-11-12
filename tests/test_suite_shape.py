@@ -788,6 +788,8 @@ ALLOWED_OPENS = {
         1, "the null device, a sink for a reader that has gone"),
     ("loxodonta.py", "post_for_reply"): (
         1, "a URL, held to http or https by every caller"),
+    ("loxodonta.py", "post_batch"): (
+        1, "a URL, held to http or https by every caller"),
     ("loxodonta.py", "calendar_request"): (
         1, "a URL held to http or https before it is asked (#414)"),
     ("loxodonta.py", "cmd_verify_package"): (
@@ -828,7 +830,8 @@ ALLOWED_OPENS = {
     ("receiver.py", "current_token"): (1, RECEIVER_DATA),
     ("receiver.py", "ends_mid_line"): (1, RECEIVER_DATA),
     ("receiver.py", "append_durably"): (1, RECEIVER_DATA),
-    ("receiver.py", "known_pairs"): (1, RECEIVER_DATA),
+    ("receiver.py", "held_in"): (1, RECEIVER_DATA),
+    ("receiver.py", "known_lines"): (1, RECEIVER_DATA),
 }
 
 

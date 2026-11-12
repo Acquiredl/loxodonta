@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.19.0"
+TOOL_VERSION = "0.20.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -789,21 +789,27 @@ def headers_by_root(headers):
     return {header_root(header): header for header in headers or ()}
 
 
-def attestation_words(subject, height, root, headers, used):
+def attestation_words(prefix, subject, height, root, headers, used):
     """What a completed proof shows about `subject`, said no further than
     it was checked. Without a header holding its root, the attestation's
-    height is its own claim; with one, the entries existed by the block
-    that header is, named by its hash. `used` collects the roots a header
-    matched, so the headers that matched nothing can be named after."""
+    height is its own claim and the line's word is ANCHOR-CLAIMED; with
+    one, the entries existed by the block that header is, named by its
+    hash, and only then is the word ANCHORED. A writer can end a proof in
+    any height it likes at no cost, so the word that says a block holds
+    the root is kept for a block somebody compared. `prefix` comes before
+    the word on the line. `used` collects the roots a header matched, so
+    the headers that matched nothing can be named after."""
     shown = root[::-1].hex()
     header = headers.get(root)
     if header is None:
-        return (f"{subject}: the attestation claims Bitcoin block {height}, "
+        return (f"{prefix}ANCHOR-CLAIMED: {subject}: the attestation claims "
+                f"Bitcoin block {height}, "
                 "and the block was not checked; that block's merkle root "
                 f"must read {shown}, which --block-header with its header "
                 "checks")
     used.add(root)
-    return (f"{subject} existed by the block whose header hashes to "
+    return (f"{prefix}ANCHORED: {subject} existed by the block whose header "
+            "hashes to "
             f"{header_hash(header)}, whose merkle root {shown} is the one "
             "the proof replays to; the attestation calls it Bitcoin block "
             f"{height}, which is your header source's word, and the hash is "
@@ -1179,8 +1185,9 @@ def check_anchors(log, entries, headers, used, packaged=False):
         place = row_place(number, name)
         if kind == "bitcoin":
             height, root = detail
-            subject = f"ANCHORED: entries 0..{hash_to_n[record['head']]}"
-            print(attestation_words(subject, height, root, headers, used))
+            subject = f"entries 0..{hash_to_n[record['head']]}"
+            print(attestation_words("", subject, height, root, headers,
+                                    used))
         elif kind == "pending":
             if (record["head"], record.get("calendar")) in completed:
                 continue  # this submission's own upgraded record supersedes it
@@ -1365,6 +1372,38 @@ STAMP_NO_ATTIME = ("the authority's certificate has expired, and this "
                    "openssl cannot judge a token as of the time it states")
 
 
+def helper_path(name):
+    """The full path of the helper program `name` (openssl, ssh-keygen,
+    git, gh, claude), found by walking PATH: only entries that are
+    absolute paths, never an empty one, a relative one or one that is
+    the working directory under any spelling, so a file of that name in
+    the folder a check is run from is never the program that runs. On
+    Windows, where a bare name is looked for in the working directory
+    before PATH, an entry with no drive letter or server is read against
+    the working directory's drive, so it counts as relative there; the
+    names tried are `name.exe` and `name.com`, never a batch file, which
+    would run through cmd.exe. Raises FileNotFoundError when none is
+    found, as running an absent program does, so a missing helper is
+    said as it always was."""
+    windows = sys.platform == "win32"
+    endings = (".exe", ".com") if windows else ("",)
+    for folder in os.get_exec_path():
+        absolute = os.path.isabs(folder) and (
+            not windows or os.path.splitdrive(folder)[0] != "")
+        if not absolute:
+            continue
+        try:
+            if os.path.samefile(folder, os.getcwd()):
+                continue
+        except OSError:
+            continue  # an entry that cannot be compared is not trusted
+        for ending in endings:
+            found = os.path.join(folder, name + ending)
+            if os.path.isfile(found) and os.access(found, os.X_OK):
+                return found
+    raise FileNotFoundError(errno.ENOENT, "not found on PATH", name)
+
+
 def openssl_verify(head, token, chain_file, *more):
     """`openssl ts -verify` on one token file: `-in` reads the whole
     TimeStampResp the sidecar keeps; `-digest` is the head, the sha256
@@ -1372,7 +1411,7 @@ def openssl_verify(head, token, chain_file, *more):
     operator saved. `more` is `-attime` and a moment, when the question
     is about some other moment than now."""
     return subprocess.run(
-        ["openssl", "ts", "-verify", "-digest", head, "-sha256",
+        [helper_path("openssl"), "ts", "-verify", "-digest", head, "-sha256",
          "-in", token, "-CAfile", chain_file, *more],
         capture_output=True, encoding="utf-8", errors="replace")
 
@@ -1387,8 +1426,8 @@ def token_time(token):
     set a `Time stamp:` line of the writer's own ahead of the
     authority's (#264). With it, a second such line is signed or breaks
     the signature, so two of them is a time nobody can read."""
-    shown = subprocess.run(["openssl", "ts", "-reply", "-in", token,
-                            "-token_out", "-text"],
+    shown = subprocess.run([helper_path("openssl"), "ts", "-reply", "-in",
+                            token, "-token_out", "-text"],
                            capture_output=True, encoding="utf-8",
                            errors="replace")
     stated = [line.partition(":")[2] for line in shown.stdout.splitlines()
@@ -1414,8 +1453,9 @@ def token_time(token):
 def takes_attime():
     """Whether this openssl can judge a token as of a given moment: its
     `ts -help` lists `-attime` when `ts -verify` takes it."""
-    shown = subprocess.run(["openssl", "ts", "-help"], capture_output=True,
-                           encoding="utf-8", errors="replace")
+    shown = subprocess.run([helper_path("openssl"), "ts", "-help"],
+                           capture_output=True, encoding="utf-8",
+                           errors="replace")
     return "-attime" in shown.stdout + shown.stderr
 
 
@@ -2264,7 +2304,7 @@ def judge_manifest_anchor(folder, headers, used):
                     pending.append(record)
                     continue
                 _, block, root = verdict
-                print(attestation_words("seal anchor: ANCHORED: the manifest",
+                print(attestation_words("seal anchor: ", "the manifest",
                                         block, root, headers, used))
                 header = headers.get(root)
                 claimed.append((block, header_hash(header) if header else None))
@@ -2294,7 +2334,7 @@ def judge_manifest_anchor(folder, headers, used):
                       "manifest.json>` submits the manifest again")
         print(f"seal anchor: ANCHOR-PENDING: the manifest was submitted "
               f"{ts} via {calendar} — {advice}; the rung is not earned until "
-              "the proof completes")
+              "the proof completes and a block header checks its block")
     checked = [c for c in claimed if c[1] is not None]
     height, block = min(checked or claimed, key=lambda c: c[0],
                         default=(None, None))
@@ -2412,7 +2452,7 @@ def key_fingerprint(public_key):
     it (`ssh-keygen -lf`), or None when the file is not a key it reads.
     The fingerprint is the key's identity (ADR-0008 ruling 6); the
     comment ssh-keygen prints beside it is a name, and stays unread."""
-    listed = subprocess.run(["ssh-keygen", "-lf", public_key],
+    listed = subprocess.run([helper_path("ssh-keygen"), "-lf", public_key],
                             capture_output=True, encoding="utf-8",
                             errors="replace")
     words = listed.stdout.split()
@@ -2463,7 +2503,7 @@ def judge_manifest_signature(folder):
                 f.write(f"{SIGNATURE_PRINCIPAL} {key}\n")
             with open_regular(manifest) as shipped:
                 verified = subprocess.run(
-                    ["ssh-keygen", "-Y", "verify", "-f", allowed,
+                    [helper_path("ssh-keygen"), "-Y", "verify", "-f", allowed,
                      "-I", SIGNATURE_PRINCIPAL, "-n", SIGNATURE_NAMESPACE,
                      "-s", signature],
                     stdin=shipped, capture_output=True, encoding="utf-8",
@@ -2604,8 +2644,9 @@ def ceiling_lines(manifest, earned):
                     f"{block} lets you check against a second source")
     elif height is not None:
         # The proof completes to an attestation, and nothing checked the
-        # block it names (ruling 3 on #299): a claim, said as one.
-        rungs += " + ANCHORED"
+        # block it names (ruling 3 on #299): a claim, said as one, and no
+        # rung, since a regenerated package names any block it likes at
+        # no cost.
         given += (f", and the manifest's anchor claims Bitcoin block "
                   f"{height}, a block not checked here")
         trusted += (f", and it existed by Bitcoin block {height} if the "
@@ -2639,16 +2680,23 @@ def ceiling_lines(manifest, earned):
     else:
         unsaid.append("which key packed it")
     why = limit = ""
+    alike = ("a regeneration re-signed with that key" if key
+             else "a wholesale regeneration")
     if height is None:
         if not seals:
             why = ", since no seal is declared"
         elif "anchor" in seals:
-            why = " until its manifest anchor completes"
+            why = (" until its manifest anchor completes and a block header "
+                   "checks its block")
         else:
             why = ", since no anchor is declared"
-        alike = ("a regeneration re-signed with that key" if key
-                 else "a wholesale regeneration")
         limit = f"; indistinguishable from {alike}{why}"
+    elif block is None:
+        # A claimed block is what a regeneration earns for nothing
+        # (ADR-0044), so the verdict keeps the unsealed limit; the trust
+        # line already says how to check the block, and keeps its words.
+        limit = (f"; indistinguishable from {alike} until a block header "
+                 "checks its manifest anchor's block")
     for note in earned["unjudged"]:
         limit += f"; {note}"
     unjudged = "".join(f" {n[0].upper()}{n[1:]}." for n in earned["unjudged"])
@@ -2885,7 +2933,7 @@ def checkout_commit(home):
     to fetch a newer one."""
     try:
         asked = subprocess.run(
-            ["git", "-C", home, "rev-parse", "--short", "HEAD"],
+            [helper_path("git"), "-C", home, "rev-parse", "--short", "HEAD"],
             # Never a pipe on stderr: a program git starts inherits it,
             # and on Windows the timeout then waits for that program.
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

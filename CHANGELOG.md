@@ -10,6 +10,40 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-12
+
+### Added
+
+- `install-hook --managed --matcher PATTERN` narrows the recorder's matcher in the managed file. Without it a managed install wires `*`, and a matcher narrowed in the operator's own settings file is named and not carried (ADR-0043).
+- A hook receipt ends with `[call=<id> input sha256=<hex> bytes=<n>]`: the harness's id for the call and a hash of its whole input, SPEC v0.1.6. `supervisor show` says whether the transcript's record of that call matches; listings fold the suffix (ADR-0047).
+- At `full`, each entry leaves as it is written: the recording command carries the chain's URL, and the hook posts the lines it appended, from memory, within one second, quietly, after the lock is let go (ADR-0045).
+- The receiver keeps a chain's line only when it is an entry, its hash recomputed, refuses a hole with 409, and answers each batch with `held_n` and `connects`, true only when everything down to the genesis is held (ADR-0045).
+- A chain's anchor and stamp rows travel to its URL, and the receiver keeps them beside its copy, where `verify --anchors` and `--stamps` read them; a send that fails is an attempt row, step `publish-rows` (ADR-0045).
+- `supervisor acknowledge --receiver DIR --session SESSION STATE` accepts a settled finding at the receiver with the counts the scan reports, refused when the session is not in that state; it raises again if its counts change (ADR-0046).
+
+### Changed
+
+- The README is rebuilt short, with two new diagrams and a new recording; its longer sections moved unchanged to `docs/HOW-IT-WORKS.md`, and three diagrams show the current demo head.
+- A managed install writes `--managed` on the hook's and the digest's commands. Under it they read no environment variable but `CLAUDE_PROJECT_DIR`, and the hook sends through no proxy. The first managed install after this rewrites the managed file once (ADR-0043).
+- `docs/CLAIMS.md`, `docs/RECEIVER.md`, `docs/TOPOLOGY.md` and `README.md` agree with each other and with the code at v0.19.0: the count at the receiver is built and not a promise, and limits they left unsaid are stated.
+- `verify --anchors` and `verify-package` print `ANCHORED` only for a block a given `--block-header` checked; a block nobody checked is `ANCHOR-CLAIMED` and earns a package no rung. A script reading `ANCHORED` to mean a completed proof now reads two words (ADR-0044).
+- The supervisor shows and counts a claimed block as `ANCHOR-CLAIMED`, with a `claimed` field per chain and the gauge `loxodonta_heads_anchor_claimed`; `loxodonta_heads_unanchored` now counts heads no checked block covers (ADR-0044).
+- A supervisor older than this recorder reads a receipt whose tool is named bare, with the suffix after it, as a tool of its own: upgrade the supervisor first, the receiver's included (ADR-0047).
+- A recorder older than this receiver reads its 409 as a failed send: upgrade the recorder with the receiver. Re-run `install-hook` at `full` to put the chain's URL on the recording command (ADR-0045).
+- Each send goes on from the receiver's answer, the memo deciding nothing: the recording call and the session end ask every time, find a gap by halving, and a step cut short is taken up by the next (ADR-0045).
+- Within its ripeness test, the keeper sends a chain written to since its last turn, one whose memo does not show the end held, or one whose last send failed (ADR-0045).
+- A chain row is written only for a batch the receiver appended to; the chain's attempt rows name their remote by fingerprint, and `publish --chain` writes one every time (ADR-0045).
+- `supervisor scan --receiver DIR` exits 6 for `ENDED-DEFICIT`, `SECOND-RECORD-ABSENT` and `SECOND-RECORD-GAP`, at every scan, until each is acknowledged there: a receiver's scan that exited 0 over old findings now exits 6 (ADR-0046).
+- A session still arriving whose call was reported over the settle window ago with no receipt, or whose counter has a hole that old, reads `PENDING-OVERDUE` and exits 6; it cannot be acknowledged (ADR-0046).
+- Where the harness's event and the receipt both name the call, the reading at the receiver pairs them by its id and names each call with no receipt; `paired_by` says which rule judged the session (ADR-0046).
+- `SUPERVISOR_SETTLE_SECONDS` defaults to one hour, where it was seven, and the docs say the on-machine witness catches faults while the receiver judges whether anything is missing (ADR-0046).
+
+### Fixed
+
+- `openssl`, `ssh-keygen`, `git`, `gh` and `explain`'s default `claude` run by the full path a walk of `PATH` finds, never from the working folder, so a file of that name where `verify` runs is never the program run (ADR-0043).
+- `hook` and `digest` refuse an abbreviated flag with exit 64, so `--manag` is never taken by the parser for `--managed` while the run reads the environment as an unmanaged one (ADR-0043).
+- A file the hook cannot fingerprint no longer loses the receipt: it is appended without that reference, its line says `(1 not fingerprinted)`, a warning names the file, and the hook exits 0 (ADR-0047).
+
 ## [0.19.0] - 2026-10-25
 
 ### Added
@@ -500,7 +534,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.19.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.20.0...dev
+[0.20.0]: https://github.com/Acquiredl/loxodonta/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/Acquiredl/loxodonta/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Acquiredl/loxodonta/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Acquiredl/loxodonta/compare/v0.16.0...v0.17.0

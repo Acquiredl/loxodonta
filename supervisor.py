@@ -79,7 +79,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-TOOL_VERSION = "0.19.0"
+TOOL_VERSION = "0.20.0"
 FORMAT_VERSION = "0.1"
 
 # Who wrote an entry, read off the actor field. The harness actors are
@@ -110,13 +110,35 @@ EX_SOFTWARE = 70  # the recorder itself failed
 EX_TEMPFAIL = 75  # another writer holds the chain's lock
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+MANAGED_READS = ("CLAUDE_PROJECT_DIR",)
+MANAGED_VERB = "digest"  # the recorder's is "hook"
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+MANAGED_RUN = (sys.argv[1:2] == [MANAGED_VERB]
+               and "--managed" in sys.argv[2:])
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def environment(name, default=None):
+    """The environment variable `name`, or `default` when it is unset,
+    or when this run's command carries `--managed` and `name` is not one
+    the harness sets (MANAGED_READS). Every read of the environment
+    goes through here but two: the check that the harness's own
+    telemetry variables still match the pin (note_second_record_cut),
+    which is a reading of the environment as it stands, and the
+    verifier's walk of PATH for a helper, which the hook never runs."""
+    if MANAGED_RUN and name not in MANAGED_READS:
+        return default
+    return os.environ.get(name, default)
+
+
 def env_number(name, default, kind=int):
     """The number in environment variable `name`, read as `kind` (int
     or float), or `default` when it is unset. A value that is not such a
     number, or is negative or infinite, is refused by name: one line on
     stderr and exit 64, at import and so before any verb runs, never a
     traceback (#487)."""
-    raw = os.environ.get(name)
+    raw = environment(name)
     if raw is None:
         return default
     try:
@@ -399,7 +421,8 @@ def verify(log):
 # The words verify sets its exit by, gravest first, in the order its
 # exit ladder takes them (SPEC §6: 1 > 3 > 5 > 2; the refusal, 4, is
 # printed beside HEAD-MISMATCH alone, which outranks it). Every other line
-# (ANCHORED, ANCHOR-PENDING, NO-ANCHORS, a file's state) moves no exit
+# (ANCHORED, ANCHOR-CLAIMED, ANCHOR-PENDING, NO-ANCHORS, a file's state)
+# moves no exit
 # and is never the word, whatever order the sidecar put it in (#496).
 VERDICT_RANKS = (("BROKEN",),
                  ("HEAD-MISMATCH", "ANCHOR-MISMATCH", "ANCHOR-INVALID",
@@ -1110,23 +1133,30 @@ def fortnight(days, now):
 # knob is the test suite's clock handle.
 UPGRADE_EVERY_SECONDS = env_number("SUPERVISOR_UPGRADE_EVERY_SECONDS", 3600)
 
-# verify's ANCHORED line as the scan meets it: the block an attestation
-# claims, not checked (ruling 3 on #299), since the scan runs verify
-# without --block-header and so never meets the checked sentence. The
+# verify's two lines for a completed proof, as the recorder's
+# `attestation_words` writes them: ANCHOR-CLAIMED, the block an
+# attestation claims and nobody checked (ruling 3 on #299), and
+# ANCHORED, the block a given header holds the root of. The two are kept
+# apart (ADR-0044): the scan runs verify without --block-header, so it
+# meets the claimed sentence and never the checked one, and a chain it
+# reads is ANCHOR-CLAIMED until something here can check a block. The
 # height is the attestation's word, which is all the panel shows it as.
-# The line is matched whole, word for word as the recorder's
-# `attestation_words` writes it (#349): a line that only starts the same
-# way is not the recorder's verdict, whatever it says after, so a
-# sidecar row whose text reached verify's output as a line of its own
-# could never read as an anchor. A change to that sentence changes the
-# pattern here, and the scan's anchor tests fail until it does. If the
-# scan ever passes --block-header, add the checked sentence beside it.
-ANCHORED_LINES = (
-    re.compile(r"ANCHORED: entries 0\.\.(\d+): the attestation claims "
-               r"Bitcoin block (\d+), and the block was not checked; that "
-               r"block's merkle root must read [0-9a-f]{64}, which "
-               r"--block-header with its header checks"),
-)
+# Each line is matched whole, word for word (#349): a line that only
+# starts the same way is not the recorder's verdict, whatever it says
+# after, so a sidecar row whose text reached verify's output as a line
+# of its own could never read as an anchor. A change to either sentence
+# changes its pattern here, and the scan's anchor tests fail until it
+# does.
+CLAIMED_LINE = re.compile(
+    r"ANCHOR-CLAIMED: entries 0\.\.(\d+): the attestation claims Bitcoin "
+    r"block (\d+), and the block was not checked; that block's merkle root "
+    r"must read [0-9a-f]{64}, which --block-header with its header checks")
+CHECKED_LINE = re.compile(
+    r"ANCHORED: entries 0\.\.(\d+) existed by the block whose header hashes "
+    r"to [0-9a-f]{64}, whose merkle root [0-9a-f]{64} is the one the proof "
+    r"replays to; the attestation calls it Bitcoin block (\d+), which is "
+    r"your header source's word, and the hash is what a second source can "
+    r"confirm")
 # verify's pending line, whole: the time and the calendar are the row's,
 # printed escaped, so neither holds a space an honest row would write,
 # or verify's words for a row that records neither (UNRECORDED).
@@ -1139,13 +1169,15 @@ PENDING_LINE = re.compile(
     r"cannot complete it; `loxodonta anchor --force` submits the head again)")
 
 
-def anchored_span(line):
-    """(entries up to, block height) when `line` is one of the ANCHORED
-    lines above, whole and word for word; None for any other line."""
-    for pattern in ANCHORED_LINES:
+def anchor_span(line):
+    """("anchored" or "claimed", entries up to, block height) when `line`
+    is one of the two lines above, whole and word for word; None for any
+    other line."""
+    for kind, pattern in (("anchored", CHECKED_LINE),
+                          ("claimed", CLAIMED_LINE)):
         found = pattern.fullmatch(line)
         if found:
-            return int(found.group(1)), int(found.group(2))
+            return kind, int(found.group(1)), int(found.group(2))
     return None
 
 
@@ -1288,7 +1320,7 @@ def marker_profile(witness=None):
 def codex_hooks_file():
     """Where Codex reads user-level hooks, by the recorder's rule:
     $CODEX_HOME/hooks.json, default ~/.codex/hooks.json."""
-    home = (os.environ.get("CODEX_HOME")
+    home = (environment("CODEX_HOME")
             or os.path.join(os.path.expanduser("~"), ".codex"))
     return Path(home) / "hooks.json"
 
@@ -1886,56 +1918,69 @@ def remote_id(url):
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
 
-# The keeper sends the chain only when this cursor, the recorder's own,
-# is behind the chain's end. For scheduling only: the memo is
-# writer-reachable and proves nothing.
-# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-def chain_cursor(log, url):
-    """The last entry number the remote at `url` acknowledged, from the
-    memo's chain rows that name it (#263); -1 when none does, so the
-    send starts at genesis. A row that names no remote predates remote
-    ids and counts for none: that chain goes once more from genesis, and
-    the receiver drops each line as an exact duplicate. A row of any
-    other kind, a head, a note or a kind unknown here, counts for none
-    either (ADR-0038). A torn memo line is read past (a resend the
-    receiver drops, never a stuck keeper), and so is a line past the
-    digit or recursion limit, which no reader here takes apart either;
-    a memo that cannot be read at all is raised, not guessed at, since
-    -1 would send the whole chain again at every session end. The two
-    differ on purpose (#344): a line past a limit is still text in the
-    memo's format, one line this parser declines, while a byte that is
-    not UTF-8 means the file is not text in that format at all, so the
-    memo holding it is the unreadable one, as it was before #299."""
-    try:
-        # A folder or a pipe where the memo belongs (#364) is a memo
-        # that cannot be read, raised as such, and never waited on.
-        lines = read_log(published_path(log))
-    except FileNotFoundError:
-        return -1
-    mine = remote_id(url)
-    cursor = -1
-    for line in lines:
-        # A byte that is not UTF-8 arrives from `read_log` as a lone
-        # surrogate. The memo holding it cannot be read, and is raised
-        # as such (UnicodeEncodeError is a ValueError), as it was before
-        # `read_log` read such bytes at all (#299).
-        line.encode("utf-8")
-        try:
-            # Read as every sidecar row is read (#365): a row a strict
-            # parser refuses is no chain row.
-            record = json.loads(line,
-                                object_pairs_hook=object_with_each_key_once,
-                                parse_constant=not_json,
-                                parse_float=finite_float)
-        except (ValueError, RecursionError):
-            # One appended line must not stop the chain route at every
-            # session end and keeper turn (#331, #344): at worst a chain
-            # row is missed and a batch the receiver drops goes again.
+def memo_holds_end(log, url, entries):
+    """Whether the publish memo records that the remote at `url` holds
+    the chain's last entry, and that its last send there did not fail:
+    the newest `publish-chain` attempt row naming that remote is not a
+    failure, and the last entry's n and entry_hash are those of a chain
+    row naming that remote (#263) or of that attempt row's `last` and
+    `head`. The second, because a send that finds the end already held
+    appends nothing and writes no chain row (ADR-0045 ruling 4). The
+    entry is matched and never a time: rows and entries are kept to the
+    second, and an entry written in the second of the send would read as
+    held. For scheduling only, and only ever to add a send: the memo is
+    writer-reachable, and a chain written to since the keeper's last
+    turn is sent whatever it says."""
+    mine, end = remote_id(url), entries[-1]
+    named, newest = False, None
+    for record in sidecar_records(Path(str(log) + ".published.jsonl")):
+        if record.get("remote_id") != mine:
             continue
-        if is_chain_record(record) and isinstance(record.get("last"), int) \
-                and record.get("remote_id") == mine:
-            cursor = max(cursor, record["last"])
-    return cursor
+        if is_chain_record(record):
+            named = named or (record.get("last") == end.get("n")
+                              and record.get("head") == end.get("entry_hash"))
+        elif row_kind("memo", record) == ATTEMPT_KIND \
+                and record.get("step") == "publish-chain":
+            newest = record
+    if newest is not None and newest.get("outcome") not in SENT_OUTCOMES:
+        return False
+    if named or newest is None:
+        return named
+    return (newest.get("last") == end.get("n")
+            and newest.get("head") == end.get("entry_hash"))
+
+
+def rows_unsent(log):
+    """Whether the newest send of the chain's anchor or stamp rows, as
+    the recorder wrote it down in that sidecar (step `publish-rows`,
+    ADR-0045 ruling 5), did not land, so the keeper's turn sends them
+    again."""
+    for suffix, sidecar in ((".anchors.jsonl", "anchors"),
+                            (".stamps.jsonl", "stamps")):
+        newest = None
+        for record in sidecar_records(Path(str(log) + suffix)):
+            if row_kind(sidecar, record) == ATTEMPT_KIND \
+                    and record.get("step") == "publish-rows":
+                newest = record
+        if newest is not None and newest.get("outcome") not in SENT_OUTCOMES:
+            return True
+    return False
+
+
+def written_since(log, last_attempt):
+    """Whether the chain file changed since the keeper's last turn on it:
+    no turn remembered, or a modification time past the second that turn
+    is remembered by, since the turn's time is kept to the second and
+    began before its send. The time is the file system's, which the
+    writer can set, and it only ever adds a send."""
+    attempted = parse_when(last_attempt)
+    if attempted is None or attempted.tzinfo is None:
+        return True
+    try:
+        changed = datetime.fromtimestamp(os.stat(log).st_mtime, timezone.utc)
+    except (OSError, ValueError, OverflowError):
+        return True
+    return changed >= attempted + timedelta(seconds=1)
 
 
 def ripe_head(entries, now, cadence):
@@ -1952,7 +1997,7 @@ def ripe_head(entries, now, cadence):
 
 
 def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
-                 authority=None):
+                 authority=None, chain_url=None):
     """One chain's turn with the keeper, at most once per throttle
     window: pending proofs are driven through `loxodonta anchor
     --upgrade` (the record's own calendar; judgment stays with verify),
@@ -1964,17 +2009,20 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     head they already hold with exit 0 and ask nobody, which is neither
     a failure nor a departure. `failed` stays the anchor's; a refused
     stamp is already written down in the stamps sidecar by the verb
-    itself. Returns (attempted, note, failed)."""
+    itself. With `chain_url`, the chain's URL, each verb that adds or
+    upgrades a row also sends the sidecar's rows there (ADR-0045 ruling
+    5). Returns (attempted, note, failed)."""
     sidecar = Path(str(log) + ".anchors.jsonl")
     if not upgrade_due(last_attempt, now):
         return False, None, False
     attempted = False
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
+    travel = ["--publish-chain", chain_url] if chain_url else []
     # A folder or a pipe where the sidecar belongs holds no proof to
     # upgrade (#364); the scan's verify names it.
     if os.path.isfile(sidecar):
-        finished = run_verb(["anchor", "--upgrade", f"--log={log}"])
+        finished = run_verb(["anchor", "--upgrade", f"--log={log}", *travel])
         attempted = True
         if finished is None:
             notes.append("upgrading did not finish in time; the proofs stay "
@@ -1994,7 +2042,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     if cadence is not None and entries:
         head = ripe_head(entries, now, cadence)
         if head:
-            command = ["anchor", f"--log={log}"]
+            command = ["anchor", f"--log={log}", *travel]
             for calendar in calendars:
                 command += ["--calendar", calendar]
             finished = run_verb(command)
@@ -2021,7 +2069,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                 notes.append(recorder_exit_note("anchor this head", finished))
         if head and authority:
             finished = run_verb(["stamp", f"--log={log}", "--authority",
-                                 authority])
+                                 authority, *travel])
             attempted = True
             if finished is None:
                 notes.append("stamping did not finish in time; whether the "
@@ -2134,11 +2182,16 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
     throttle and only when the operator opted in with a cadence and a
     URL: a head aged past the cadence and not yet in the publish memo is
     posted once through `loxodonta publish`; then, when a URL was named
-    for the entries, the lines after that remote's cursor (#263) go
-    through `loxodonta publish --chain` (ADR-0031 ruling 3), at most
-    once each per throttle window. The memo is testimony: it stops a
-    repeat and proves nothing; a head is posted once, wherever it went
-    (ADR-0025). Returns (attempted, note, failed)."""
+    for the entries, `loxodonta publish --chain` asks the remote and
+    sends what it does not hold (ADR-0031 ruling 3, ADR-0045 ruling 4),
+    for a chain written to since the keeper's last turn on it, one whose
+    memo does not record that remote holding its last entry or records
+    its last send there failing (`memo_holds_end`), and one
+    whose anchor or stamp rows did not land the last time they were
+    sent; at most once per throttle window. The memo is testimony: it
+    stops a repeated head and proves nothing, and it never stands the
+    chain's send down for a chain that changed; a head is posted once,
+    wherever it went (ADR-0025). Returns (attempted, note, failed)."""
     if not (url or chain_url) or not upgrade_due(last_attempt, now):
         return False, None, False
     memo = Path(str(log) + ".published.jsonl")
@@ -2154,18 +2207,9 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
         if note:
             notes.append(note)
             failed = True
-    behind = False
-    if chain_url and isinstance(entries[-1].get("n"), int):
-        try:
-            behind = entries[-1]["n"] > chain_cursor(str(log), chain_url)
-        except (OSError, ValueError):
-            # The recorder's answer too: with no cursor there is no
-            # send, since -1 would send the whole chain again (#344).
-            notes.append("publishing the chain skipped — the memo could "
-                         "not be read, so where the remote left off is "
-                         "unknown; the entries stay unsent until it can be")
-            failed = True
-    if behind:
+    if chain_url and (written_since(log, last_attempt)
+                      or not memo_holds_end(log, chain_url, entries)
+                      or rows_unsent(log)):
         attempted = True
         note = publish_through_recorder(log, chain_url, "chain")
         if note:
@@ -2313,17 +2357,18 @@ def head_published(log, entries):
 
 def assess_anchors(printed, entries):
     """The panel's data, read from verify's own words (the documented
-    verdict lines are the seam, ADR-0005): anchored spans with their
-    block heights, pending proofs with their submission times, and the
-    chain head with whether any anchor covers it. Ages are the reader's
-    to compute — the report carries timestamps, not clocks. `printed`
-    is what verify put on stdout, never its stderr (#504)."""
-    anchored = []
+    verdict lines are the seam, ADR-0005): anchored spans (a block
+    checked) and claimed spans (a block nobody checked) with their block
+    heights, pending proofs with their submission times, and the chain
+    head with whether a span of each kind covers it. Ages are the
+    reader's to compute — the report carries timestamps, not clocks.
+    `printed` is what verify put on stdout, never its stderr (#504)."""
+    spans = {"anchored": [], "claimed": []}
     pending = []
     for line in printed:
-        span = anchored_span(line)
+        span = anchor_span(line)
         if span:
-            anchored.append({"upto": span[0], "height": span[1]})
+            spans[span[0]].append({"upto": span[1], "height": span[2]})
         wait = PENDING_LINE.fullmatch(line)
         if wait:
             submitted, calendar = (None if said in UNRECORDED else said
@@ -2333,10 +2378,11 @@ def assess_anchors(printed, entries):
     head = None
     if entries:
         n = entries[-1].get("n")
-        head = {"n": n, "ts": entries[-1].get("ts"),
-                "anchored": isinstance(n, int)
-                and any(span["upto"] >= n for span in anchored)}
-    return {"anchored": anchored, "pending": pending, "head": head}
+        head = {"n": n, "ts": entries[-1].get("ts")}
+        for kind, found in spans.items():
+            head[kind] = isinstance(n, int) and any(span["upto"] >= n
+                                                    for span in found)
+    return {**spans, "pending": pending, "head": head}
 
 
 # --- Completeness -------------------------------------------------------------
@@ -2361,17 +2407,16 @@ DORMANT_SECONDS = env_number("SUPERVISOR_DORMANT_SECONDS", 172800)
 # The tail keeper (ADR-0018 ruling 6): on by default — protective
 # recording does not ask permission (ADR-0017's reasoning) — and
 # disableable for stores where the operator wants annotations only.
-TAIL_KEEPER = os.environ.get("SUPERVISOR_TAIL_KEEPER", "1") != "0"
+TAIL_KEEPER = environment("SUPERVISOR_TAIL_KEEPER", "1") != "0"
 # The settle window of the reading over a receiver's folder (ADR-0041
 # ruling 4): a session is judged there once nothing of it has arrived
 # for this long, by its events' arrival times and its chain copy's own
-# modification time. Receipts reach the receiver at session end, and a
-# killed session's chain only when the keeper on the agent's machine
-# sends it on its cadence, six hours by default, so the window is that
-# cadence plus one. Judged early, a deficit resolves on the look after
-# the chain lands, and the day book keeps the day's worst claim; the
-# window is what keeps that rare.
-SETTLE_SECONDS = env_number("SUPERVISOR_SETTLE_SECONDS", 7 * 3600)
+# modification time. One hour (ADR-0046 ruling 4): entries leave as
+# they are written (ADR-0045), so the window need only clear a closed
+# lid or a dropped network, and a real deficit shows the same day. The
+# ruling's panel: 5 minutes is tight, 1 hour the default, 7 hours, the
+# keeper's cadence plus one, generous.
+SETTLE_SECONDS = env_number("SUPERVISOR_SETTLE_SECONDS", 3600)
 
 WITNESS_ROOT = Path.home() / ".claude" / "projects"
 # What the recorder writes down about the coverage it wired (ADR-0030).
@@ -2432,13 +2477,27 @@ WATCH_WORDS = {
                             "with the telemetry cut reads this way, and so "
                             "does a machine whose events go nowhere; never "
                             "read as clean, and the chain's own note says "
-                            "why when it carries one (ADR-0041).",
+                            "why when it carries one (ADR-0041). It raises "
+                            "the exit until it is acknowledged here "
+                            "(ADR-0046).",
     "SECOND-RECORD-GAP": "numbers are missing from this session's event "
                          "counter between the lowest and the highest the "
                          "receiver holds — events were lost on the way, so "
                          "not every call it owed is known here; the missing "
-                         "numbers are named (ADR-0041).",
+                         "numbers are named (ADR-0041). It raises the exit "
+                         "until it is acknowledged here (ADR-0046).",
 }
+# The reading over a receiver's folder words its deficit apart: there it
+# is a finding, not evidence kept quiet (ADR-0046 ruling 2).
+RECEIVER_DEFICIT_WORDS = (
+    "the harness reported calls this session's receipts fall short of, "
+    "tool by tool or by the call's id — those receipts never reached the "
+    "receiver. It raises the exit at every scan until it is acknowledged "
+    "here, and again if its counts change after (ADR-0046).")
+# The settled states that raise the exit of a scan over a receiver's
+# folder until acknowledged there (ADR-0046 ruling 2).
+RECEIVER_FINDINGS = ("ENDED-DEFICIT", "SECOND-RECORD-ABSENT",
+                     "SECOND-RECORD-GAP")
 UNREADABLE_TRANSCRIPT_WORDS = (
     "a transcript pairs with this session and cannot be read as one — "
     "completeness cannot be watched for it; nothing is assumed either "
@@ -2522,7 +2581,7 @@ def managed_hooks_path():
     reaches one it may write. It moves where these tools read and
     write, never where the harness reads, and every installer verb that
     reads it warns when it is set."""
-    folder = (os.environ.get("LOXODONTA_MANAGED_DIR")
+    folder = (environment("LOXODONTA_MANAGED_DIR")
               or harness_managed_folder())
     return os.path.join(folder, "managed-settings.d", "loxodonta.json")
 
@@ -2699,12 +2758,13 @@ def sessionend_commands(witness):
             for command in sessionend_commands_in(settings_file)]
 
 
-def sessionend_commands_in(settings_file):
+def sessionend_commands_in(settings_file, event="SessionEnd"):
     """The recorder's SessionEnd command lines in one hooks file, in
-    the shape Claude Code's settings and Codex's hooks.json share."""
+    the shape Claude Code's settings and Codex's hooks.json share, or
+    those of another hook `event`."""
     settings = read_settings(settings_file)
     try:
-        rules = settings["hooks"]["SessionEnd"]
+        rules = settings["hooks"][event]
     except (KeyError, TypeError):
         return []
     commands = []
@@ -2758,12 +2818,11 @@ def sessionend_chain_remote(witness):
 
 def chain_landed(log, remote):
     """Whether the memo beside `log` holds a chain row for a batch the
-    remote at `remote` acknowledged, naming it as the recorder's cursor
-    does (#263); with no `remote` wired, any chain row counts. Read row
-    by row, so a line that cannot be read counts for nothing and never
-    hides a row that can. This is a reading for the report, not the
-    keeper's schedule: `chain_cursor` still raises on such a memo, since
-    a send guessed from it could resend the whole chain."""
+    remote at `remote` acknowledged, naming it by its fingerprint
+    (#263); with no `remote` wired, any chain row counts. Read row by
+    row, so a line that cannot be read counts for nothing and never
+    hides a row that can. A reading for the report, and testimony like
+    the memo it reads."""
     mine = remote_id(remote) if remote is not None else None
     return any(is_chain_record(record)
                and isinstance(record.get("last"), int)
@@ -2773,7 +2832,61 @@ def chain_landed(log, remote):
                    Path(str(log) + ".published.jsonl")))
 
 
-def published_reading(witness, logs):
+def sends_as_written(witness):
+    """For each harness whose wired recording command sends each entry
+    as it is written, the time from which that is so: {harness: when}.
+    It sends when the recorder's PostToolUse command carries
+    `--publish-chain`, as a `full` install writes it (ADR-0045 ruling
+    3): Claude Code's read from the settings beside the witness layout
+    and its managed file, Codex's from its hooks file, the files the
+    profile is followed from, for the flag alone, never the URL. It is
+    so from that harness's newest install in the coverage marker
+    (ADR-0030); a harness the marker does not date is left out, since a
+    chain written before the wiring was never sent that way."""
+    def carries(commands):
+        return any(re.search(r"(?:^|\s)--publish-chain(?=\s|=|$)", command)
+                   for command in commands)
+    wired = {"claude-code": carries(
+                 command for settings_file in managed_first(witness)
+                 for command in sessionend_commands_in(settings_file,
+                                                       "PostToolUse")),
+             "codex": carries(sessionend_commands_in(codex_hooks_file(),
+                                                     "PostToolUse"))}
+    dated = {}
+    for harness, epoch in marker_harnesses().items():
+        since = parse_when(epoch["since"])
+        if wired.get(harness) and since is not None \
+                and since.tzinfo is not None:
+            dated[harness] = since
+    return dated
+
+
+def leaves_as_written(log, entries, sending):
+    """Whether this chain's entries leave as each is written, by the
+    recorder's own note: the harness that wrote its newest receipt sends
+    each entry (`sends_as_written`'s `sending`), the chain's newest
+    entry was written since that wiring, and the newest `publish-chain`
+    attempt row beside it is not a failure. The per-entry send writes no
+    chain row, so without this a live session at `full` reads as if
+    nothing had left. What arrived is the receiver's scan to say
+    (docs/RECEIVER.md section 7); this is testimony, like the memo it
+    reads."""
+    actor = next((entry.get("actor") for entry in reversed(entries)
+                  if entry.get("actor") != "receipts"), None)
+    since = sending.get(actor)
+    written = parse_when(entries[-1].get("ts")) if entries else None
+    if since is None or written is None or written.tzinfo is None \
+            or written < since:
+        return False
+    newest = None
+    for record in sidecar_records(Path(str(log) + ".published.jsonl")):
+        if row_kind("memo", record) == ATTEMPT_KIND \
+                and record.get("step") == "publish-chain":
+            newest = record
+    return newest is None or newest.get("outcome") in SENT_OUTCOMES
+
+
+def published_reading(witness, logs, written=()):
     """#240 part 3: whether the wired SessionEnd command publishes,
     whether any chain here holds a row saying something was sent, and
     the one sentence for wired and nothing ever sent, since a receiver
@@ -2781,13 +2894,15 @@ def published_reading(witness, logs):
     reads the memos. Sent is per route (#248): a chain wired beside a
     head that has left reads as never sent until a batch lands. The
     chain route is also per remote (#263): only a batch the wired
-    remote took counts. A head counts wherever it went (ADR-0025).
-    Never the URL, and never the exit."""
+    remote took counts, or a chain in `written`, whose entries leave as
+    each is written (`leaves_as_written`). A head counts wherever it
+    went (ADR-0025). Never the URL, and never the exit."""
     routes = sessionend_publishes(witness)
     remote = sessionend_chain_remote(witness)
     landed = {"head": any(sidecar_heads(Path(str(log) + ".published.jsonl"),
                                         "memo") for log in logs),
-              "chain": any(chain_landed(log, remote) for log in logs)}
+              "chain": bool(written)
+              or any(chain_landed(log, remote) for log in logs)}
     wired = any(routes.values())
     sent = any(landed.values())
     silent = [route for route in ("head", "chain")
@@ -3133,7 +3248,8 @@ def git_say(home, *question, refused=None):
         answered = subprocess.run(
             # Empty, not false: before git 2.36 the value was a command,
             # and `false` names one.
-            ["git", "--no-optional-locks", "-c", "core.fsmonitor=",
+            [helper_path("git"), "--no-optional-locks", "-c",
+             "core.fsmonitor=",
              "-C", str(home), *question],
             # Never a pipe on stderr: a program git starts inherits it,
             # and on Windows the timeout then waits for that program.
@@ -3367,6 +3483,45 @@ def failed_call_owes(record, block, name, epoch):
     return "may_owe"
 
 
+def transcript_records(transcript, closed):
+    """Each record of a session's transcript files (`witness_files`) as
+    (the file, the record, its message's content blocks), in file order,
+    the parent's first and then each subagent's. A line
+    that is not a JSON object is passed over, and a file that cannot be
+    opened raises as `open_regular` does. The witness counts calls by
+    it, and `show` finds a call's input by it (ADR-0047)."""
+    for path in witness_files(transcript, closed):
+        # A transcript is in the writer's reach, so a pipe at its name is
+        # refused rather than waited on (#386).
+        with io.TextIOWrapper(open_regular(path), encoding="utf-8",
+                              errors="replace") as lines:
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue  # the transcript is writer-reachable (#331)
+                if not isinstance(record, dict):
+                    continue
+                message = record.get("message")
+                blocks = (message.get("content")
+                          if isinstance(message, dict) else None)
+                yield (path, record,
+                       blocks if isinstance(blocks, list) else [])
+
+
+def witness_transcripts(witness, closed):
+    """Every session's transcript under the witness layout, by session
+    id, as every file of that name in sorted order: one project folder
+    each, `<witness>/<project>/<session>.jsonl`. Where several folders
+    hold one name, the last is the one read (the scan's choice since it
+    first paired them), and `show` reads the same one and says how many
+    there were (ADR-0047)."""
+    found = {}
+    for path in listed(witness, "*/*.jsonl", closed):
+        found.setdefault(path.stem, []).append(path)
+    return found
+
+
 def read_witness(transcript, calibration):
     """The witness signal, as a dict. `owed` is the tool events that owe
     a receipt, as (timestamp, tool) in time order: a tool_use block
@@ -3396,72 +3551,56 @@ def read_witness(transcript, calibration):
     first = None
     worded = unworded = 0
     closed = []
-    for path in witness_files(transcript, closed):
-        # A transcript is in the writer's reach, so a pipe at its name is
-        # refused rather than waited on (#386).
-        with io.TextIOWrapper(open_regular(path), encoding="utf-8",
-                              errors="replace") as lines:
-            for line in lines:
-                try:
-                    record = json.loads(line)
-                except (ValueError, RecursionError):
-                    continue  # the transcript is writer-reachable (#331)
-                if not isinstance(record, dict):
-                    continue
-                stamped = parse_when(record.get("timestamp"))
-                if stamped is not None:
-                    if stamped.tzinfo is None:
-                        stamped = stamped.replace(tzinfo=timezone.utc)
-                    if latest is None or stamped > latest:
-                        latest = stamped
-                message = record.get("message")
-                blocks = (message.get("content")
-                          if isinstance(message, dict) else None)
-                if not isinstance(blocks, list):
-                    blocks = []
-                for block in blocks:
-                    if isinstance(block, dict) \
-                            and block.get("type") == "tool_use":
-                        names[block.get("id")] = block.get("name")
-                found = next((block for block in blocks
-                              if isinstance(block, dict)
-                              and block.get("type") == "tool_result"), None)
-                result = record.get("toolUseResult")
-                # The completed call, in either shape the harness writes:
-                # a parent's record carries `toolUseResult` and the block,
-                # a subagent's only the block (#211; keying on the field
-                # alone missed most sidechain calls). The block is the
-                # signal, the field the corroboration.
-                if result is None and found is None:
-                    continue
-                # A failed call, as the harness really writes it: the
-                # result collapses to an error string and the flag sits
-                # on the tool_result block (field capture, 2026-08-29).
-                # In a sidechain file that block is the only place it
-                # ever sits.
-                failed = ((isinstance(result, dict)
-                           and result.get("is_error"))
-                          or (found is not None and found.get("is_error")))
-                name = names.get(found.get("tool_use_id")) if found else None
-                witnessed.add(name)
-                when = record.get("timestamp")
-                epoch = epoch_at(calibration, when)
-                # Before every filter below: a call that failed, or one
-                # no matcher covered, is still the session at work.
-                if isinstance(when, str) and (first is None or when < first):
-                    first = when
-                if failed:
-                    owes = failed_call_owes(record, found, name, epoch)
-                    if owes == "may_owe":
-                        may_owe.setdefault(name, []).append(when)
-                        if name in SHELL_TOOLS:
-                            unworded += 1
-                    if owes != "owed":
-                        continue
-                    worded += 1
-                    owed.append((when, name))
-                elif owes_receipt(name, epoch["matchers"]):
-                    owed.append((when, name))
+    for _, record, blocks in transcript_records(transcript, closed):
+        stamped = parse_when(record.get("timestamp"))
+        if stamped is not None:
+            if stamped.tzinfo is None:
+                stamped = stamped.replace(tzinfo=timezone.utc)
+            if latest is None or stamped > latest:
+                latest = stamped
+        for block in blocks:
+            if isinstance(block, dict) \
+                    and block.get("type") == "tool_use":
+                names[block.get("id")] = block.get("name")
+        found = next((block for block in blocks
+                      if isinstance(block, dict)
+                      and block.get("type") == "tool_result"), None)
+        result = record.get("toolUseResult")
+        # The completed call, in either shape the harness writes:
+        # a parent's record carries `toolUseResult` and the block,
+        # a subagent's only the block (#211; keying on the field
+        # alone missed most sidechain calls). The block is the
+        # signal, the field the corroboration.
+        if result is None and found is None:
+            continue
+        # A failed call, as the harness really writes it: the
+        # result collapses to an error string and the flag sits
+        # on the tool_result block (field capture, 2026-08-29).
+        # In a sidechain file that block is the only place it
+        # ever sits.
+        failed = ((isinstance(result, dict)
+                   and result.get("is_error"))
+                  or (found is not None and found.get("is_error")))
+        name = names.get(found.get("tool_use_id")) if found else None
+        witnessed.add(name)
+        when = record.get("timestamp")
+        epoch = epoch_at(calibration, when)
+        # Before every filter below: a call that failed, or one
+        # no matcher covered, is still the session at work.
+        if isinstance(when, str) and (first is None or when < first):
+            first = when
+        if failed:
+            owes = failed_call_owes(record, found, name, epoch)
+            if owes == "may_owe":
+                may_owe.setdefault(name, []).append(when)
+                if name in SHELL_TOOLS:
+                    unworded += 1
+            if owes != "owed":
+                continue
+            worded += 1
+            owed.append((when, name))
+        elif owes_receipt(name, epoch["matchers"]):
+            owed.append((when, name))
     # Merged across files, so order is no longer a given, and the
     # deficit clock reads the first unpaired call, which names the right
     # moment only in time order.
@@ -3701,8 +3840,8 @@ def watch_completeness(root, witness, families, everywhere=False,
     # empty: closed, it would hide more quietly than a deleted witness.
     witness_closed = []
     if os.path.isdir(witness):
-        transcripts = {t.stem: t
-                       for t in listed(witness, "*/*.jsonl", witness_closed)}
+        transcripts = {stem: found[-1] for stem, found in
+                       witness_transcripts(witness, witness_closed).items()}
     else:
         watch["note"] = (f"witness absent — no transcript layout at "
                          f"{witness.as_posix()}; completeness cannot be "
@@ -4136,11 +4275,17 @@ def read_events(root, closed=None):
     tool among `witnessed`, so a refused call's receipt (#476) is its
     own tool's surplus and never pays for another tool's lost call.
     `may_owe` stays empty: a call that ran and failed has a result like
-    any other. `latest` is the newest arrival, by `received`, the
-    receiver's own clock: the settle clock, which no timestamp of the
-    harness's moves. `sequences` holds every `event.sequence` seen, the
-    per-session counter whose missing numbers are the second record's
-    gap. Beside the sessions: the newest `received` per sending address
+    any other. `results` holds each such call as (time, tool, call id,
+    arrival): the time is the event's own, for order; the id None where
+    `tool_use_id` is not one a receipt's suffix could name
+    (`is_call_id`), for pairing by the call's id (ADR-0046 ruling 3); the
+    arrival the `received` of the line that carried it, or None, the
+    call's age by ruling 6. `latest` is the newest arrival, by
+    `received`, the receiver's own clock: the settle clock, which no
+    timestamp of the harness's moves. `sequences` holds every
+    `event.sequence` seen, the per-session counter whose missing numbers
+    are the second record's gap, and `arrived` each number's earliest
+    `received`, for a hole below an event older than the window. Beside the sessions: the newest `received` per sending address
     (ruling 5's "last heard"), the days the files are named for, and
     the lines that were not one JSON object holding a `logs` object,
     skipped and counted, never fatal: the files are out of the writer's
@@ -4192,7 +4337,8 @@ def read_events(root, closed=None):
                 seen = sessions.setdefault(session, {
                     "owed": [], "may_owe": {}, "witnessed": set(),
                     "latest": None, "first": None, "worded": 0,
-                    "unworded": 0, "closed": [], "sequences": set()})
+                    "unworded": 0, "closed": [], "sequences": set(),
+                    "results": [], "arrived": {}})
                 if when is not None and (seen["latest"] is None
                                          or when > seen["latest"]):
                     seen["latest"] = when
@@ -4200,6 +4346,10 @@ def read_events(root, closed=None):
                 if isinstance(sequence, int) \
                         and not isinstance(sequence, bool):
                     seen["sequences"].add(sequence)
+                    if when is not None and (
+                            sequence not in seen["arrived"]
+                            or when < seen["arrived"][sequence]):
+                        seen["arrived"][sequence] = when
                 name = attributes.get("event.name")
                 tool = attributes.get("tool_name")
                 tool = tool if isinstance(tool, str) else None
@@ -4208,13 +4358,18 @@ def read_events(root, closed=None):
                 elif name == TOOL_RESULT:
                     stamp = attributes.get("event.timestamp")
                     stamp = stamp if isinstance(stamp, str) else None
+                    call = attributes.get("tool_use_id")
                     seen["witnessed"].add(tool)
                     seen["owed"].append((stamp, tool))
+                    seen["results"].append(
+                        (stamp, tool, call if is_call_id(call) else None,
+                         when))
                     if stamp is not None and (seen["first"] is None
                                               or stamp < seen["first"]):
                         seen["first"] = stamp
     for seen in sessions.values():
         seen["owed"].sort(key=lambda call: call[0] or "")
+        seen["results"].sort(key=lambda call: call[0] or "")
     return {"sessions": sessions,
             "addresses": {sender: received
                           for sender, (_, received) in addresses.items()},
@@ -4242,15 +4397,138 @@ def missing_numbers(sequences):
     return high - low + 1 - len(seen), named
 
 
-def watch_receiver(root, families, events, now, show_before_memory=False):
+def pair_calls(results, calls, witnessed):
+    """A settled session's calls, as the harness reported them, against
+    its receipts at the receiver, as (rule, owed, deficit, surplus,
+    missing). `results` are the calls as (time, tool, call id or None,
+    arrival),
+    `calls` the receipts as (tool, call id or None). Where both records
+    name calls, they are joined on the id (ADR-0046 ruling 3): a call
+    reported twice under one id is one call, a receipt pays only the
+    call its id names and a second receipt of that id pays nothing, and
+    `missing` names each call with no receipt, in time order. A call or
+    a receipt naming none is paired by count within its tool, among its
+    own kind only, so a receipt with no id never pays a call the harness
+    named. Where either record names none, the count by tool stands
+    (ADR-0034). `owed` is the calls counted, as [(time, tool)]."""
+    paying = [call for _, call in calls if call]
+    named = [call for _, _, call, _ in results if call]
+    if not paying or not named:
+        receipts = {}
+        for tool, _ in calls:
+            receipts[tool] = receipts.get(tool, 0) + 1
+        owed = [(when, tool) for when, tool, _, _ in results]
+        deficit, surplus, _ = reconcile(owed, {}, receipts, witnessed)
+        return "count by tool", owed, deficit, surplus, []
+    paid = set(paying)
+    owed, unnamed, missing, met = [], [], [], set()
+    for when, tool, call, _ in results:
+        if call in met:
+            continue
+        if call is None:
+            unnamed.append((when, tool))
+        else:
+            met.add(call)
+            if call not in paid:
+                missing.append(call)
+        owed.append((when, tool))
+    loose = {}
+    for tool, call in calls:
+        if not call:
+            loose[tool] = loose.get(tool, 0) + 1
+    deficit, surplus, _ = reconcile(unnamed, {}, loose, witnessed)
+    surplus += len(paying) - len(met & paid)
+    return "call id", owed, deficit + len(missing), surplus, missing
+
+
+def overdue(seen, calls, now):
+    """What is overdue in a session still PENDING (ADR-0046 ruling 6),
+    as the row's fields, or None when nothing is. A call is overdue when
+    the line that carried its event was `received` more than
+    SETTLE_SECONDS ago, by the receiver's clock and never a time the
+    event states, whatever arrived after it. The overdue calls are
+    paired against every receipt held, by pair_calls() as a settled
+    session's are, so a receipt of a newer call pays an older one only
+    where the count by tool stands; a surplus among them is no finding
+    while the session is pending, since a receipt may be a newer call's.
+    A hole in the counter is overdue below a number that arrived more
+    than the window ago. A call or a number with no arrival time has no
+    age, and is never overdue."""
+    cutoff = now - timedelta(seconds=SETTLE_SECONDS)
+    old = [call for call in seen["results"]
+           if call[3] is not None and call[3] < cutoff]
+    rule, _, deficit, _, missing = pair_calls(old, calls, seen["witnessed"])
+    aged = [number for number, when in seen["arrived"].items()
+            if when < cutoff]
+    count, numbers = missing_numbers(
+        {number for number in seen["sequences"] if number <= max(aged)}
+        if aged else set())
+    if not deficit and not count:
+        return None
+    found = {"deficit": deficit, "paired_by": rule}
+    if missing:
+        found["missing_calls"] = {"count": len(missing),
+                                  "calls": missing[:GAP_NAMED]}
+    if count:
+        found["gap"] = {"count": count, "numbers": numbers}
+    return found
+
+
+def overdue_words(found):
+    """The words of a PENDING-OVERDUE row, saying what is overdue."""
+    late = []
+    if found["deficit"]:
+        late.append(f"{found['deficit']} call(s) the harness reported more "
+                    "than the settle window ago, by the receiver's clock, "
+                    "have no receipt")
+    if "gap" in found:
+        late.append(f"its event counter has {found['gap']['count']} "
+                    "hole(s) below an event that arrived more than the "
+                    "window ago")
+    return ("this session is still arriving, and " + ", and ".join(late)
+            + ". It raises the exit, and cannot be acknowledged while the "
+            "session is still arriving: it ends when the receipts arrive, "
+            "or when the session settles and reads as a finding that can "
+            "be acknowledged (ADR-0046 ruling 6).")
+
+
+def session_counts(row):
+    """What an acknowledgement at the receiver accepts beside the state:
+    the counts the session's row reports. A session whose counts differ
+    from these after it was acknowledged is a finding again (ADR-0046
+    ruling 2)."""
+    return {"tools": row["tools"], "receipts": row["receipts"],
+            "by_tool": row["by_tool"],
+            "gap": (row.get("gap") or {}).get("count", 0)}
+
+
+def session_acknowledgement(acknowledged, session):
+    """The newest acknowledgement on record for a session at the
+    receiver, or None. The memory is out of the writer's reach there,
+    but a record of the wrong shape is still read as none, which keeps
+    the finding raising."""
+    found = None
+    for record in acknowledged:
+        if record.get("session") == session \
+                and isinstance(record.get("state"), str) \
+                and isinstance(record.get("counts"), dict):
+            found = record
+    return found
+
+
+def watch_receiver(root, families, events, now, show_before_memory=False,
+                   acknowledged=()):
     """The completeness half of a tick over a receiver's folder (ADR-0041
     rulings 4 and 5): every session the chain copies or the events name,
     the copies as what was paid and the events as what was owed, judged
     once settled. A session is settled when nothing of it has arrived
     for SETTLE_SECONDS, by its events' `received` and its chain copy's
     own modification time; until then it is PENDING, listed with its
-    counts and never an alarm. Settled, it reads by reconcile() and
-    classify() as a session that ended, ENDED-DEFICIT tool by tool, or
+    counts and never an alarm, or PENDING-OVERDUE when a call or a
+    counter number older than that has gone unpaid (overdue(), ADR-0046
+    ruling 6), which raises the exit. Settled, it reads by pair_calls() and
+    classify() as a session that ended, ENDED-DEFICIT tool by tool or by
+    the call's id, or
     SECOND-RECORD-ABSENT when receipts arrived and no events did, or
     SECOND-RECORD-GAP when its counter has holes and no deficit, else
     ENDED-SURPLUS or ENDED-CLEAN. A surplus is expected while #476
@@ -4260,8 +4538,9 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
     never a row, as ADR-0029 counts sessions older than the calibration
     memory (#559 ruling 3). The hook's note
     that the second record was cut is quoted on the row when the copy
-    carries one. None of these states is live, so none raises the exit:
-    an ended deficit is evidence here as on the agent's machine."""
+    carries one. A row in one of RECEIVER_FINDINGS carries `raises`, and
+    raises the exit, unless `acknowledged`, the memory's records, accepts
+    that state with the counts it now reports (ADR-0046 ruling 2)."""
     days = events["days"]
     oldest = min(days) if days else None
     newest = max(days) if days else None
@@ -4325,7 +4604,9 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
         by_tool = {}
         for _, tool in family.get("moments", ()):
             by_tool[tool] = by_tool.get(tool, 0) + 1
-        owed = seen["owed"] if seen else []
+        rule, owed, deficit, surplus, missing = pair_calls(
+            seen["results"] if seen else [], family.get("calls", []),
+            seen["witnessed"] if seen else set())
         counts = {}
         for _, tool in owed:
             counts.setdefault(tool, {"owed": 0, "receipts": 0})["owed"] += 1
@@ -4362,8 +4643,18 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             continue
         quiet_for = ((now - heard).total_seconds()
                      if heard is not None else None)
+        late = None
         if quiet_for is not None and quiet_for < SETTLE_SECONDS:
-            state = "PENDING"
+            # Ruling 6: the session is not settled, but a call the
+            # harness reported more than the window ago is judged by its
+            # own age, so arrivals after it cannot keep it unjudged. A
+            # session with no events has no call to be overdue (the
+            # ADR's non-claim).
+            late = overdue(seen, family.get("calls", []), now) if seen \
+                else None
+            state = "PENDING-OVERDUE" if late else "PENDING"
+            if late:
+                row.update(late)
         elif seen is None:
             state = "SECOND-RECORD-ABSENT"
             if unread:
@@ -4372,11 +4663,13 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
                 # a file went unread (#559 ruling 3).
                 row["note"] = unread
         else:
-            deficit, surplus, _ = reconcile(owed, seen["may_owe"], by_tool,
-                                            seen["witnessed"])
             state = classify(len(owed), deficit, surplus, True, True,
                              None, False)
             row["deficit"] = deficit
+            row["paired_by"] = rule
+            if missing:
+                row["missing_calls"] = {"count": len(missing),
+                                        "calls": missing[:GAP_NAMED]}
             count, numbers = missing_numbers(seen["sequences"])
             if count:
                 row["gap"] = {"count": count, "numbers": numbers}
@@ -4385,8 +4678,34 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
                 if state != "ENDED-DEFICIT":
                     state = "SECOND-RECORD-GAP"
         row["state"] = state
-        if state in WATCH_WORDS:
+        if late:
+            row["words"] = overdue_words(late)
+            # Never quieted by an acknowledgement: its counts move with
+            # every call of a live session (ADR-0046 ruling 6).
+            row["raises"] = True
+        elif state == "ENDED-DEFICIT":
+            row["words"] = RECEIVER_DEFICIT_WORDS
+        elif state in WATCH_WORDS:
             row["words"] = WATCH_WORDS[state]
+        if state in RECEIVER_FINDINGS:
+            record = session_acknowledgement(acknowledged, session)
+            holds = (record is not None and record["state"] == state
+                     and record["counts"] == session_counts(row))
+            if record is not None:
+                row["acknowledged"] = {
+                    "ts": record.get("ts"), "state": record["state"],
+                    "counts": record["counts"], "holds": holds,
+                    "words": (
+                        "accepted here by someone with access to the "
+                        "receiver, so it raises nothing while its state "
+                        "and counts stay as accepted; the record says it "
+                        "was accepted, not that it is right (ADR-0046)"
+                        if holds else
+                        "the session has changed since it was "
+                        "acknowledged, so it is a finding again "
+                        "(ADR-0046)")}
+            if not holds:
+                row["raises"] = True
         watch["sessions"].append(row)
     watch["last_heard"] = {
         "addresses": [{"from": sender, "received": received}
@@ -4454,8 +4773,120 @@ def tool_of(action):
     dominant tool, the digest's collapse key, and the completeness
     witness, which pairs each receipt with calls of the tool it names
     (ADR-0034). A line from another writer is read by the same rule and
-    trusted no more than the rest of its testimony."""
-    return str(action).partition(":")[0].strip()
+    trusted no more than the rest of its testimony. The suffix is set
+    aside first (ADR-0047), since a bare tool name has no colon before
+    it."""
+    return split_suffix(action)[0].partition(":")[0].strip()
+
+
+# --- The receipt's suffix (ADR-0047) ------------------------------------------
+# A hook receipt ends with the call's id and a commitment to its whole
+# input. The supervisor reads the suffix to find the tool a line names
+# and, in `show`, to compare the commitment with the transcript.
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def canonical_bytes(entry_without_hash):
+    return json.dumps(
+        entry_without_hash, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+CALL_ID_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+CALL_ID_LONGEST = 128
+UNHASHED_INPUT = "input=unhashed"
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def is_call_id(text):
+    """Whether `text` may stand as a call's id in the suffix: ASCII
+    letters, digits, `_` and `-` only, 1 to 128 of them (ADR-0047
+    ruling 2), so it can never end the group or open another."""
+    return (isinstance(text, str) and 0 < len(text) <= CALL_ID_LONGEST
+            and set(text) <= CALL_ID_CHARACTERS)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def holds_fraction(value):
+    """Whether a JSON value holds, anywhere in it, a number that is not
+    an integer in the JSON it was read from: one written with a fraction
+    or an exponent (`1.5`, `1.0`, `2e5`), or `NaN` or `Infinity`, which
+    Python's reader takes as numbers. Each is a float here, and SPEC \u00a74
+    rule 4 gives none a canonical form; booleans and `null` are not
+    numbers here and are hashed as JSON writes them. Walked without
+    recursion: the payload may nest as deep as the JSON reader took."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, float):
+            return True
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def input_form(value):
+    """A call's input in SPEC \u00a74's canonical form, written by the one
+    writer entries are hashed with, or None where \u00a74 has no form for
+    it: a number that is not an integer (`holds_fraction`), or anything
+    that writer refuses (a lone surrogate, which has no UTF-8; nesting
+    past the recursion limit). Every such input reads `input=unhashed`
+    (ADR-0047 ruling 3, SPEC \u00a72.3)."""
+    if holds_fraction(value):
+        return None
+    try:
+        return canonical_bytes(value)
+    except (ValueError, RecursionError):
+        # UnicodeEncodeError is a ValueError.
+        return None
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def split_suffix(action):
+    """An action line as (the text before its suffix, the suffix's
+    fields), or (the line, None) when it ends in no group of the pinned
+    grammar. Only the last group is read, and only when nothing follows
+    it (ADR-0047 ruling 1). The fields are a dict holding `call`,
+    `sha256` and `bytes`, or `unhashed`, as the group gave them. A line
+    from before the suffix that happens to end in such a group is the
+    writer's text, read the same way."""
+    action = str(action)
+    at = action.rfind(" [")
+    if at < 0 or not action.endswith("]"):
+        return action, None
+    words = action[at + 2:-1].split(" ")
+    fields = {}
+    if words[0].startswith("call=") and is_call_id(words[0][5:]):
+        fields["call"] = words.pop(0)[5:]
+    if words == [UNHASHED_INPUT]:
+        fields["unhashed"] = True
+    elif len(words) == 3 and words[0] == "input" \
+            and words[1].startswith("sha256=") \
+            and words[2].startswith("bytes="):
+        digest, size = words[1][7:], words[2][6:]
+        if len(digest) != 64 or not set(digest) <= set("0123456789abcdef") \
+                or not size or not set(size) <= set("0123456789") \
+                or size != str(int(size)):
+            return action, None
+        fields["sha256"], fields["bytes"] = digest, int(size)
+    elif words:
+        return action, None
+    if not fields:
+        return action, None
+    return action[:at], fields
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def listed_action(action):
+    """An action line as a listing shows it, without its suffix: the
+    suffix is for a reader that checks, and a listing for a person
+    scanning (ADR-0047). A whole line is in the chain, in `show` and in
+    every JSON output."""
+    return split_suffix(action)[0]
 
 
 def busiest_hour(moments):
@@ -4579,6 +5010,16 @@ class Look:
         self.tick, self.remember = tick, remember
         self.show_before_memory = show_before_memory
         self.baseline_path, self.daybook = memory_paths(root, store, receiver)
+        self.sending = None
+
+    def sends_as_written(self):
+        """`sends_as_written` for this look's witness, asked once; none
+        over a receiver's folder, where nothing of the agent's machine is
+        read."""
+        if self.sending is None:
+            self.sending = {} if self.receiver \
+                else sends_as_written(self.witness)
+        return self.sending
 
     def chains(self, closed=None):
         """Every chain the census counts: the store's drawers, a
@@ -4754,7 +5195,8 @@ def keepers_turn(look, place, entries, memory, now, stamp):
     torn = (memory["chains"].get(relpath) or {}).get("superseded") is True
     attempted, note, failed = keep_anchors(
         log, keeper.get(relpath), now, entries,
-        None if torn else look.anchor_every, look.calendars, look.authority)
+        None if torn else look.anchor_every, look.calendars, look.authority,
+        look.publish_chain)
     if attempted:
         moved[relpath] = stamp
     if note:
@@ -4797,9 +5239,12 @@ def chain_row(look, log, entries, said):
         "verdict": verdict,
         "exit": exit_code,
         # VALID says the chain agrees with itself; ANCHORED says it
-        # agrees with a Bitcoin block. Different claims, kept apart,
-        # and only verify's own ANCHORED line earns this (#349).
+        # agrees with a Bitcoin block somebody checked, and
+        # ANCHOR-CLAIMED that an attestation names one nobody did.
+        # Different claims, kept apart, and only verify's own lines earn
+        # them (#349, ADR-0044).
         "anchored": bool(anchors["anchored"]),
+        "claimed": bool(anchors["claimed"]),
         "superseded": stood_down,
         "detail": detail,
         "anchors": anchors,
@@ -4817,6 +5262,8 @@ def chain_row(look, log, entries, said):
         # a head went out of, and keeps its shape.
         "head_published": head_published(log, entries),
     }
+    if leaves_as_written(log, entries, look.sends_as_written()):
+        row["left"]["as_written"] = True
     row["anchors"].update(said["anchors"])
     row["left"].update(said["left"])
     return row, verdict, stood_down
@@ -4937,6 +5384,12 @@ def family_facts(look, relpath, log, entries, grew):
         stamped = [e["ts"] for e in entries if isinstance(e.get("ts"), str)]
         if stamped:
             facts["newest_ts"] = max(stamped)
+        # Each receipt's tool and the call its suffix names, or None, for
+        # pairing by the call's id (ADR-0046 ruling 3, ADR-0047).
+        facts["calls"] = [
+            (tool_of(e.get("action")),
+             (split_suffix(e.get("action"))[1] or {}).get("call"))
+            for e in logged]
         for e in entries:
             if e.get("actor") == "receipts" and str(
                     e.get("action", "")).startswith("second-record-cut:"):
@@ -4956,6 +5409,8 @@ def fold_facts(family, facts):
     met last is the one still being written to (ADR-0018)."""
     family["receipts"] += facts["receipts"]
     family["moments"] += facts["moments"]
+    if "calls" in facts:
+        family["calls"] = family.get("calls", []) + facts["calls"]
     if facts["last"]:
         family["last"] = max(family["last"] or "", facts["last"])
     for key in ("last_grew", "touched", "newest_ts"):
@@ -5078,14 +5533,16 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     remembered, blind = memory["chains"], memory["blind"]
     census, unfiled, closed = take_census(look, remembered)
     repos, families, to_remember = {}, {}, {}
-    events, awakened = [], {}
+    events, awakened, written = [], {}, []
     worst = damaged = 0
     fresh = 0  # alarms this look found, or whose change moved
     for place in census:
-        repo, session, relpath, _ = place
+        repo, session, relpath, log = place
         reading = read_chain(look, place, memory, now, stamp)
         repos.setdefault(repo, {}).setdefault(session, []).append(
             reading.row)
+        if reading.row["left"].get("as_written"):
+            written.append(log)
         worst = max(worst, reading.exit)
         damaged += reading.broken
         memory["keeper"].update(reading.moved)
@@ -5112,7 +5569,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     if look.receiver:
         completeness = watch_receiver(
             look.root, families, read_events(look.root, closed), now,
-            show_before_memory=look.show_before_memory)
+            show_before_memory=look.show_before_memory,
+            acknowledged=memory["acknowledged"])
     else:
         completeness = watch_completeness(
             look.root, look.witness, families, everywhere=look.store,
@@ -5132,10 +5590,14 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # The consumption watch never touches `worst`: a hot session is a
     # reason to look, and the brake is the operator's (issue #67).
     consumption = watch_consumption(families, now)
-    # Only a live alarm raises the exit: an ended deficit is evidence,
-    # and a siren that never stops sounding trains the operator to
-    # ignore the band (the dogfood's lesson).
+    # On the agent's machine only a live alarm raises the exit: an ended
+    # deficit is evidence, and a siren that never stops sounding trains
+    # the operator to ignore the band (the dogfood's lesson). At the
+    # receiver a settled disagreement raises it too, until it is
+    # acknowledged there, since nothing else reads it unprompted
+    # (ADR-0046 ruling 2).
     alarms = sum(s["state"] in ("ALARM-SILENT", "ALARM-DEFICIT")
+                 or s.get("raises", False)
                  for s in completeness["sessions"])
     if alarms:
         worst = max(worst, 6)
@@ -5165,7 +5627,7 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     if note or memory["skipped"]:
         baseline["note"] = "; ".join(
             words for words in (note, memory["skipped"]) if words)
-    recorder, published = machine_readings(look, census)
+    recorder, published = machine_readings(look, census, written)
     report_note = empty_note(look, repos, closed_rows)
     return {
         **({"note": report_note} if report_note else {}),
@@ -5260,7 +5722,7 @@ def memory_notes(look, skipped):
     return notes
 
 
-def machine_readings(look, census):
+def machine_readings(look, census, written=()):
     """(recorder, published): which recorder runs, and whether
     publishing is wired and any head left by that door. Those are the
     on-machine reading's; at the receiver, where nothing of the agent's
@@ -5274,7 +5736,8 @@ def machine_readings(look, census):
                  "note": "what landed here is the census above; what is "
                          "wired to send it is read on the agent's machine"})
     return (recorder_notice(look.witness),
-            published_reading(look.witness, [place[3] for place in census]))
+            published_reading(look.witness, [place[3] for place in census],
+                              written))
 
 
 def empty_note(look, repos, closed_rows):
@@ -5697,9 +6160,19 @@ def keep_memory(path, seen, data, what):
 
 def cmd_acknowledge(args):
     root, store, receiver = chosen_universe(args)
+    if args.session is not None:
+        if not receiver:
+            args.spoken_wrong("--session acknowledges a session at a "
+                              "receiver, where its memory is (ADR-0046): "
+                              "give --receiver DIR")
+        if args.baseline or args.log is not None:
+            args.spoken_wrong("--session takes a SESSION and its STATE, "
+                              "and no LOG, STATE or --baseline beside them")
     if receiver and receiver_missing(root) is not None:
         return EX_NOINPUT
     path, daybook = memory_paths(root, store, receiver)
+    if args.session is not None:
+        return acknowledge_session(root, path, daybook, *args.session)
     if args.baseline:
         if args.log is not None or args.state is not None:
             args.spoken_wrong("--baseline acknowledges the memory itself "
@@ -5855,6 +6328,88 @@ def acknowledge_baseline(root, store, path, daybook, receiver=False):
           f"{len(heads)} chain(s) as they stand now, and {lost}, so the "
           "next scan stamps a new inception and sessions before it go "
           "unjudged. " + MOVES_NO_VERDICT.format("every chain"))
+    return 0
+
+
+def receiver_reading(root, acknowledged):
+    """The completeness reading a scan over a receiver's folder makes
+    now, with nothing written: the chain copies folded by session as the
+    census folds them, against the events there (`watch_receiver`)."""
+    look = Look(root, tick=False, remember=False, receiver=True)
+    closed = []
+    families = {}
+    for (repo, session, _), log in sorted(
+            (look.identity(log), log) for log in look.chains(closed)):
+        relpath = log.relative_to(root).as_posix()
+        fold_facts(families.setdefault((repo, session),
+                                       {"receipts": 0, "last": None,
+                                        "moments": []}),
+                   family_facts(look, relpath, log, read_entries(log), None))
+    return watch_receiver(root, families, read_events(root, closed),
+                          datetime.now(timezone.utc),
+                          acknowledged=acknowledged)
+
+
+def acknowledge_session(root, path, daybook, session, state):
+    """`acknowledge --receiver DIR --session SESSION STATE` (ADR-0046
+    ruling 2): one record in the memory at the receiver, accepting the
+    state a scan reported for a session and the counts it reports now,
+    so the session no longer raises the exit while both stay as they
+    are. Refused, and nothing written, when the session is not in that
+    state now. Only here: on the agent's machine an ended deficit raises
+    nothing, and an acceptance there would sit in the writer's reach
+    (ruling 1, Tripwire's lesson)."""
+    if state == "PENDING-OVERDUE":
+        return refused("PENDING-OVERDUE cannot be acknowledged: the session "
+                       "is still arriving, and its counts move with every "
+                       "call, so an acceptance would hold for seconds. It "
+                       "ends when the receipts arrive, or when the session "
+                       "settles and reads as a finding that can be "
+                       "acknowledged (ADR-0046 ruling 6)")
+    if state not in RECEIVER_FINDINGS:
+        return refused(f"{visible(state)!r} is not a state that raises the "
+                       "exit at the receiver: name the one the scan "
+                       f"reported, {', '.join(RECEIVER_FINDINGS[:-1])} or "
+                       f"{RECEIVER_FINDINGS[-1]}")
+    memory = read_baseline(path, daybook)
+    if memory["blind"]:
+        return refused(f"{memory['note']}. A session is acknowledged once "
+                       "the memory can be read: `supervisor acknowledge "
+                       "--receiver DIR --baseline` comes first")
+    if memory["seen"] is None:
+        return refused(f"there is no baseline at {path.as_posix()}: run "
+                       "`supervisor scan --receiver DIR` first, and "
+                       "acknowledge the state it reports")
+    rows = {row["session"]: row for row in receiver_reading(
+        root, memory["acknowledged"])["sessions"]}
+    row = rows.get(session)
+    if row is None:
+        return refused(f"no session {visible(session)} is read at "
+                       f"{root.as_posix()}: name it as the scan's row "
+                       "prints its `session`")
+    if row["state"] != state:
+        return refused(f"session {visible(session)} reads {row['state']} "
+                       f"now, not {state}: an acknowledgement accepts only "
+                       "the state a scan reported, so look again with "
+                       "`supervisor scan --receiver DIR`")
+    if not row.get("raises"):
+        return refused(f"session {visible(session)} was acknowledged as "
+                       f"{state} at {row['acknowledged']['ts']}, with the "
+                       "counts it reports now; nothing to acknowledge")
+    counts = session_counts(row)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    data = json.loads(memory["seen"])
+    data["acknowledged"] = memory["acknowledged"] + [{
+        "ts": stamp, "session": session, "state": state, "counts": counts}]
+    code = keep_memory(path, memory["seen"], data, "acknowledged")
+    if code is not None:
+        return code
+    print(f"acknowledged: session {visible(session)}, {state}, with "
+          f"{counts['tools']} call(s) reported and {counts['receipts']} "
+          "receipt(s) held; it raises the exit no longer while its state "
+          "and counts stay as they are, and again if they change. The "
+          "record says someone accepted it, not that it is right "
+          "(ADR-0046).")
     return 0
 
 
@@ -6081,7 +6636,7 @@ def panel_tool_key(entry):
         return None
     if actor not in HOOK_ACTORS:
         return "hand-logged"
-    head = str(entry.get("action", "")).split(":", 1)[0].strip()
+    head = tool_of(entry.get("action", ""))
     if not head:
         return "unnamed"
     if head.startswith("mcp__"):
@@ -6288,6 +6843,7 @@ def search_root(root, query, store=False, receiver=False):
                         "chain": log.name, "n": entry.get("n"),
                         "ts": entry.get("ts"), "actor": entry.get("actor"),
                         "action": action,
+                        "listed": listed_action(action),
                     })
     hits.sort(key=lambda hit: str(hit["ts"] or ""), reverse=True)
     return {"root": root.as_posix(), "testimony": TESTIMONY,
@@ -6374,7 +6930,7 @@ def invoking_repo(args):
     link left as typed, ADR-0011), then a worktree resolved to its
     repository. Resolving links here and not there would hash two names
     for one drawer."""
-    spoken = args.repo or os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd()
+    spoken = args.repo or environment("CLAUDE_PROJECT_DIR") or Path.cwd()
     return main_repo_of(Path(os.path.abspath(str(spoken))))
 
 
@@ -6382,7 +6938,7 @@ def invoking_repo(args):
 def store_home():
     """The machine-wide home of hook-written chains (ADR-0011):
     ~/.loxodonta, or wherever LOXODONTA_HOME points."""
-    return (os.environ.get("LOXODONTA_HOME")
+    return (environment("LOXODONTA_HOME")
             or os.path.join(os.path.expanduser("~"), ".loxodonta"))
 
 
@@ -6681,9 +7237,10 @@ def run_action(unit):
     a run says how long it was, the shared tool, and where it ended —
     `14x Read, last: supervisor.py`. The newest detail is shown
     because it is what the session did most recently; the rest is one
-    `timeline` away."""
+    `timeline` away. The digest is a listing, so the suffix is folded
+    (ADR-0047)."""
     rows = unit["rows"]
-    action = str(rows[-1]["entry"].get("action", ""))
+    action = listed_action(rows[-1]["entry"].get("action", ""))
     if len(rows) == 1:
         return action
     label, _, rest = action.partition(":")
@@ -6781,7 +7338,7 @@ def cmd_digest(args):
     all reachable, never all injected), budget-capped, zero subprocess
     spawns — recall owns no verdicts, so nothing here runs verify."""
     if getattr(args, "payload", False) and not args.repo \
-            and not os.environ.get("CLAUDE_PROJECT_DIR"):
+            and not environment("CLAUDE_PROJECT_DIR"):
         args.repo = payload_cwd()  # the environment wins when present
     repo = invoking_repo(args)
     families, rows = gather(project_chains(repo))
@@ -6951,25 +7508,72 @@ def match_address(prefix, logs, where,
         for log, entry in matches[:20]:
             print(f"  {address_of(entry)}  {visible(entry.get('ts', ''))}  "
                   f"session {visible(session_of(log)[:8])}  "
-                  f"{clip(entry.get('action', ''), 60)}", file=sys.stderr)
+                  f"{clip(listed_action(entry.get('action', '')), 60)}", file=sys.stderr)
         return None, 1
     return matches[0], 0
+
+
+FROM_THE_WRITERS_REACH = "testimony from a file in the writer's reach"
+
+
+def call_testimony(log, action, witness):
+    """What the session's transcript says of the call a receipt names,
+    as one line, or None when the receipt carries no call id and input
+    hash or no transcript is found (ADR-0047 ruling 5): the input
+    matches, differs, or the transcript holds no such call. The
+    transcript is in the writer's reach, so this is testimony, and the
+    line says so. The transcript is the one the scan's witness reads for
+    the session (`witness_transcripts`), its subagents' files included;
+    a record that names another session is not this session's call, and
+    a session id held by more than one project folder is said."""
+    fields = split_suffix(action)[1]
+    if not fields or "call" not in fields or "sha256" not in fields:
+        return None
+    session, call = session_of(log), fields["call"]
+    try:
+        found = witness_transcripts(witness, []).get(session)
+        if not found:
+            return None
+        inputs = [(path, block.get("input"))
+                  for path, record, blocks in transcript_records(found[-1], [])
+                  if record.get("sessionId", session) == session
+                  for block in blocks
+                  if isinstance(block, dict)
+                  and block.get("type") == "tool_use"
+                  and block.get("id") == call]
+    except OSError:
+        return None  # a transcript that cannot be read is none found
+    also = (f", one of {len(found)} transcripts named {visible(session)}"
+            ".jsonl under the witness, the one the scan reads"
+            if len(found) > 1 else "")
+    if not inputs:
+        return (f"input: the transcript holds no call {call} "
+                f"({visible(found[-1].as_posix())}{also}), "
+                f"{FROM_THE_WRITERS_REACH}")
+    forms = [input_form(given) for _, given in inputs]
+    same = all(form is not None
+               and hashlib.sha256(form).hexdigest() == fields["sha256"]
+               and len(form) == fields["bytes"] for form in forms)
+    return (f"input: {'matches' if same else 'differs from'} the "
+            f"transcript's record of call {call} "
+            f"({visible(inputs[0][0].as_posix())}{also}), "
+            f"{FROM_THE_WRITERS_REACH}")
 
 
 def cmd_show(args):
     """One full entry by address. The address is the fingerprint: the
     fetched entry is re-hashed against it, so recall's pointers are
-    self-verifying — the one place recall touches a hash, and still not
-    a verdict: a mismatch is a warning that names the real judge."""
+    self-verifying — still not a verdict: a mismatch is a warning that
+    names the real judge. A receipt that names its call and hashes its
+    input is held against the transcript's record of that call
+    (`call_testimony`, ADR-0047), testimony and never a verdict."""
     match, code = resolve_address(args)
     if match is None:
         return code
     log, entry = match
     stored = entry["entry_hash"]
     unhashed = {k: v for k, v in entry.items() if k != "entry_hash"}
-    recomputed = hashlib.sha256(json.dumps(
-        unhashed, sort_keys=True, separators=(",", ":"),
-        ensure_ascii=False).encode("utf-8")).hexdigest()
+    recomputed = hashlib.sha256(canonical_bytes(unhashed)).hexdigest()
     verified = recomputed == stored
 
     # Hashed above on the raw entry; from here on only the display is
@@ -6997,6 +7601,11 @@ def cmd_show(args):
                       f"{visible(ref.get('sha256', ''))}")
     else:
         print("files: (none)")
+    said = call_testimony(log, entry.get("action", ""),
+                          Path(getattr(args, "witness", None)
+                               or WITNESS_ROOT))
+    if said:
+        print(said)
     me = Path(__file__).resolve().as_posix()
     print(f'context: python "{me}" timeline {visible(stored[:8])} '
           f'--repo "{invoking_repo(args).as_posix()}"')
@@ -7037,7 +7646,7 @@ def cmd_search_cli(args):
         print(f"{address_of(entry)}  {visible(ts[:10])} {hhmm(ts)}  "
               f"{visible(repo_name)}/{visible(session[:8])}  "
               f"{clip(entry.get('actor', ''), 16)}  "
-              f"{clip(entry.get('action', ''))}")
+              f"{clip(listed_action(entry.get('action', '')))}")
     return 0
 
 
@@ -7061,7 +7670,7 @@ def cmd_timeline(args):
         mark = "   <- here" if e is entries[idx] else ""
         print(f"{address_of(e)}  {hhmm(str(e.get('ts', '')))}  "
               f"{clip(e.get('actor', ''), 16)}  "
-              f"{clip(e.get('action', ''))}{mark}")
+              f"{clip(listed_action(e.get('action', '')))}{mark}")
     return 0
 
 
@@ -7423,7 +8032,7 @@ def histogram_key(entry):
     actor = entry.get("actor")
     if actor not in HOOK_ACTORS:
         return "other"
-    head = str(entry.get("action", "")).split(":", 1)[0].strip()
+    head = tool_of(entry.get("action", ""))
     if head.startswith("mcp__"):
         return "mcp"
     if actor == "openai-agents" and head != "handoff":
@@ -7745,7 +8354,10 @@ def send_export(data, out, archive):
     then the issue. The issue body is written beside the export first,
     so a missing `gh` leaves everything needed to file by hand."""
     issue = out.with_name(out.stem + ".issue.md")
-    gh = shutil.which("gh")
+    try:
+        gh = helper_path("gh")
+    except FileNotFoundError:
+        gh = None
     if gh is None:
         refused = write_export(issue, issue_body(data, None,
                                                  archive is not None),
@@ -8020,7 +8632,8 @@ def witness_snapshot(report, unit, sessions):
             for row in report.get("completeness", {}).get("sessions", [])}
     names = {log.name for chains in sessions.values() for log in chains}
     verdicts = [{"log": Path(chain["log"]).name, "verdict": chain["verdict"],
-                 "entries": chain["entries"], "anchored": chain["anchored"]}
+                 "entries": chain["entries"], "anchored": chain["anchored"],
+                 "claimed": chain["claimed"]}
                 for repo in report.get("repos", [])
                 for sess in repo.get("sessions", [])
                 for chain in sess.get("chains", [])
@@ -8351,7 +8964,7 @@ def key_fingerprint(public_key):
     it (`ssh-keygen -lf`), or None when the file is not a key it reads.
     The fingerprint is the key's identity (ADR-0008 ruling 6); the
     comment ssh-keygen prints beside it is a name, and stays unread."""
-    listed = subprocess.run(["ssh-keygen", "-lf", public_key],
+    listed = subprocess.run([helper_path("ssh-keygen"), "-lf", public_key],
                             capture_output=True, encoding="utf-8",
                             errors="replace")
     words = listed.stdout.split()
@@ -8374,7 +8987,8 @@ def sign_manifest(stage, keyfile):
     sentence)."""
     manifest = stage / "manifest.json"
     signed = subprocess.run(
-        ["ssh-keygen", "-q", "-Y", "sign", "-n", SIGNATURE_NAMESPACE,
+        [helper_path("ssh-keygen"), "-q", "-Y", "sign", "-n",
+         SIGNATURE_NAMESPACE,
          "-f", str(keyfile), str(manifest)])
     if signed.returncode != 0:
         return None, (f"the manifest was not signed (ssh-keygen exited "
@@ -8383,7 +8997,8 @@ def sign_manifest(stage, keyfile):
     if os.path.isfile(beside):
         line = beside.read_text("utf-8", errors="replace")
     else:
-        derived = subprocess.run(["ssh-keygen", "-y", "-f", str(keyfile)],
+        derived = subprocess.run([helper_path("ssh-keygen"), "-y", "-f",
+                                  str(keyfile)],
                                  stdout=subprocess.PIPE, encoding="utf-8",
                                  errors="replace")
         if derived.returncode != 0:
@@ -8398,7 +9013,8 @@ def sign_manifest(stage, keyfile):
         write_lf(allowed, f"{SIGNATURE_PRINCIPAL} {key}\n")
         with open(manifest, "rb") as shipped:
             verified = subprocess.run(
-                ["ssh-keygen", "-Y", "verify", "-f", str(allowed),
+                [helper_path("ssh-keygen"), "-Y", "verify", "-f",
+                 str(allowed),
                  "-I", SIGNATURE_PRINCIPAL, "-n", SIGNATURE_NAMESPACE,
                  "-s", str(stage / MANIFEST_SIGNATURE)],
                 stdin=shipped, capture_output=True, encoding="utf-8",
@@ -9004,15 +9620,18 @@ KNOWN_COMPLETENESS = ("OK", "LAGGING", "SURPLUS", "QUIET", "ALARM-SILENT",
                       "ALARM-DEFICIT", "IDLE-CLEAN", "IDLE-DEFICIT",
                       "ENDED-CLEAN", "ENDED-DEFICIT", "ENDED-SURPLUS",
                       "UNWITNESSED", "UNWATCHED", "ELSEWHERE", "BEFORE-MEMORY",
-                      "PENDING", "SECOND-RECORD-ABSENT", "SECOND-RECORD-GAP")
+                      "PENDING", "SECOND-RECORD-ABSENT", "SECOND-RECORD-GAP",
+                      "PENDING-OVERDUE")
 KNOWN_LIFECYCLE = ("awake", "waning", "dormant")
 KNOWN_CONSUMPTION = ("RUNNING-HOT", "ENDED-HOT")
 # Every session-end step the recorder writes an attempt row for, in the
 # order the hook runs them apart from the anchor, which stays first for
 # the label order the first release already documented (#245, #248,
-# #250). A step missing here would never be served at zero, and a
-# panel would meet a missing series the first time it failed.
-KNOWN_STEPS = ("anchor", "publish-head", "publish-chain", "stamp")
+# #250), and the send of a chain's anchor and stamp rows after them
+# (ADR-0045 ruling 5). A step missing here would never be served at
+# zero, and a panel would meet a missing series the first time it failed.
+KNOWN_STEPS = ("anchor", "publish-head", "publish-chain", "stamp",
+               "publish-rows")
 
 
 def tallied(values, known):
@@ -9069,8 +9688,9 @@ def metrics_text(report, age_seconds):
           "change appends cannot explain, or could not be read or kept, "
           "or the census could not list a folder, "
           "6 a live session is behind its "
-          "witness, 7 a chain's transcript commitments contradict each "
-          "other", "witness verdict", [((), report.get("exit") or 0)])
+          "witness, or at a receiver a settled session's receipts or "
+          "events fall short and no acknowledgement stands, 7 a chain's "
+          "transcript commitments contradict each other", "witness verdict", [((), report.get("exit") or 0)])
     gauge("loxodonta_scan_age_seconds",
           "Seconds since the scan these numbers come from; a gauge is as "
           "fresh as the last tick", "witness verdict",
@@ -9079,8 +9699,9 @@ def metrics_text(report, age_seconds):
     # the writer-reachable baseline: a count a scrape keeps off the
     # machine, so a list that shrinks is seen to.
     gauge("loxodonta_baseline_acknowledgements",
-          "Acknowledgements on record in the baseline: changes an operator "
-          "accepted with supervisor acknowledge", "testimony",
+          "Acknowledgements on record in the baseline: changes, and at a "
+          "receiver settled sessions, an operator accepted with supervisor "
+          "acknowledge", "testimony",
           [((), len((report.get("baseline") or {}).get("acknowledged")
                     or []))])
 
@@ -9137,22 +9758,39 @@ def metrics_text(report, age_seconds):
     # publish memo is writer-reachable, so a fresh reading there is worth
     # nothing and a stale one is the reason to look. Both skip empty
     # chains. Beside them: the door wired that never took a head (#240).
+    # A head an attestation only claims a block for is unanchored here
+    # and counted beside it: the scan gives verify no block header, so it
+    # checks no block (ADR-0044).
+    heads = [chain["anchors"]["head"] for chain in chains
+             if (chain.get("anchors") or {}).get("head")]
     gauge("loxodonta_heads_unanchored",
-          "Chains whose head no anchor covers yet, from the spans verify "
-          "replayed on the last scan", "verdict",
-          [((), sum(1 for chain in chains
-                    if (chain.get("anchors") or {}).get("head")
-                    and not chain["anchors"]["head"].get("anchored")))])
+          "Chains whose head no anchor with a checked block covers yet, "
+          "from the spans verify replayed on the last scan", "verdict",
+          [((), sum(1 for head in heads if not head.get("anchored")))])
+    gauge("loxodonta_heads_anchor_claimed",
+          "Chains whose head an anchor covers only by its attestation's "
+          "claim, the block not checked, from the spans verify replayed on "
+          "the last scan", "verdict",
+          [((), sum(1 for head in heads
+                    if head.get("claimed") and not head.get("anchored")))])
     gauge("loxodonta_heads_unpublished",
           "Chains whose current head has no row in the publish memo "
           "beside them, chains with no head excluded", "testimony",
           [((), sum(1 for chain in chains
                     if chain.get("head_published") is False))])
+    # A per-entry send that lands writes nothing (ADR-0045 ruling 3), and
+    # the first failed one writes its row whether or not sends landed
+    # before it: the memo cannot tell the two apart, so this says what is
+    # written down and not what left.
     published = report.get("published") or {}
     gauge("loxodonta_publishing_wired_nothing_sent",
           "1 when publishing is wired on the session-end command and "
-          "nothing has left by either route (no chain holds a sent head, "
-          "and none holds a batch the wired remote took), else 0",
+          "nothing is written down as having left by either route (no "
+          "chain holds a sent head, none holds a batch the wired remote "
+          "took, and none sends its entries as each is written with a "
+          "newest send that did not fail), else 0. An entry sent as "
+          "written writes no row when it lands, so entries that left "
+          "before a failed send are not counted",
           "testimony",
           [((), 1 if published.get("wired") and not published.get("sent")
             else 0)])
@@ -10117,6 +10755,8 @@ PAGE = """<!doctype html>
   .tier-broken .chip { color: var(--grave); border-color: var(--grave); }
   .tier-refused .chip { color: #8a6d00; border-color: #8a6d00; }
   .tier-anchored .chip { background: var(--quiet); color: #fff; }
+  .tier-claimed .chip { color: var(--quiet); border-color: var(--quiet);
+                        border-style: dashed; }
   .tier-valid .chip { color: var(--quiet); border-color: var(--quiet); }
   .tier-superseded { opacity: 0.55; }
   .tier-superseded .chip { color: inherit;
@@ -10434,21 +11074,26 @@ function tier(chain) {
   // (.out-of-scope/002), so the files-diverged verdict cannot reach
   // this page — anything unexpected falls to "refused", failing loud.
   if (chain.verdict === "VALID") {
-    return chain.anchored ? "anchored" : "valid";
+    if (chain.anchored) return "anchored";
+    return chain.claimed ? "claimed" : "valid";
   }
   return "refused";  // UNSUPPORTED-VERSION, NO-VERDICT
 }
 
-// What each rung is allowed to claim — VALID and ANCHORED deliberately
-// say different things, because they are different things.
+// What each rung is allowed to claim — VALID, ANCHOR-CLAIMED and
+// ANCHORED deliberately say different things, because they are
+// different things: ANCHORED is kept for a block somebody checked
+// (ADR-0044), and the scan checks none.
 const CLAIM = {
   regenerated: "not the recorded history — an anchor or head record " +
                "contradicts this chain",
   broken: "chain integrity failed — history was altered after the fact",
   refused: "no verdict — a chain nobody can judge still demands attention",
   valid: "intact against itself — tamper-evident, not yet anchored",
-  anchored: "intact and anchored — an attestation names a Bitcoin " +
-            "block, and its merkle root is yours to check",
+  claimed: "intact, and an attestation claims a Bitcoin block; " +
+           "nobody checked the block, and its merkle root is yours to check",
+  anchored: "intact and anchored; a block header given to verify holds " +
+            "the merkle root the proof replays to",
   superseded: "torn tail, already handled — recording continued in a " +
               "sibling chain; kept as quiet evidence",
 };
@@ -10463,7 +11108,8 @@ const MARK = { quiet: "●", damage: "▲", grave: "✕",
 const CHIP = {
   regenerated: c => c.verdict, broken: () => "BROKEN",
   refused: c => c.verdict,
-  valid: () => "VALID", anchored: () => "ANCHORED",
+  valid: () => "VALID", claimed: () => "ANCHOR-CLAIMED",
+  anchored: () => "ANCHORED",
   superseded: () => "BROKEN · superseded",
 };
 
@@ -10492,14 +11138,20 @@ function chainRow(chain) {
   drill.type = "button";
   drill.addEventListener("click", () => runDrill(chain.log));
   row.appendChild(drill);
-  // The line shown is one the scan read as an anchor, by its span; a
-  // line that only starts "ANCHORED" is not taken for one (#349).
-  const spans = (chain.anchors ? chain.anchors.anchored : [])
-    .map(span => "ANCHORED: entries 0.." + span.upto);
-  const anchoredLine = chain.detail.find(line => spans.some(span =>
-    line.startsWith(span + ": ")));
-  row.appendChild(el("p", "claim",
-    rung === "anchored" && anchoredLine ? anchoredLine : CLAIM[rung]));
+  // The line shown is one the scan read as an anchor of this rung, by
+  // its span; a line that only starts "ANCHORED" or "ANCHOR-CLAIMED" is
+  // not taken for one (#349).
+  const a = chain.anchors || {};
+  const starts = rung === "anchored"
+    ? (a.anchored || []).map(span =>
+        "ANCHORED: entries 0.." + span.upto + " existed by ")
+    : rung === "claimed"
+    ? (a.claimed || []).map(span =>
+        "ANCHOR-CLAIMED: entries 0.." + span.upto + ": ")
+    : [];
+  const anchorLine = chain.detail.find(line => starts.some(start =>
+    line.startsWith(start)));
+  row.appendChild(el("p", "claim", anchorLine || CLAIM[rung]));
   if (chain.detail.length) {
     const details = el("details");
     details.appendChild(el("summary", "", "what verify said"));
@@ -10535,6 +11187,14 @@ function renderStrip(report) {
     r.sessions.flatMap(s => s.chains));
   const live = report.completeness.sessions.filter(s =>
     ["ALARM-SILENT", "ALARM-DEFICIT"].includes(s.state));
+  // At a receiver: sessions whose receipts and harness events disagree,
+  // raising the exit (ADR-0046). Settled ones until acknowledged there;
+  // ones still arriving with a call or a counter number overdue until
+  // the receipts arrive or they settle (ruling 6). Neither is the
+  // strip's "stopped arriving" words.
+  const unaccepted = report.completeness.sessions.filter(s => s.raises);
+  const overdue = unaccepted.filter(s => s.state === "PENDING-OVERDUE");
+  const settled = unaccepted.length - overdue.length;
   const regenerated = chains.filter(c => !c.superseded && c.exit === 3);
   const broken = chains.filter(c => !c.superseded &&
                                     c.verdict === "BROKEN");
@@ -10555,7 +11215,8 @@ function renderStrip(report) {
     state.textContent = "RECEIPTS STOPPED ARRIVING";
     why.textContent = live.length + " session(s) visibly active while " +
       "the chain goes quiet — investigate while it is live";
-  } else if (broken.length || changes || report.exit !== 0) {
+  } else if (broken.length || changes || blind || shut ||
+             (report.exit !== 0 && !unaccepted.length)) {
     colour = "damage";
     state.textContent = broken.length ? "HISTORY WAS ALTERED"
                       : changes ? "CHANGED SINCE LAST LOOK"
@@ -10573,6 +11234,22 @@ function renderStrip(report) {
         "unknown, never read as empty"
       : "details in the band below") +
       " (scan exit " + report.exit + ")";
+  } else if (unaccepted.length) {
+    colour = "grave";
+    state.textContent = settled ? "A FINDING NO ONE HAS ACCEPTED"
+                                : "CALLS OVERDUE AT THE RECEIVER";
+    why.textContent = [
+      settled ? settled + " settled session(s) whose receipts and " +
+        "harness events disagree at the receiver, each raising the exit " +
+        "until acknowledged here with supervisor acknowledge --receiver DIR " +
+        "--session" : "",
+      overdue.length ? overdue.length + " session(s) still arriving " +
+        "with a call reported over the settle window ago and no receipt, " +
+        "or a hole in the counter, each raising the exit until the " +
+        "receipts arrive or the session settles" : ""]
+      .filter(Boolean).join("; ") +
+      ", named in the completeness watch below (scan exit " +
+      report.exit + ")";
   } else {
     colour = "quiet";
     state.textContent = "all quiet";
@@ -10615,7 +11292,7 @@ const SEVERITY = ["alarm", "regenerated", "broken", "tripwire", "hot",
 function attentionItems(report) {
   const items = [];
   for (const s of report.completeness.sessions) {
-    if (["ALARM-SILENT", "ALARM-DEFICIT"].includes(s.state)) {
+    if (["ALARM-SILENT", "ALARM-DEFICIT"].includes(s.state) || s.raises) {
       items.push({rank: "alarm", tone: "grave", chip: s.state,
         text: s.repo + " · " + s.session.slice(0, 8) + " — " +
               (s.words || "receipts behind the witness"),
@@ -10788,7 +11465,7 @@ let lastRecall = null;
 
 function worstTier(chains) {
   const ladder = ["regenerated", "broken", "refused", "valid",
-                  "anchored", "superseded"];
+                  "claimed", "anchored", "superseded"];
   const rungs = chains.map(tier);
   for (const rung of ladder) {
     if (rungs.includes(rung)) return rung;
@@ -10882,6 +11559,8 @@ function renderTiles() {
     row.appendChild(el("span", "chip", CHIP[rung](face)));
     if (chains.some(c => c.anchored)) {
       row.appendChild(el("span", "badge", "anchored"));
+    } else if (chains.some(c => c.claimed)) {
+      row.appendChild(el("span", "badge", "anchor claimed"));
     } else if (chains.some(c =>
         (c.anchors && c.anchors.pending || []).length)) {
       row.appendChild(el("span", "badge", "anchor pending"));
@@ -10902,10 +11581,12 @@ function renderTiles() {
       .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))[0];
     const left = newest(chains.map(c => c.left));
     const failed = newest(chains.map(c => c.last_failed));
+    const asWritten = chains.some(c => c.left && c.left.as_written);
     tile.appendChild(el("span", "meta",
-      (left ? whatLeft(left.via) + " last left " + since(left.ts) +
-              " ago (" + left.via + ")"
-            : "no head has left this machine") +
+      (asWritten ? AS_WRITTEN
+       : left ? whatLeft(left.via) + " last left " + since(left.ts) +
+                " ago (" + left.via + ")"
+       : "no head has left this machine") +
       (failed ? " · last failed: " + failed.step + " " + since(failed.ts) +
                 " ago, " + failed.outcome
               : "")));
@@ -11120,6 +11801,14 @@ function render(report) {
   // What an operator accepted, as kept in the baseline: testimony, drawn
   // plainly, raising nothing.
   for (const record of (report.baseline.acknowledged || [])) {
+    // A session accepted at a receiver (ADR-0046): its memory is out of
+    // the writer's reach, so it is not called writer-reachable.
+    if (record.session) {
+      tripwire.appendChild(el("p", "claim", "acknowledged " +
+        (record.ts || "") + " · session " + record.session + " · " +
+        record.state + " (an operator's word, kept at the receiver)"));
+      continue;
+    }
     const what = record.log
       ? record.log + " · " + record.change + " · remembered " +
         seen(record.remembered) + " · accepted " + seen(record.accepted)
@@ -11135,12 +11824,16 @@ function render(report) {
   const watch = document.getElementById("watch");
   watch.replaceChildren();
   const LIVE = ["ALARM-SILENT", "ALARM-DEFICIT"];
-  const NOTEWORTHY = LIVE.concat(["ENDED-DEFICIT", "ENDED-SURPLUS",
+  const NOTEWORTHY = LIVE.concat(["PENDING-OVERDUE", "ENDED-DEFICIT",
+                                  "ENDED-SURPLUS",
                                   "SURPLUS", "LAGGING", "IDLE-DEFICIT",
                                   "SECOND-RECORD-ABSENT",
                                   "SECOND-RECORD-GAP"]);
+  // At a receiver a settled disagreement raises the exit until it is
+  // acknowledged there (ADR-0046), and is drawn as live as it counts.
+  const raising = s => LIVE.includes(s.state) || Boolean(s.raises);
   const watchRow = s => {
-    const live = LIVE.includes(s.state);
+    const live = raising(s);
     const row = el("div", "watch-row " + (live ? "live" : "quiet"));
     row.appendChild(el("span", "chip", s.state));
     // Paired tool by tool (ADR-0034), the totals can match while a tool
@@ -11164,6 +11857,15 @@ function render(report) {
       (s.gap.count > s.gap.numbers.length ? ", …" : "")));
     if (s.second_record_cut) row.appendChild(el("p", "claim",
       "the chain says: " + s.second_record_cut));
+    if (s.missing_calls) row.appendChild(el("p", "claim",
+      s.missing_calls.count + " call(s) with no receipt, by id: " +
+      s.missing_calls.calls.join(", ") +
+      (s.missing_calls.count > s.missing_calls.calls.length ? ", …" : "")));
+    if (s.paired_by) row.appendChild(el("p", "claim",
+      "paired by " + s.paired_by));
+    if (s.acknowledged) row.appendChild(el("p", "claim",
+      "acknowledged " + (s.acknowledged.ts || "") + " as " +
+      s.acknowledged.state + ": " + s.acknowledged.words));
     // A session whose receipts landed in more than one drawer is
     // counted once, against the whole family — say so, so the tally
     // never looks larger than the drawer it is filed under.
@@ -11177,10 +11879,10 @@ function render(report) {
   // the quiet ones fold away, present but not shouting.
   const noteworthy = report.completeness.sessions.filter(
     s => NOTEWORTHY.includes(s.state));
-  for (const s of noteworthy.filter(s => LIVE.includes(s.state))) {
+  for (const s of noteworthy.filter(raising)) {
     watch.appendChild(watchRow(s));
   }
-  const quiet = noteworthy.filter(s => !LIVE.includes(s.state));
+  const quiet = noteworthy.filter(s => !raising(s));
   if (quiet.length) {
     const fold = el("details");
     fold.appendChild(el("summary", "", quiet.length +
@@ -11471,6 +12173,12 @@ function since(ts) {
 
 // What left by a given door (#248): the chain route sends the
 // entries themselves, the head and the anchor send a fingerprint.
+// The per-entry send writes no chain row (ADR-0045 ruling 3): what the
+// recorder's wiring and its last note say, and the receiver's scan says
+// what arrived.
+const AS_WRITTEN =
+  "entries leave as each is written, by the recorder's own note";
+
 function whatLeft(via) {
   return via === "published-chain" ? "entries" : "a head";
 }
@@ -11495,6 +12203,15 @@ function renderAnchors(report) {
           row.appendChild(el("span", "bare",
                              "covers entries 0.." + span.upto));
         }
+        // ANCHOR-CLAIMED: the height is the attestation's word and
+        // nobody checked the block (ADR-0044).
+        for (const span of a.claimed || []) {
+          row.appendChild(el("span", "height",
+                             "block " + span.height + " claimed"));
+          row.appendChild(el("span", "bare",
+                             "covers entries 0.." + span.upto +
+                             ", block not checked"));
+        }
         for (const proof of a.pending) {
           const old = Date.now() - Date.parse(proof.submitted)
                       > PENDING_STALE;
@@ -11503,7 +12220,9 @@ function renderAnchors(report) {
             "pending " + since(proof.submitted) + " via " +
             proof.calendar));
         }
-        if (a.head && !a.head.anchored) {
+        // A claimed head is not stale work: a proof came back, and its
+        // block is the recipient's to check.
+        if (a.head && !a.head.anchored && !a.head.claimed) {
           const old = a.head.ts &&
             Date.now() - Date.parse(a.head.ts) > BARE_STALE;
           row.appendChild(el("span", "bare" + (old ? " stale" : ""),
@@ -11516,7 +12235,9 @@ function renderAnchors(report) {
         // are writer-reachable); a stale one is the reason to look.
         const left = chain.left;
         if (left) {
-          if (left.ts) {
+          if (left.as_written) {
+            row.appendChild(el("span", "bare", AS_WRITTEN));
+          } else if (left.ts) {
             const old = Date.now() - Date.parse(left.ts) > BARE_STALE;
             row.appendChild(el("span", "bare" + (old ? " stale" : ""),
               whatLeft(left.via) + " last left " + since(left.ts) +
@@ -12098,7 +12819,7 @@ function hitRow(hit) {
   row.appendChild(el("span", "where", hit.repo + " · " + hit.session));
   row.appendChild(el("span", "entry",
     "entry " + hit.n + (hit.ts ? " · " + hit.ts : "")));
-  row.appendChild(el("p", "said", hit.action));
+  row.appendChild(el("p", "said", hit.listed));
   row.addEventListener("click", () => visit(hit));
   return row;
 }
@@ -12193,6 +12914,39 @@ GIT_TIMEOUT = 10
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def helper_path(name):
+    """The full path of the helper program `name` (openssl, ssh-keygen,
+    git, gh, claude), found by walking PATH: only entries that are
+    absolute paths, never an empty one, a relative one or one that is
+    the working directory under any spelling, so a file of that name in
+    the folder a check is run from is never the program that runs. On
+    Windows, where a bare name is looked for in the working directory
+    before PATH, an entry with no drive letter or server is read against
+    the working directory's drive, so it counts as relative there; the
+    names tried are `name.exe` and `name.com`, never a batch file, which
+    would run through cmd.exe. Raises FileNotFoundError when none is
+    found, as running an absent program does, so a missing helper is
+    said as it always was."""
+    windows = sys.platform == "win32"
+    endings = (".exe", ".com") if windows else ("",)
+    for folder in os.get_exec_path():
+        absolute = os.path.isabs(folder) and (
+            not windows or os.path.splitdrive(folder)[0] != "")
+        if not absolute:
+            continue
+        try:
+            if os.path.samefile(folder, os.getcwd()):
+                continue
+        except OSError:
+            continue  # an entry that cannot be compared is not trusted
+        for ending in endings:
+            found = os.path.join(folder, name + ending)
+            if os.path.isfile(found) and os.access(found, os.X_OK):
+                return found
+    raise FileNotFoundError(errno.ENOENT, "not found on PATH", name)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def checkout_commit(home):
     """The short commit of the git checkout `home` sits in, or "unknown"
     when git cannot say: no git on this machine, no checkout around the
@@ -12201,7 +12955,7 @@ def checkout_commit(home):
     to fetch a newer one."""
     try:
         asked = subprocess.run(
-            ["git", "-C", home, "rev-parse", "--short", "HEAD"],
+            [helper_path("git"), "-C", home, "rev-parse", "--short", "HEAD"],
             # Never a pipe on stderr: a program git starts inherits it,
             # and on Windows the timeout then waits for that program.
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -12325,7 +13079,10 @@ def main(argv):
                            "as the witness, every tool owing a receipt, "
                            "the memory in DIR/supervisor. A session is "
                            "judged once nothing of it has arrived for "
-                           "SUPERVISOR_SETTLE_SECONDS (7 hours). Not "
+                           "SUPERVISOR_SETTLE_SECONDS (1 hour), and a "
+                           "session short of receipts, or of events, "
+                           "raises the exit until `acknowledge --receiver "
+                           "DIR --session` accepts it (ADR-0046). Not "
                            "with --root")
     scan.add_argument("--json", action="store_true",
                       help="compact machine output (default pretty-prints)")
@@ -12364,9 +13121,10 @@ def main(argv):
     calibrate_cmd.set_defaults(func=cmd_calibrate)
     acknowledge = sub.add_parser(
         "acknowledge",
-        help="accept the state a scan reported for one chain, or start a "
-             "baseline that cannot be read afresh (ADR-0039): one record "
-             "every later report shows; it moves no verdict")
+        help="accept the state a scan reported for one chain, or at a "
+             "receiver for one session, or start a baseline that cannot "
+             "be read afresh (ADR-0039, ADR-0046): one record every later "
+             "report shows; it moves no verdict of verify's")
     acknowledge.add_argument(
         "log", nargs="?", default=None, metavar="LOG",
         help="the chain, as the scan's event prints its `log`")
@@ -12391,6 +13149,13 @@ def main(argv):
         "--receiver", default=None, metavar="DIR",
         help="the receiver's data directory whose memory this moves, "
              "DIR/supervisor, and no other (ADR-0041). Not with --root")
+    acknowledge.add_argument(
+        "--session", nargs=2, default=None, metavar=("SESSION", "STATE"),
+        help="with --receiver: accept the state a scan there reported for "
+             "a session, ENDED-DEFICIT, SECOND-RECORD-ABSENT or "
+             "SECOND-RECORD-GAP, with the counts it reports now, so it "
+             "raises the exit no longer until they change (ADR-0046). "
+             "Refused when the session is not in that state")
     acknowledge.set_defaults(func=cmd_acknowledge,
                              spoken_wrong=acknowledge.error)
     serve = sub.add_parser(
@@ -12446,8 +13211,10 @@ def main(argv):
     recall_common.add_argument(
         "--root", default=None,
         help="folder of repos for --all (default: the repo's parent)")
+    # No abbreviations: MANAGED_RUN reads `--managed` whole from the
+    # command at import, so the parser must not take `--manag` for it.
     digest = sub.add_parser(
-        "digest",
+        "digest", allow_abbrev=False,
         help="the session-start injection: this repo's recent history, "
              "budget-capped, testimony-labeled")
     digest.add_argument("--repo", default=None,
@@ -12462,11 +13229,21 @@ def main(argv):
                              "one (Codex wiring, ADR-0020)")
     digest.add_argument("--since", default=None, metavar="YYYY-MM-DD",
                         help="only entries on or after this date")
+    digest.add_argument("--managed", action="store_true",
+                        help="read no environment variable but "
+                             "CLAUDE_PROJECT_DIR: the store and the managed "
+                             "file are the built-in ones. Only `install-hook "
+                             "--managed` writes this (ADR-0043)")
     digest.set_defaults(func=cmd_digest)
     show = sub.add_parser(
         "show", parents=[recall_common],
         help="one full entry by entry address (self-verifying)")
     show.add_argument("address", help="entry-hash prefix, 4+ hex chars")
+    show.add_argument("--witness", default=str(WITNESS_ROOT),
+                      help="the harness transcript layout where the "
+                           "session's transcript is looked for, to compare "
+                           "a receipt's input hash with its record of the "
+                           "call (ADR-0047)")
     show.set_defaults(func=cmd_show)
     verify = sub.add_parser(
         "verify", parents=[recall_common],
@@ -12558,7 +13335,8 @@ def main(argv):
                          help="seal the package: post the manifest's sha256 "
                               "to the OpenTimestamps calendars once and "
                               "ship the proof beside it, so verify-package "
-                              "can earn + ANCHORED (ADR-0026 ruling 4). "
+                              "given the block's header can earn + ANCHORED "
+                              "(ADR-0026 ruling 4, ADR-0044). "
                               "Nothing leaves the machine without this")
     package.add_argument("--calendar", action="append", default=None,
                          metavar="URL",

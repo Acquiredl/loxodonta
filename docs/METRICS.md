@@ -38,17 +38,18 @@ The help line in the table is exactly the one the route prints, with its grade i
 
 | Metric | Labels | Grade | Help line |
 |---|---|---|---|
-| `loxodonta_scan_exit_code` | none | witness verdict | The last scan's exit code: 0 nothing demanding attention, 1 to 4 the worst verify exit among the chains (a chain verify could not judge at all counts as 4), 5 the baseline saw a change appends cannot explain, or could not be read or kept, or the census could not list a folder, 6 a live session is behind its witness, 7 a chain's transcript commitments contradict each other |
+| `loxodonta_scan_exit_code` | none | witness verdict | The last scan's exit code: 0 nothing demanding attention, 1 to 4 the worst verify exit among the chains (a chain verify could not judge at all counts as 4), 5 the baseline saw a change appends cannot explain, or could not be read or kept, or the census could not list a folder, 6 a live session is behind its witness, or at a receiver a settled session's receipts or events fall short and no acknowledgement stands, 7 a chain's transcript commitments contradict each other |
 | `loxodonta_scan_age_seconds` | none | witness verdict | Seconds since the scan these numbers come from; a gauge is as fresh as the last tick |
-| `loxodonta_baseline_acknowledgements` | none | testimony | Acknowledgements on record in the baseline: changes an operator accepted with supervisor acknowledge |
+| `loxodonta_baseline_acknowledgements` | none | testimony | Acknowledgements on record in the baseline: changes, and at a receiver settled sessions, an operator accepted with supervisor acknowledge |
 | `loxodonta_chains` | `verdict` | verdict | Chains by the verdict verify handed them on the last scan, torn tails a sibling continued excluded |
 | `loxodonta_chains_superseded` | none | verdict | Chains verify called BROKEN for a torn tail alone, stood down because a sibling chain continued the recording |
 | `loxodonta_completeness_sessions` | `state` | witness verdict | Sessions by completeness state, the chain paired with the harness transcript that witnessed it |
 | `loxodonta_lifecycle_sessions` | `state` | witness verdict | Sessions by dormancy tier, decided by when the supervisor's own scans last saw the chain's head move |
 | `loxodonta_consumption_sessions` | `state` | testimony | Sessions whose busiest hour ran past the store's own norm, still receiving or gone quiet |
-| `loxodonta_heads_unanchored` | none | verdict | Chains whose head no anchor covers yet, from the spans verify replayed on the last scan |
+| `loxodonta_heads_unanchored` | none | verdict | Chains whose head no anchor with a checked block covers yet, from the spans verify replayed on the last scan |
+| `loxodonta_heads_anchor_claimed` | none | verdict | Chains whose head an anchor covers only by its attestation's claim, the block not checked, from the spans verify replayed on the last scan |
 | `loxodonta_heads_unpublished` | none | testimony | Chains whose current head has no row in the publish memo beside them, chains with no head excluded |
-| `loxodonta_publishing_wired_nothing_sent` | none | testimony | 1 when publishing is wired on the session-end command and nothing has left by either route (no chain holds a sent head, and none holds a batch the wired remote took), else 0 |
+| `loxodonta_publishing_wired_nothing_sent` | none | testimony | 1 when publishing is wired on the session-end command and nothing is written down as having left by either route (no chain holds a sent head, none holds a batch the wired remote took, and none sends its entries as each is written with a newest send that did not fail), else 0. An entry sent as written writes no row when it lands, so entries that left before a failed send are not counted |
 | `loxodonta_last_attempt_failed` | `step` | testimony | 1 when some chain's newest failed session-end attempt is this step, else 0 |
 | `loxodonta_store_drawers` | none | testimony | Drawers in the store, one per project |
 | `loxodonta_store_sessions` | none | testimony | Sessions in the store, counted per drawer, sibling chains folded into one |
@@ -62,10 +63,10 @@ Each is the scan's own string, unchanged, and every one of them is on every scra
 | Metric | Label | Values |
 |---|---|---|
 | `loxodonta_chains` | `verdict` | `VALID`, `BROKEN`, `ANCHOR-MISMATCH`, `ANCHOR-INVALID`, `ANCHOR-PENDING`, `ANCHOR-UNANSWERED`, `TRANSCRIPT-DIVERGED`, `UNSUPPORTED-VERSION`, `NO-VERDICT` |
-| `loxodonta_completeness_sessions` | `state` | `OK`, `LAGGING`, `SURPLUS`, `QUIET`, `ALARM-SILENT`, `ALARM-DEFICIT`, `IDLE-CLEAN`, `IDLE-DEFICIT`, `ENDED-CLEAN`, `ENDED-DEFICIT`, `ENDED-SURPLUS`, `UNWITNESSED`, `UNWATCHED`, `ELSEWHERE`, `BEFORE-MEMORY`, `PENDING`, `SECOND-RECORD-ABSENT`, `SECOND-RECORD-GAP` |
+| `loxodonta_completeness_sessions` | `state` | `OK`, `LAGGING`, `SURPLUS`, `QUIET`, `ALARM-SILENT`, `ALARM-DEFICIT`, `IDLE-CLEAN`, `IDLE-DEFICIT`, `ENDED-CLEAN`, `ENDED-DEFICIT`, `ENDED-SURPLUS`, `UNWITNESSED`, `UNWATCHED`, `ELSEWHERE`, `BEFORE-MEMORY`, `PENDING`, `SECOND-RECORD-ABSENT`, `SECOND-RECORD-GAP`, `PENDING-OVERDUE` |
 | `loxodonta_lifecycle_sessions` | `state` | `awake`, `waning`, `dormant` |
 | `loxodonta_consumption_sessions` | `state` | `RUNNING-HOT`, `ENDED-HOT` |
-| `loxodonta_last_attempt_failed` | `step` | `anchor`, `publish-head`, `publish-chain`, `stamp` |
+| `loxodonta_last_attempt_failed` | `step` | `anchor`, `publish-head`, `publish-chain`, `stamp`, `publish-rows` |
 
 Four notes on that table.
 
@@ -74,12 +75,12 @@ Four notes on that table.
 - **`BEFORE-MEMORY` is a counted block, not a run of rows.** A session older than the supervisor's first look takes no row anywhere (ADR-0029); the block's count is that label's value, so a store full of them reads as unjudged rather than as a clean bill.
 - **A session with no dormancy tier is in none of the three.** The tier comes from the completeness watch's pairing; a session it never paired has no tier, and the three lifecycle samples will not add up to the session count.
 
-### What the two head gauges count, and what they do not
+### What the head gauges count, and what they do not
 
-- **`loxodonta_heads_unanchored` counts every `BROKEN` chain as unanchored.** `verify` returns at the break, before it ever runs its anchor check, so no `ANCHORED` span reaches the scan and the head reads uncovered whether or not a proof exists beside it. The direction is toward the alarm, which is the right way for a reading to be wrong, and the broken count beside it says why.
-- **An anchored head is one whose proof completes, not one whose block was checked.** The scan runs `verify --anchors` with no `--block-header`, so every `ANCHORED` span it reads is an attestation's claim about a block nothing here has seen (docs/ANCHORING.md §3). It counts as anchored all the same: the gauge says whether a head left by the anchor door and came back with a proof, and checking the block is the recipient's step.
-- **Both gauges skip a chain with no entries.** A chain with nothing in it has no head, so it is neither anchored nor unanchored and neither published nor unpublished. It still counts in `loxodonta_store_chains`, so the three will not add up, deliberately.
-- **`loxodonta_heads_unpublished` is about the publish door only.** It asks whether the chain's current head has a row in the publish memo beside it, which is the keeper's own already-sent test with the cadence taken out. A head that left by the anchor door has not been published and is counted here; that is not a contradiction, it is two different doors. Beside it, `loxodonta_publishing_wired_nothing_sent` is the store-wide case the scan already says in one sentence: publishing is wired on the session-end command and nothing has left by either route (#240 part 3); the chain route counts only a batch the remote it is wired to took (#263). One silent route beside one that sends is the scan's sentence, which names the route, and not this gauge, which stays at 0.
+- **`loxodonta_heads_unanchored` counts every `BROKEN` chain as unanchored.** `verify` returns at the break, before it ever runs its anchor check, so no `ANCHORED` or `ANCHOR-CLAIMED` span reaches the scan and the head reads uncovered whether or not a proof exists beside it. The direction is toward the alarm, which is the right way for a reading to be wrong, and the broken count beside it says why.
+- **An anchored head is one whose block was checked, and the scan checks none.** The scan runs `verify --anchors` with no `--block-header`, so every span it reads is `ANCHOR-CLAIMED`, an attestation's claim about a block nothing here has seen (docs/ANCHORING.md §3), and the head counts as unanchored. `loxodonta_heads_anchor_claimed` counts those heads apart: each left by the anchor door and came back with a proof, and checking its block is the recipient's step (ADR-0044).
+- **The head gauges skip a chain with no entries.** A chain with nothing in it has no head, so it is neither anchored nor unanchored and neither published nor unpublished. It still counts in `loxodonta_store_chains`, so the three will not add up, deliberately.
+- **`loxodonta_heads_unpublished` is about the publish door only.** It asks whether the chain's current head has a row in the publish memo beside it, which is the keeper's own already-sent test with the cadence taken out. A head that left by the anchor door has not been published and is counted here; that is not a contradiction, it is two different doors. Beside it, `loxodonta_publishing_wired_nothing_sent` is the store-wide case the scan already says in one sentence: publishing is wired on the session-end command and nothing is written down as having left by either route (#240 part 3); the chain route counts only a batch the remote it is wired to took (#263), or a chain whose wired recording command sends each entry as it is written and whose last send did not fail (ADR-0045). One silent route beside one that sends is the scan's sentence, which names the route, and not this gauge, which stays at 0.
 
 ### One reading that is deliberately absent
 
