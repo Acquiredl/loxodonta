@@ -32,9 +32,10 @@ from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
 
 from test_supervisor import (FIXTURE_RECEIPTS, FIXTURE_SESSION, ago,
                              assert_replaced_whole, chain_copy, hold,
-                             install_witness_hook, prime_memory,
-                             read_line_within, receiver_folder,
-                             unreadable_depth, write_transcript)
+                             install_witness_hook, lay_events, post_event,
+                             prime_memory, read_line_within, received_ago,
+                             receiver_folder, unreadable_depth,
+                             write_transcript)
 
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
@@ -1961,3 +1962,170 @@ class ReceiverServeTest(ServerFixture):
 
         self.assertEqual(self.proc.returncode, 64, err)
         self.assertIn("--receiver reads a receiver's data directory", err)
+
+    def accepted_strip(self, *findings):
+        """Scan the receiver's folder, accept each (session, state) there
+        with `acknowledge --receiver`, then serve it: the strip the page
+        draws once nothing raises (#613)."""
+        scan = run(SUPERVISOR, "scan", "--receiver", str(self.data), "--json",
+                   timeout=180, env=self.env)
+        self.assertEqual(scan.returncode, 6, scan.stderr)
+        for session, state in findings:
+            accepted = run(SUPERVISOR, "acknowledge", "--receiver",
+                           str(self.data), "--session", session, state,
+                           timeout=180, env=self.env)
+            self.assertEqual(accepted.returncode, 0,
+                             accepted.stdout + accepted.stderr)
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 0)
+        rows = {row["session"]: row
+                for row in served["completeness"]["sessions"]}
+        for session, state in findings:
+            self.assertEqual(rows[session]["state"], state)
+            self.assertTrue(rows[session]["acknowledged"]["holds"])
+        return strip_drawn(self, page, served)
+
+    def test_an_accepted_shortfall_says_it_was_accepted_with_its_counts(self):
+        # #613: the receipts are still missing once someone accepts the
+        # shortfall; the strip says so, with the counts, never "every
+        # receipt accounted for". The exit stays 0 (ADR-0046 ruling 2).
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+
+        strip = self.accepted_strip((FIXTURE_SESSION, "ENDED-DEFICIT"))
+
+        self.assertEqual((strip["colour"], strip["state"]),
+                         ("quiet", "all quiet"))
+        self.assertEqual(strip["why"], (
+            "1 chain(s), 1 finding(s) accepted at the receiver, still as "
+            "found: 3253bacd ENDED-DEFICIT, 2 owed, 1 received, "
+            "1 missing"))
+
+    def test_an_accepted_absent_or_gapped_second_record_never_reads_complete(self):
+        # #613 on the other two findings the receiver accepts: events that
+        # never arrived, and events lost on the way.
+        lay_events(self.data, drop=(29, 30))
+        chain_copy(self.data, "cut-session-1111")
+
+        strip = self.accepted_strip(("cut-session-1111", "SECOND-RECORD-ABSENT"),
+                                    (FIXTURE_SESSION, "SECOND-RECORD-GAP"))
+
+        self.assertEqual((strip["colour"], strip["state"]),
+                         ("quiet", "all quiet"))
+        self.assertNotIn("accounted for", strip["why"])
+        self.assertIn("2 finding(s) accepted at the receiver", strip["why"])
+        self.assertIn("3253bacd SECOND-RECORD-GAP, 2 owed, 4 received, "
+                      "2 event number(s) missing", strip["why"])
+        self.assertIn("cut-sess SECOND-RECORD-ABSENT, 4 received, no harness "
+                      "events", strip["why"])
+
+
+    def test_a_session_id_reaches_the_strip_in_a_safe_alphabet(self):
+        # #613: a receiver's events can name a session with any
+        # character; on the headline a right-to-left override and the
+        # like read as ?, never as themselves.
+        session = "‮evil-0001"
+        post_event(self.data, 0, "tool_result", received_ago(7200),
+                   tool="Bash", session=session)
+
+        strip = self.accepted_strip((session, "ENDED-DEFICIT"))
+
+        self.assertNotIn("‮", strip["why"])
+        self.assertIn("?evil-00 ENDED-DEFICIT, 1 owed, 0 received, "
+                      "1 missing", strip["why"])
+
+class QuietStripTest(ServerFixture):
+    """The strip's quiet words over a look that raises nothing: true of
+    every row in the report, never "every receipt accounted for" while a
+    row is short of receipts (#613)."""
+
+    def setUp(self):
+        super().setUp()
+        self.witness = temp_folder(self) / "witness"
+        install_witness_hook(self.witness)
+        prime_memory(self.root)
+
+    def session(self, name, calls, receipts=1):
+        """A chain of `receipts` Bash receipts and a transcript of Bash
+        calls at `calls`, each an age in seconds."""
+        log = make_chain(self.root / "alpha" / "receipts", name, entries=0)
+        for _ in range(receipts):
+            log_entry(log, "Bash: ls")
+        write_transcript(self.witness, self.root / "alpha", name,
+                         event_times=[ago(age) for age in calls],
+                         idle=min(calls))
+
+    def drawn(self, extra_env=None):
+        """Serve the root, and the report and the strip drawn over it."""
+        self.serve(extra_env=extra_env,
+                   extra_args=("--witness", str(self.witness)))
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 0)
+        strip = strip_drawn(self, page, served)
+        self.assertEqual((strip["colour"], strip["state"]),
+                         ("quiet", "all quiet"))
+        return served, strip
+
+    def test_an_ended_session_short_of_receipts_never_reads_accounted_for(self):
+        # On the agent's machine an ended deficit is evidence and exit 0
+        # (ADR-0046 ruling 1), so the strip stays quiet; its words say a
+        # session ended short, with its counts.
+        self.session("sess-lost", [7200, 7100, 7000])
+
+        served, strip = self.drawn()
+
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["deficit"]), ("ENDED-DEFICIT", 2))
+        self.assertEqual(strip["why"], (
+            "1 chain(s), 1 session(s) short of receipts, kept as evidence: "
+            "sess-los ENDED-DEFICIT, 3 owed, 1 received, 2 missing"))
+
+    def test_a_look_with_no_row_short_reads_every_receipt_accounted_for(self):
+        self.session("sess-whole", [7000])
+
+        served, strip = self.drawn()
+
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["deficit"]), ("ENDED-CLEAN", 0))
+        self.assertEqual(strip["why"],
+                         "1 chain(s), every receipt accounted for")
+
+    def test_a_session_behind_inside_the_grace_window_is_not_called_missing(self):
+        # LAGGING: the receipt may still arrive (WATCH_WORDS), so it is
+        # neither evidence nor missing. A wide grace keeps the test off
+        # the clock.
+        self.session("sess-lag", [600, 60])
+
+        served, strip = self.drawn({"SUPERVISOR_GRACE_SECONDS": "3600"})
+
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["deficit"]), ("LAGGING", 1))
+        self.assertEqual(strip["why"], (
+            "1 chain(s), 1 session(s) behind the witness inside the grace "
+            "window: sess-lag LAGGING, 2 owed, 1 received, 1 not yet "
+            "received"))
+
+    def test_a_group_names_three_sessions_and_counts_the_rest(self):
+        for n in range(5):
+            self.session(f"sess-lost-{n}", [7200, 7100, 7000])
+
+        served, strip = self.drawn()
+
+        self.assertEqual([row["state"] for row
+                          in served["completeness"]["sessions"]],
+                         ["ENDED-DEFICIT"] * 5)
+        self.assertTrue(strip["why"].startswith(
+            "5 chain(s), 5 session(s) short of receipts, kept as evidence: "),
+            strip["why"])
+        self.assertEqual(strip["why"].count("ENDED-DEFICIT"), 3)
+        self.assertTrue(strip["why"].endswith(
+            "; and 2 more, named in the completeness watch below"),
+            strip["why"])

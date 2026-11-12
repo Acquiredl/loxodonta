@@ -11385,8 +11385,51 @@ function renderStrip(report) {
   } else {
     colour = "quiet";
     state.textContent = "all quiet";
-    why.textContent = chains.length + " chain(s), every receipt " +
-      "accounted for" +
+    // Quiet raises nothing; it does not mean nothing is missing. A
+    // finding accepted at the receiver (ADR-0046 ruling 2), a session
+    // ended short and kept as evidence (ADR-0046 ruling 1, ADR-0016) and
+    // one behind inside the grace window are each said with their
+    // counts, and "every receipt accounted for" only when no row is
+    // short (#613). An id goes on the headline as ASCII letters, digits
+    // and -_. only, anything else as ?: a receiver's events can name a
+    // session with any character, control and bidi ones included.
+    const id = s => String(s.session).replace(/[^A-Za-z0-9_.-]/g, "?")
+      .slice(0, 8);
+    const counted = (s, lost) => id(s) + " " + s.state + ", " +
+      (s.state === "SECOND-RECORD-ABSENT"
+        ? s.receipts + " received, no harness events"
+        : s.tools + " owed, " + s.receipts + " received" +
+          (s.deficit ? ", " + s.deficit + " " + lost : "")) +
+      (s.gap ? ", " + s.gap.count + " event number(s) missing" : "");
+    const first = (rows, lost) => rows.slice(0, 3)
+      .map(s => counted(s, lost)).join("; ") + (rows.length > 3
+        ? "; and " + (rows.length - 3) + " more, named in the completeness " +
+          "watch below" : "");
+    const sessions = report.completeness.sessions;
+    const accepted = sessions.filter(s =>
+      s.acknowledged && s.acknowledged.holds);
+    const evidence = sessions.filter(s => s.deficit > 0 &&
+      ["ENDED-DEFICIT", "IDLE-DEFICIT"].includes(s.state) &&
+      !accepted.includes(s));
+    const behind = sessions.filter(s =>
+      s.deficit > 0 && s.state === "LAGGING");
+    const said = [];
+    if (accepted.length) {
+      said.push(accepted.length + " finding(s) accepted at the receiver, " +
+        "still as found: " + first(accepted, "missing"));
+    }
+    if (evidence.length) {
+      said.push(evidence.length + " session(s) short of receipts, kept as " +
+        "evidence: " + first(evidence, "missing"));
+    }
+    if (behind.length) {
+      said.push(behind.length + " session(s) behind the witness inside " +
+        "the grace window: " + first(behind, "not yet received"));
+    }
+    const short = sessions.some(s => s.deficit > 0);
+    why.textContent = chains.length + " chain(s)" +
+      (said.length ? ", " + said.join(" · ")
+       : short ? "" : ", every receipt accounted for") +
       (quietEvidence ? " — " + quietEvidence + " superseded tear(s) " +
                        "kept as quiet evidence" : "");
   }
