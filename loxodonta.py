@@ -538,13 +538,13 @@ def judge_prefixes(marks, transcript_path):
     except FileNotFoundError:
         # Absence is a note, never a verdict: the harness cleans
         # transcripts on a retention cycle (ADR-0017).
-        print(f"TRANSCRIPT-UNRESOLVED: no transcript at {transcript_path} "
+        print(f"TRANSCRIPT-UNRESOLVED: no transcript at {visible(transcript_path)} "
               "— commitments unjudgeable; chain verdict unaffected")
         return False
     except OSError as error:
         # A folder, a pipe or a device in its place is named and never
         # waited on or read (#386); a note like absence, never a verdict.
-        print(f"TRANSCRIPT-UNRESOLVED: {transcript_path} cannot be read as "
+        print(f"TRANSCRIPT-UNRESOLVED: {visible(transcript_path)} cannot be read as "
               f"a transcript: {error.strerror or error} — commitments "
               "unjudgeable; chain verdict unaffected")
         return False
@@ -1494,7 +1494,7 @@ def judge_stamp(head, reply, chain_file):
     if chain_file is None:
         return "not judged", "no --authority-chain FILE given"
     if not os.path.isfile(chain_file):
-        return "not judged", f"--authority-chain {chain_file} not found"
+        return "not judged", f"--authority-chain {visible(chain_file)} not found"
     try:
         with tempfile.TemporaryDirectory() as scratch:
             token = os.path.join(scratch, "stamp.tsr")
@@ -1610,7 +1610,7 @@ def check_stamps(log, entries, chain_file, packaged=False):
             # named as testimony and never as the signer (the trap
             # ADR-0008 ruling 4 closes for the signature).
             print(f"STAMPED: entries 0..{n} existed when a key certified "
-                  f"by {chain_file} signed this head under its own clock "
+                  f"by {visible(chain_file)} signed this head under its own clock "
                   f"({authority_words(record)}) — the time inside the token "
                   "is that key's word, not this machine's (`openssl ts "
                   "-reply -text` prints it)")
@@ -2400,7 +2400,7 @@ def judge_manifest_stamp(folder, chain_file):
                     # certifies; the name in the record sits in a file
                     # the manifest does not list, so it is testimony.
                     print(f"seal stamp: STAMPED: a key certified by "
-                          f"{chain_file} signed this manifest's sha256 under "
+                          f"{visible(chain_file)} signed this manifest's sha256 under "
                           f"its own clock ({authority_words(record)}) — "
                           "the time inside the token is that key's word, not "
                           "this machine's (`openssl ts -reply -text` prints "

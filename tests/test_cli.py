@@ -2393,6 +2393,35 @@ class TypedPathIsEscapedTest(ReceiptsCliTest):
         self.assertIn("cannot be read as a project record: it is not JSON",
                       result.stdout)
 
+    def test_a_transcript_or_chain_file_the_reader_typed_is_named_escaped(self):
+        # #589: the TRANSCRIPT-UNRESOLVED lines and the note for a chain
+        # file that is not there printed the typed path raw. Shown with
+        # DEL, a control character every system takes in a file name.
+        vectors = REPO_ROOT / "tests" / "vectors"
+        (self.workdir / "folder\x7f").mkdir()
+        cases = [
+            (["--log", str(vectors / "transcript-commitment.jsonl"),
+              "--transcript", "gone\x7f.txt"],
+             "TRANSCRIPT-UNRESOLVED: no transcript at gone\\x7f.txt — "),
+            (["--log", str(vectors / "transcript-commitment.jsonl"),
+              "--transcript", "folder\x7f"],
+             "TRANSCRIPT-UNRESOLVED: folder\\x7f cannot be read as a "
+             "transcript: "),
+            (["--log", str(vectors / "stamp-kindless.jsonl"), "--stamps",
+              "--authority-chain", "gone\x7f.pem"],
+             "stamp not judged: --authority-chain gone\\x7f.pem not "
+             "found — "),
+        ]
+        for tool in (LOXODONTA, VERIFIER):
+            for args, words in cases:
+                with self.subTest(tool=tool.name, args=args[-1]):
+                    result = run(tool, "verify", *args, cwd=self.workdir)
+
+                    self.assertEqual(result.returncode, 0,
+                                     result.stdout + result.stderr)
+                    self.assertIn(words, result.stdout)
+                    self.assertNotIn("\x7f", result.stdout)
+
 
 class WriterExitTest(ReceiptsCliTest):
     """ADR-0037 on the writing verbs: exit 1 there says the chain's tail
