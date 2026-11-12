@@ -226,6 +226,15 @@ TWINS = (
          "The supervisor's keeper hands its URLs to the recorder's "
          "`publish`, so its flags refuse the URLs `publish` refuses, as a "
          "usage error when the flag is given (ADR-0025)."),
+    Twin("Which calendars an upgrade asks",
+         ("DEFAULT_CALENDARS", "DEFAULT_PORTS", "SHOWN_CALENDAR",
+          "calendar_key", "calendars_asked", "unnamed_calendar",
+          "shown_address"),
+         ORIGINAL, SUPERVISOR,
+         "`anchor --upgrade` asks only the default calendars and those it "
+         "is told, and the supervisor's keeper says on a chain's row which "
+         "pending proof waits at a calendar the keeper's upgrade does not "
+         "ask, so both compare and show an address by one rule (#415)."),
     Twin("Written-down coverage", ("COVERAGE_NAME",), ORIGINAL, SUPERVISOR,
          "The recorder writes down the coverage it wired under this name, "
          "and the supervisor's scan reads it there (ADR-0030)."),

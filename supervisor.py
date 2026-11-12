@@ -2050,11 +2050,82 @@ def ripe_head(entries, now, cadence):
     return entries[-1].get("entry_hash") or None
 
 
+# --- Which calendars an upgrade asks (#415) ----------------------------------
+# The recorder's rule, so the keeper can say on a chain's row that a
+# pending proof waits at a calendar its upgrade does not ask.
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+DEFAULT_CALENDARS = [
+    "https://a.pool.opentimestamps.org",
+    "https://b.pool.opentimestamps.org",
+    "https://a.pool.eternitywall.com",
+    "https://ots.btc.catallaxy.com",
+]
+DEFAULT_PORTS = {"http": 80, "https": 443}
+SHOWN_CALENDAR = 200   # characters of a row's address a skip line prints
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def calendar_key(url):
+    """What an upgrade compares to tell whether an address is a calendar
+    it was told to ask (#415): the scheme and the host in either case,
+    the port written or left to its default, the path with or without a
+    trailing slash, so `HTTPS://A.example:443/` is `https://a.example`.
+    Anything else that differs, a path included, is another calendar,
+    since the address is the door every request goes through. No name
+    is looked up. An address urllib cannot take apart is its own text."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return url
+    if port is None:
+        port = DEFAULT_PORTS.get(parts.scheme)
+    return (parts.scheme, parts.username, parts.password, parts.hostname,
+            port, parts.path.rstrip("/"), parts.query, parts.fragment)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def calendars_asked(calendars):
+    """The keys of the calendars an upgrade may ask: the defaults this
+    recorder submits to, and `calendars`, those the operator named on the
+    command line. A sidecar row is the writer's text, or the text of
+    whoever handed the sidecar over, so the address it names is asked
+    only when it is one of these (#415)."""
+    return {calendar_key(calendar)
+            for calendar in [*DEFAULT_CALENDARS, *(calendars or [])]}
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def unnamed_calendar(url, asked):
+    """True for an http or https address whose key is not in `asked`:
+    one an upgrade passes by and never asks (#415). Any other address
+    is left to `calendar_request`, which refuses it before it asks."""
+    try:
+        scheme = urllib.parse.urlsplit(url).scheme
+    except ValueError:
+        return False
+    return scheme in PUBLISH_SCHEMES and calendar_key(url) not in asked
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def shown_address(url):
+    """A row's address as a line prints it: escaped, and cut past
+    SHOWN_CALENDAR characters with the count of those cut, so a planted
+    address of a megabyte prints as some two hundred characters, more
+    only where escapes lengthen them."""
+    if len(url) <= SHOWN_CALENDAR:
+        return visible(url)
+    return (f"{visible(url[:SHOWN_CALENDAR])}… "
+            f"(+{len(url) - SHOWN_CALENDAR})")
+
+
 def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                  authority=None, chain_url=None):
     """One chain's turn with the keeper, at most once per throttle
     window: pending proofs are driven through `loxodonta anchor
-    --upgrade` (the record's own calendar; judgment stays with verify),
+    --upgrade` (the record's own calendar, when it is a default one or
+    one of `calendars`, #415; judgment stays with verify),
     and, only when the operator opted in with a cadence, a fresh head
     that has aged past it is anchored, and stamped by the authority the
     marker names, on this same turn (ADR-0032 ruling 3). Whether the
@@ -2073,10 +2144,15 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
     travel = ["--publish-chain", chain_url] if chain_url else []
+    # The upgrade asks only the default calendars and those it is told
+    # (#415): a proof the keeper's own --calendar took is completed too.
+    named = [flag for calendar in calendars
+             for flag in ("--calendar", calendar)]
     # A folder or a pipe where the sidecar belongs holds no proof to
     # upgrade (#364); the scan's verify names it.
     if os.path.isfile(sidecar):
-        finished = run_verb(["anchor", "--upgrade", f"--log={log}", *travel])
+        finished = run_verb(["anchor", "--upgrade", f"--log={log}", *named,
+                             *travel])
         attempted = True
         if finished is None:
             notes.append("upgrading did not finish in time; the proofs stay "
@@ -2096,10 +2172,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     if cadence is not None and entries:
         head = ripe_head(entries, now, cadence)
         if head:
-            command = ["anchor", f"--log={log}", *travel]
-            for calendar in calendars:
-                command += ["--calendar", calendar]
-            finished = run_verb(command)
+            finished = run_verb(["anchor", f"--log={log}", *travel, *named])
             attempted = True
             if finished is None:
                 failed = True
@@ -5518,6 +5591,9 @@ def keepers_turn(look, place, entries, memory, now, stamp):
     moved, said = {}, {"anchors": {}, "left": {}}
     if not look.keeping(memory["blind"]):
         return moved, said
+    # The calendars the anchor keeper's upgrade asks, for `chain_row`
+    # to set against the proofs verify calls pending (#415).
+    said["asked"] = calendars_asked(look.calendars)
     keeper = memory["keeper"]
     # A chain the last look stood down has a torn tail (ADR-0004), and the
     # recorder refuses its head on every turn (#533), so the head steps
@@ -5599,7 +5675,39 @@ def chain_row(look, log, entries, said):
         row["left"]["as_written"] = True
     row["anchors"].update(said["anchors"])
     row["left"].update(said["left"])
+    unasked = unasked_note(anchors["pending"], said.get("asked"))
+    if unasked:
+        row["anchors"]["note"] = "; ".join(
+            filter(None, (row["anchors"].get("note"), unasked)))
     return row, verdict, stood_down
+
+
+def unasked_note(pending, asked):
+    """The keeper's note for the pending proofs whose calendar its
+    upgrade does not ask (#415), or None: each address once, escaped and
+    cut, named as data and never set into a flag, since the row wrote
+    it. `pending` is verify's pending lines as `assess_anchors` read
+    them, so a settled head is none of them; `asked` is the keys the
+    keeper's upgrade asks, None when no keeper took a turn. Testimony,
+    never the exit: the proof stays pending until the calendar is
+    given."""
+    if asked is None:
+        return None
+    shown = {}
+    for proof in pending:
+        calendar = proof.get("calendar")
+        if calendar is not None and unnamed_calendar(calendar, asked):
+            shown.setdefault(calendar_key(calendar), shown_address(calendar))
+    if not shown:
+        return None
+    where = ", ".join(shown.values())
+    if len(shown) == 1:
+        return (f"a proof is pending at {where}, a calendar this keeper "
+                "was not given, so its upgrade does not ask it; give it "
+                "with --calendar on scan or serve to ask it")
+    return (f"proofs are pending at {where}, calendars this keeper was "
+            "not given, so its upgrade does not ask them; give them with "
+            "--calendar on scan or serve to ask them")
 
 
 def baseline_row(memory, relpath, entries, verdict, stood_down, now, stamp):
@@ -9790,8 +9898,12 @@ def cmd_package(args):
         where = out if args.folder else Path("<the unpacked zip>")
         print("anchored: the manifest's sha256 went to the calendars; the "
               "proof is pending until Bitcoin has it, a few hours")
+        # The upgrade asks only the default calendars and those it is
+        # told (#415), so the line names the ones this package went to.
+        named = "".join(f' --calendar="{visible(calendar)}"'
+                        for calendar in calendars)
         print(f'upgrade: python "{LOXODONTA.as_posix()}" anchor --upgrade '
-              f'--manifest="{(where / "manifest.json").as_posix()}"')
+              f'--manifest="{(where / "manifest.json").as_posix()}"{named}')
     if args.stamp:
         # The token is the authority's word about a moment, and the
         # recipient can only judge it with that authority's certificate
@@ -13558,8 +13670,10 @@ def main(argv=None):
                                "unless given")
     watching.add_argument("--calendar", action="append", default=None,
                           metavar="URL",
-                          help="calendar for auto-anchoring (repeatable; "
-                               "default: receipts' public pools)")
+                          help="calendar for auto-anchoring, and one the "
+                               "keeper's upgrade of pending proofs may ask "
+                               "beside the public pools (repeatable; "
+                               "default: receipts' public pools; #415)")
     watching.add_argument("--publish-every", type=parse_cadence,
                           default=None, metavar="AGE",
                           help="publish a head once it is this old and "

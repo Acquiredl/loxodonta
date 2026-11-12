@@ -4179,7 +4179,8 @@ class AnchorKeeperTest(unittest.TestCase):
             check=True, env=self.env)
         calendar.mode = "complete"
 
-        result = run_scan(self.root, env=self.env)
+        # The keeper's own --calendar, as `serve --calendar` hands it on.
+        result = run_scan(self.root, "--calendar", calendar.url, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         chain = self.chain_report(result, "alpha", "sess-aaaa")
@@ -4190,16 +4191,64 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertTrue(chain["claimed"])
         self.assertEqual(len(calendar.polled), 1)
 
+    def test_the_keeper_asks_no_calendar_it_was_not_given(self):
+        # #415: the upgrade asks the default calendars and the keeper's
+        # own --calendar; a row naming any other address stays pending,
+        # and its calendar is never asked.
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run(LOXODONTA, "anchor", "--log", str(log), "--calendar", calendar.url,
+            check=True, env=self.env)
+        calendar.mode = "complete"
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-aaaa")
+        self.assertEqual(len(chain["anchors"]["pending"]), 1)
+        self.assertEqual(calendar.polled, [])
+        # Said on the row, so the page and `scan --json` show why the
+        # proof stays pending, with the address named once, as data.
+        note = chain["anchors"].get("note", "")
+        self.assertIn(f"pending at {calendar.url}, a calendar this keeper "
+                      "was not given", note)
+        self.assertIn("give it with --calendar on scan or serve", note)
+        self.assertNotIn(f"--calendar {calendar.url}", note)
+        self.assertNotIn("failed", chain["anchors"])
+
+        named = run_scan(self.root, "--calendar", calendar.url, env={
+            **self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"})
+
+        self.assertEqual(named.returncode, 0, named.stdout + named.stderr)
+        chain = self.chain_report(named, "alpha", "sess-aaaa")
+        self.assertNotIn("not given", chain["anchors"].get("note", ""))
+        self.assertEqual(chain["anchors"]["pending"], [])
+
+    def test_the_keeper_note_names_an_unlisted_address_escaped_and_cut(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-long")
+        long = "http://127.0.0.1:1/" + "x" * 5000
+        write_pending_anchor(log, chain_head(log), ago(600), calendar=long)
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-long")
+        note = chain["anchors"]["note"]
+        self.assertIn("http://127.0.0.1:1/xxx", note)
+        self.assertIn("… (+", note)
+        self.assertLess(len(note), 600, note)
+
     def test_upgrade_attempts_are_polite_between_ticks(self):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run(LOXODONTA, "anchor", "--log", str(log), "--calendar", calendar.url,
             check=True, env=self.env)
 
-        first = run_scan(self.root, env=self.env)   # polls: pending
+        named = ("--calendar", calendar.url)
+        first = run_scan(self.root, *named, env=self.env)   # polls: pending
         calendar.mode = "complete"
-        throttled = run_scan(self.root, env=self.env)
-        eager = run_scan(self.root, env={
+        throttled = run_scan(self.root, *named, env=self.env)
+        eager = run_scan(self.root, *named, env={
             **self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"})
 
         self.assertEqual(len(calendar.polled), 2,
@@ -4538,11 +4587,11 @@ class AnchorKeeperTest(unittest.TestCase):
             f.write('{"n":3,"half-written')
         make_chain(self.root / "alpha" / "receipts", "sess-tore-002")
         env = {**self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"}
-        first = run_scan(self.root, env=env)
+        first = run_scan(self.root, "--calendar", calendar.url, env=env)
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         calendar.mode = "complete"
 
-        second = run_scan(self.root, env=env)
+        second = run_scan(self.root, "--calendar", calendar.url, env=env)
 
         tore, _ = chains_by_session(json.loads(second.stdout))[
             ("alpha", "sess-tore")]
@@ -4934,7 +4983,9 @@ class WalkFindingsTest(unittest.TestCase):
         (self.root / ".supervisor-baseline.json").write_text(json.dumps({
             "chains": {},
             "keeper": {relpath: "2099-01-01T00:00:00Z"}}), encoding="utf-8")
-        finished = run_scan(self.root, env=self.env)
+        # The row's calendar named, so the upgrade asks it (#415).
+        finished = run_scan(self.root, "--calendar", "http://127.0.0.1:1",
+                            env=self.env)
         report = json.loads(finished.stdout)
         chain = chains_by_session(report)[("alpha", "sess-futr")][0]
         # the upgrade was attempted (and failed fast, offline): the note
@@ -4955,7 +5006,9 @@ class WalkFindingsTest(unittest.TestCase):
             "chains": {},
             "keeper": {relpath: "2026-08-22T09:00:00"}}), encoding="utf-8")
 
-        finished = run_scan(self.root, env=self.env)
+        # The row's calendar named, so the upgrade asks it (#415).
+        finished = run_scan(self.root, "--calendar", "http://127.0.0.1:1",
+                            env=self.env)
 
         self.assertNotIn("Traceback", finished.stderr)
         report = json.loads(finished.stdout)
