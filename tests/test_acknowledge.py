@@ -1410,6 +1410,35 @@ class ReceiverAcknowledgeTest(unittest.TestCase):
         self.assertEqual(again.returncode, 64, again.stderr)
         self.assertIn("nothing to acknowledge", again.stderr)
 
+    def test_a_call_that_names_no_tool_is_accepted_and_stays_accepted(self):
+        # An event with no `tool_name` is counted under no tool, which
+        # the memory's JSON keeps as "null": the counts written down
+        # must still equal the counts the next scan reports.
+        session = "nameless-tool-2222"
+        record = {"attributes": [
+            {"key": "session.id", "value": {"stringValue": session}},
+            {"key": "event.name", "value": {"stringValue": "tool_result"}},
+            {"key": "event.sequence", "value": {"intValue": 1}}]}
+        events = self.data / f"events-{FIXTURE_DAY}.jsonl"
+        with open(events, "a", encoding="utf-8") as kept:
+            kept.write(json.dumps({
+                "received": "2026-10-07T02:30:00Z", "from": "127.0.0.1",
+                "logs": {"resourceLogs": [{"scopeLogs": [
+                    {"logRecords": [record]}]}]}}) + "\n")
+        row = self.session_row(self.look(6), session)
+        self.assertEqual((row["state"], row["tools"]), ("ENDED-DEFICIT", 1))
+
+        accepted = self.accept("ENDED-DEFICIT", session=session)
+
+        self.assertEqual(accepted.returncode, 0,
+                         accepted.stdout + accepted.stderr)
+        row = self.session_row(self.look(0), session)
+        self.assertNotIn("raises", row)
+        self.assertTrue(row["acknowledged"]["holds"])
+        again = self.accept("ENDED-DEFICIT", session=session)
+        self.assertEqual(again.returncode, 64, again.stderr)
+        self.assertIn("nothing to acknowledge", again.stderr)
+
     def test_pending_overdue_cannot_be_acknowledged_nor_quieted(self):
         # Ruling 6: a session accepted as ENDED-DEFICIT that resumes with
         # its counts unchanged reads PENDING-OVERDUE, and the earlier

@@ -2220,7 +2220,8 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
 
 def publish_through_recorder(log, url, what):
     """One `loxodonta publish` as a subprocess: the head when `what` is
-    "head", the chain's entries after the cursor when it is "chain".
+    "head", the chain's entries the remote does not hold when it is
+    "chain".
     Returns the note for the panel when it did not land, else None. The
     recorder's stderr names the failure and never the URL, but it is
     not repeated here: the note is the panel's, and one sentence the
@@ -4496,10 +4497,14 @@ def session_counts(row):
     """What an acknowledgement at the receiver accepts beside the state:
     the counts the session's row reports. A session whose counts differ
     from these after it was acknowledged is a finding again (ADR-0046
-    ruling 2)."""
-    return {"tools": row["tools"], "receipts": row["receipts"],
-            "by_tool": row["by_tool"],
-            "gap": (row.get("gap") or {}).get("count", 0)}
+    ruling 2). Returned as the memory's JSON reads them back: an event
+    that names no tool is counted under None, which JSON keeps as the
+    key "null", and counts compared any other way would never equal the
+    ones written down."""
+    return json.loads(json.dumps({
+        "tools": row["tools"], "receipts": row["receipts"],
+        "by_tool": row["by_tool"],
+        "gap": (row.get("gap") or {}).get("count", 0)}))
 
 
 def session_acknowledgement(acknowledged, session):
@@ -13059,10 +13064,11 @@ def main(argv):
     watching.add_argument("--publish-chain", type=publish_url, default=None,
                           metavar="URL",
                           help="opt in: on --publish-every's cadence, also "
-                               "send the chain's entries since the last "
-                               "acknowledged one to this URL, after the "
-                               "head, through `loxodonta publish --chain` "
-                               "(ADR-0031). Every entry leaves; pick a "
+                               "send the chain's entries the remote does "
+                               "not hold to this URL, after the head, "
+                               "through `loxodonta publish --chain` "
+                               "(ADR-0031, ADR-0045). Every entry leaves; "
+                               "pick a "
                                "remote that can only add, never delete, "
                                "such as the receiver")
     scan = sub.add_parser(
