@@ -1287,5 +1287,69 @@ class TlsTest(ReceiverFixture):
         self.assertGreaterEqual(time.monotonic() - started, 4)
 
 
+class ExitTest(ReceiverFixture):
+    """The receiver reads its numbers by the supervisor's rule and ends
+    through the recorder's `run_main` (#589 items 16 and 17, #449): a
+    number it cannot use is refused by name, exit 64, before any verb,
+    and a crash is 70 with its traceback, never Python's 1."""
+
+    # The receiver's numbers, both waited on: one request's deadline and
+    # one receive's timeout.
+    SETTINGS = ("RECEIVER_DEADLINE_SECONDS", "RECEIVER_TIMEOUT_SECONDS")
+
+    def version_with(self, name, value):
+        return run(RECEIVER, "--version", timeout=60,
+                   env=clean_env(**{name: value}))
+
+    def test_a_number_it_cannot_use_exits_64_naming_it(self):
+        for name in self.SETTINGS:
+            for value in ("abc", "-1", "nan", "inf", ""):
+                with self.subTest(name=name, value=value):
+                    result = self.version_with(name, value)
+
+                    self.assertEqual(result.returncode, 64,
+                                     result.stdout + result.stderr)
+                    self.assertEqual(result.stderr.splitlines(), [
+                        f"error: {name}={value!r} is not a finite number "
+                        "0 or more"])
+                    self.assertEqual(result.stdout, "")
+
+    def test_a_wait_longer_than_a_wait_can_take_exits_64_naming_it(self):
+        for name in self.SETTINGS:
+            with self.subTest(name=name):
+                result = self.version_with(name, "1e10")
+
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                self.assertRegex(result.stderr,
+                                 rf"\Aerror: {name}='1e10' is more seconds "
+                                 r"than a wait can take \(at most \d+ "
+                                 r"here\)\n\Z")
+
+    def test_a_number_it_can_use_is_taken(self):
+        for name in self.SETTINGS:
+            with self.subTest(name=name):
+                result = self.version_with(name, "0.5")
+
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertIn("receiver", result.stdout)
+
+    def test_a_crash_exits_70_with_its_traceback(self):
+        # No honest input makes the receiver crash on purpose, and the
+        # suite adds no hook to make it (ADR-0037). A port past 65535
+        # reaches the socket unchecked and raises OverflowError there:
+        # the lever until a usage rule refuses it first, when this test
+        # wants another. A stdout opened read only is not one: serve's
+        # unwritten lines fail again at the interpreter's last flush,
+        # which turns the 70 into Python's 120.
+        result = run(RECEIVER, "serve", "--data", str(self.data),
+                     "--bind", "127.0.0.1", "--port", "70000", timeout=60)
+
+        self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
+        self.assertIn("Traceback (most recent call last)", result.stderr)
+        self.assertIn("OverflowError", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
