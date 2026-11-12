@@ -1129,11 +1129,17 @@ class ConnectsToGenesisTest(AsWrittenBase):
                                    env=env).returncode, 0)
         (cut,) = entry_attempts(log)
         self.assertEqual(cut["outcome"], TIME_RAN_OUT)
-        for calls in range(60):
+        # How many calls it takes is the machine's speed (a slow runner
+        # sends a handful a second); what is pinned is that each call
+        # carries the fill further.
+        held = -1
+        for calls in range(800):
             mine = log.read_bytes().splitlines(True)
             kept = set((self.data / log.name).read_bytes().splitlines(True))
             if all(line in kept for line in mine):
                 break
+            self.assertGreater(len(kept), held, "a call that sent nothing")
+            held = len(kept)
             self.assertEqual(self.call(*flags, "--publish-chain",
                                        receiver.url, env=env).returncode, 0)
         # Every entry is held; the call after the one that sent the last
