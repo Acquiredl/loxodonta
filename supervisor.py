@@ -3613,30 +3613,39 @@ def failed_call_owes(record, block, name, epoch):
     return "may_owe"
 
 
-def transcript_records(transcript, closed):
+def transcript_records(transcript, closed, unread=None):
     """Each record of a session's transcript files (`witness_files`) as
     (the file, the record, its message's content blocks), in file order,
     the parent's first and then each subagent's. A line
     that is not a JSON object is passed over, and a file that cannot be
-    opened raises as `open_regular` does. The witness counts calls by
-    it, and `show` finds a call's input by it (ADR-0047)."""
+    opened raises as `open_regular` does. A file holding lines and not
+    one record goes on `unread`, when given, as (file, lines), once its
+    last line is read; a blank line is no line. The witness counts calls
+    by it, and `show` finds a call's input by it (ADR-0047)."""
     for path in witness_files(transcript, closed):
+        read = records = 0
         # A transcript is in the writer's reach, so a pipe at its name is
         # refused rather than waited on (#386).
         with io.TextIOWrapper(open_regular(path), encoding="utf-8",
                               errors="replace") as lines:
             for line in lines:
+                if not line.strip():
+                    continue
+                read += 1
                 try:
                     record = json.loads(line)
                 except (ValueError, RecursionError):
                     continue  # the transcript is writer-reachable (#331)
                 if not isinstance(record, dict):
                     continue
+                records += 1
                 message = record.get("message")
                 blocks = (message.get("content")
                           if isinstance(message, dict) else None)
                 yield (path, record,
                        blocks if isinstance(blocks, list) else [])
+        if unread is not None and read and not records:
+            unread.append((path, read))
 
 
 def witness_transcripts(witness, closed):
@@ -3672,7 +3681,8 @@ def read_witness(transcript, calibration):
     opened them (#379); both are counted for the canary in
     watch_completeness(), and neither moves
     the reading. `closed` holds each subagents folder it could not list
-    (`witness_files`)."""
+    (`witness_files`), and `unread` each file not one line of which could
+    be read (`transcript_records`)."""
     names = {}
     owed = []
     may_owe = {}
@@ -3680,8 +3690,8 @@ def read_witness(transcript, calibration):
     latest = None
     first = None
     worded = unworded = 0
-    closed = []
-    for _, record, blocks in transcript_records(transcript, closed):
+    closed, unread = [], []
+    for _, record, blocks in transcript_records(transcript, closed, unread):
         stamped = parse_when(record.get("timestamp"))
         if stamped is not None:
             if stamped.tzinfo is None:
@@ -3737,7 +3747,8 @@ def read_witness(transcript, calibration):
     owed.sort(key=lambda call: call[0] or "")
     return {"owed": owed, "may_owe": may_owe, "witnessed": witnessed,
             "latest": latest, "first": first,
-            "worded": worded, "unworded": unworded, "closed": closed}
+            "worded": worded, "unworded": unworded, "closed": closed,
+            "unread": unread}
 
 
 def reconcile(owed, may_owe, receipts, witnessed):
@@ -3823,14 +3834,17 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
     the witness saw, the state says the coverage behind that number is
     unknown, and no deficit and no may_owe count are named for it.
     Returns a dict: state, tools, deficit, may_owe, the worded and
-    unworded counts the canary in watch_completeness() reads, and the
-    subagents folders it could not list (`closed`)."""
+    unworded counts the canary in watch_completeness() reads, the
+    subagents folders it could not list (`closed`), and the files it
+    could not read a line of beside a deficit that stands (`unread`).
+    Raises OSError for a file that cannot be opened, and for one it
+    could not read a line of where no deficit stands."""
     seen = read_witness(transcript, calibration)
     tools = len(seen["owed"])
     if before_memory(calibration, seen["first"]):
         return {"state": "BEFORE-MEMORY", "tools": tools, "deficit": 0,
                 "may_owe": 0, "worded": 0, "unworded": 0,
-                "closed": seen["closed"]}
+                "closed": seen["closed"], "unread": []}
     latest = seen["latest"]
     # The idle clock reads the newest timestamped record, not file
     # mtime: the harness touches ended transcripts with timestamp-less
@@ -3847,6 +3861,17 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
     ended = idle = quiet_for >= IDLE_END_SECONDS
     deficit, surplus, unpaid = reconcile(seen["owed"], seen["may_owe"],
                                          receipts, seen["witnessed"])
+    if seen["unread"] and not deficit:
+        # A file not one line of which can be read hides its calls and
+        # pays none, so a deficit the rest shows stands. Where none does,
+        # the session reads as one whose transcript cannot be opened,
+        # never as one whose calls were none (#473). The row's note names
+        # the first file; every other one follows it in the same words.
+        (path, lines), *rest = seen["unread"]
+        why = "; ".join([no_line_read(lines)]
+                        + [cannot_read(other, no_line_read(count))
+                           for other, count in rest])
+        raise OSError(errno.EINVAL, why, str(path))
     deficit_since = parse_when(unpaid) if unpaid else None
     deficit_age = ((now - deficit_since).total_seconds()
                    if deficit_since else None)
@@ -3858,7 +3883,7 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
             "tools": tools, "deficit": deficit,
             "may_owe": sum(len(calls) for calls in seen["may_owe"].values()),
             "worded": seen["worded"], "unworded": seen["unworded"],
-            "closed": seen["closed"]}
+            "closed": seen["closed"], "unread": seen["unread"]}
 
 
 def keep_tails(sessions):
@@ -4158,10 +4183,37 @@ def unreadable_row(repo, session, receipts, transcript, error, drawers=()):
     # The words travel in a package and the note does not, so each must
     # be true alone; the path stays local (#410).
     row["words"] = UNREADABLE_TRANSCRIPT_WORDS
-    row["note"] = (f"{Path(error.filename or transcript).as_posix()}"
-                   " cannot be read as a transcript: "
-                   f"{error.strerror or error}")
+    row["note"] = cannot_read(error.filename or transcript,
+                              error.strerror or error)
     return row
+
+
+def cannot_read(path, why):
+    """A session row's note for one of its transcript files that cannot
+    be read as one, and why."""
+    return f"{Path(path).as_posix()} cannot be read as a transcript: {why}"
+
+
+def no_line_read(lines):
+    """Why a transcript file of `lines` lines cannot be read as one, when
+    not one of them is a record (#473)."""
+    if lines == 1:
+        return "its one line is not a JSON object"
+    return f"not one of its {lines} lines is a JSON object"
+
+
+def reading_note(reading):
+    """A judged session's note, or None: each subagents folder it could
+    not list, and each file it could not read a line of beside a deficit
+    that stands (`watch_session`)."""
+    said = []
+    if reading["closed"]:
+        said.append(sidechains_unlisted(reading["closed"]))
+    for path, lines in reading["unread"]:
+        said.append(f"{cannot_read(path, no_line_read(lines))} — the calls "
+                    "it holds are not counted, so the deficit shown is the "
+                    "least of it")
+    return "; ".join(said) or None
 
 
 def merge_families(families):
@@ -4245,8 +4297,9 @@ def watch_chained(groups, transcripts, ever_wired, calibration, sessionend,
                                transcript=transcript,
                                deficit=reading["deficit"],
                                may_owe=reading["may_owe"])
-        if reading["closed"]:
-            row["note"] = sidechains_unlisted(reading["closed"])
+        note = reading_note(reading)
+        if note:
+            row["note"] = note
         # The lifecycle facts (ADR-0018), quiet fields on the row.
         tier = lifecycle_tier(group.get("last_grew"), now)
         if tier:
@@ -4307,8 +4360,9 @@ def watch_chainless(root, transcripts, everywhere, closed, ever_wired,
                                reading["tools"], 0, transcript=transcript,
                                deficit=reading["deficit"],
                                may_owe=reading["may_owe"])
-        if reading["closed"]:
-            row["note"] = sidechains_unlisted(reading["closed"])
+        note = reading_note(reading)
+        if note:
+            row["note"] = note
         rows.append(row)
     return rows, readings, elsewhere
 
