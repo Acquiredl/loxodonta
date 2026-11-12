@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 320" width="1000" height="320" role="img" aria-label="The record lives on the agent's machine, where the agent could rebuild all of it. Three things leave the machine: a head kept elsewhere, an OpenTimestamps proof that dates it, and a copy at the receiver on a second machine. A record rebuilt afterwards cannot match what already left.">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 15px; fill: #111827; font-weight: bold; }
+    .small { font-size: 12px; fill: #4b5563; font-weight: normal; }
+    .file { font-size: 12px; fill: #0f766e; font-weight: normal; }
+    .box { fill: none; stroke: #0f766e; stroke-width: 2; }
+    .line { stroke: #0f766e; stroke-width: 2; fill: none; }
+    .arrow { stroke: #0f766e; stroke-width: 2; fill: none; marker-end: url(#head); }
+    #head path { fill: #0f766e; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e5e7eb; }
+      .small { fill: #9ca3af; }
+      .file { fill: #5eead4; }
+      .box, .arrow, .line { stroke: #5eead4; }
+      #head path { fill: #5eead4; }
+    }
+  </style>
+  <defs>
+    <marker id="head" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+
+  <rect class="box" x="20" y="100" width="300" height="100" rx="6"/>
+  <text x="170" y="128" text-anchor="middle">the agent's machine</text>
+  <text class="small" x="170" y="150" text-anchor="middle">the record lives here, and the</text>
+  <text class="small" x="170" y="168" text-anchor="middle">agent could rebuild all of it</text>
+
+  <path class="arrow" d="M324,130 L476,58"/>
+  <path class="arrow" d="M324,150 L476,150"/>
+  <path class="arrow" d="M324,170 L476,242"/>
+
+  <rect class="box" x="480" y="20" width="500" height="74" rx="6"/>
+  <text x="496" y="48" text-anchor="start">a head kept elsewhere</text>
+  <text class="small" x="496" y="70" text-anchor="start">the last line's fingerprint, which stands for the whole record</text>
+  <rect class="box" x="480" y="113" width="500" height="74" rx="6"/>
+  <text x="496" y="141" text-anchor="start">an OpenTimestamps proof</text>
+  <text class="small" x="496" y="163" text-anchor="start">a public timestamp: this record existed by this date</text>
+  <rect class="box" x="480" y="206" width="500" height="74" rx="6"/>
+  <text x="496" y="234" text-anchor="start">the receiver</text>
+  <text class="small" x="496" y="256" text-anchor="start">a second machine that keeps every line sent to it and only adds</text>
+
+  <text class="small" x="500" y="306" text-anchor="middle">A record rebuilt afterwards cannot match what already left the machine.</text>
+</svg>

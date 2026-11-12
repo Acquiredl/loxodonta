@@ -5,6 +5,7 @@ Every page in this folder, sorted by what you came for: running loxodonta, check
 ## Use
 
 - [START.md](START.md): five steps to install the recorder on your own machine, try it, and send back what it saw.
+- [HOW-IT-WORKS.md](HOW-IT-WORKS.md): the long version of the README: what a receipt holds, how a change shows, each way of keeping a copy out of the agent's reach, and the recommended setup.
 - [HOOK.md](HOOK.md): how a hook in your agent's harness records one receipt per tool call, for Claude Code, Codex and others.
 - [RECEIVER.md](RECEIVER.md): how to run the receiver, a machine the agent cannot reach that keeps a copy of its receipts and only adds.
 - [METRICS.md](METRICS.md): every count the supervisor serves on `/metrics`, for the monitoring and alerting you already run.

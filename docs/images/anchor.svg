@@ -28,7 +28,7 @@
   <rect class="box" x="20" y="20" width="250" height="80" rx="6"/>
   <text class="title" x="34" y="46">the head</text>
   <text x="34" y="70"><tspan class="key">entry_hash of 5</tspan></text>
-  <text x="34" y="90"><tspan class="link">24342059…</tspan></text>
+  <text x="34" y="90"><tspan class="link">e1191b5d…</tspan></text>
 
   <text class="key" x="315" y="50" text-anchor="middle">32 bytes</text>
   <text class="key" x="315" y="64" text-anchor="middle">session end</text>
@@ -55,8 +55,8 @@
 
   <!-- the rebuilt chain against the proof -->
   <rect class="box" x="20" y="226" width="420" height="56" rx="6"/>
-  <text x="34" y="250"><tspan class="key">the rebuilt chain, head </tspan>0a403e94…</text>
-  <text x="34" y="270"><tspan class="key">no receipt in it has the hash 24342059…</tspan></text>
+  <text x="34" y="250"><tspan class="key">the rebuilt chain, head </tspan>a520e6a1…</text>
+  <text x="34" y="270"><tspan class="key">no receipt in it has the hash e1191b5d…</tspan></text>
 
   <path class="arrow" d="M444,254 L576,254"/>
 
