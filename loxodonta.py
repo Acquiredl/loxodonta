@@ -3784,7 +3784,8 @@ def unnamed_calendar(url, asked):
 def shown_address(url):
     """A row's address as a line prints it: escaped, and cut past
     SHOWN_CALENDAR characters with the count of those cut, so a planted
-    address of a megabyte is one short line."""
+    address of a megabyte prints as some two hundred characters, more
+    only where escapes lengthen them."""
     if len(url) <= SHOWN_CALENDAR:
         return visible(url)
     return (f"{visible(url[:SHOWN_CALENDAR])}… "
@@ -5847,9 +5848,12 @@ def upgrade_anchors(args):
             if calendar_key(url) not in passed_by:
                 passed_by.add(calendar_key(url))
                 cut = shown_address(url)
+                # Named once, as data: the address is the row's, and a
+                # flag built from it would hand a reader the row's words
+                # to paste into a shell.
                 print(f"warning: skipped calendar {cut}: it is not one "
                       "this upgrade was told to ask (the default calendars "
-                      f"and each --calendar given); add --calendar {cut} "
+                      "and each --calendar given); add it with --calendar "
                       "to ask it", file=sys.stderr)
             continue
         try:

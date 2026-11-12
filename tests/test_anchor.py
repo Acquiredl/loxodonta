@@ -2036,7 +2036,8 @@ class UpgradeAsksNamedCalendarsTest(StoreCase):
                                  done.stdout + done.stderr)
                 self.assertEqual(len(self.server.polled), before)
                 self.assertIn(told_to_skip(self.server.url), done.stderr)
-                self.assertIn(f"--calendar {self.server.url}", done.stderr)
+                self.assertIn("add it with --calendar to ask it",
+                              done.stderr)
                 self.assertNotIn("upgraded: ", done.stdout)
                 self.assertEqual(sidecar.read_bytes(), held)
 
@@ -2112,7 +2113,26 @@ class UpgradeAsksNamedCalendarsTest(StoreCase):
         assert_printed_escaped(self, done.stderr, f"{elsewhere}/{SHOWN}")
         (line,) = [line for line in done.stderr.splitlines()
                    if "skipped calendar" in line]
-        self.assertLess(len(line), 1000, line)
+        self.assertLess(len(line), 500, line)
+
+    def test_the_skip_line_offers_no_command_built_from_the_address(self):
+        # The address is the row's, chosen by the writer or by whoever
+        # handed the sidecar over: named once, as data, and never set
+        # into a flag a reader might paste into a shell.
+        elsewhere, seen = start_recorder(self)
+        planted = f"{elsewhere}/$(id)"
+        self.anchored("chain", planted)
+
+        done = self.upgrade("chain", "--calendar", self.server.url)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(seen, [])
+        (line,) = [line for line in done.stderr.splitlines()
+                   if "skipped calendar" in line]
+        self.assertEqual(line.count(planted), 1, line)
+        self.assertNotIn(f"--calendar {planted}", line)
+        self.assertTrue(line.endswith("add it with --calendar to ask it"),
+                        line)
 
 
 def rows_of(sidecar):

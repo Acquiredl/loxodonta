@@ -4017,6 +4017,36 @@ class AnchorKeeperTest(unittest.TestCase):
         chain = self.chain_report(result, "alpha", "sess-aaaa")
         self.assertEqual(len(chain["anchors"]["pending"]), 1)
         self.assertEqual(calendar.polled, [])
+        # Said on the row, so the page and `scan --json` show why the
+        # proof stays pending, with the address named once, as data.
+        note = chain["anchors"].get("note", "")
+        self.assertIn(f"pending at {calendar.url}, a calendar this keeper "
+                      "was not given", note)
+        self.assertIn("give it with --calendar on scan or serve", note)
+        self.assertNotIn(f"--calendar {calendar.url}", note)
+        self.assertNotIn("failed", chain["anchors"])
+
+        named = run_scan(self.root, "--calendar", calendar.url, env={
+            **self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"})
+
+        self.assertEqual(named.returncode, 0, named.stdout + named.stderr)
+        chain = self.chain_report(named, "alpha", "sess-aaaa")
+        self.assertNotIn("not given", chain["anchors"].get("note", ""))
+        self.assertEqual(chain["anchors"]["pending"], [])
+
+    def test_the_keeper_note_names_an_unlisted_address_escaped_and_cut(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-long")
+        long = "http://127.0.0.1:1/" + "x" * 5000
+        write_pending_anchor(log, chain_head(log), ago(600), calendar=long)
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-long")
+        note = chain["anchors"]["note"]
+        self.assertIn("http://127.0.0.1:1/xxx", note)
+        self.assertIn("… (+", note)
+        self.assertLess(len(note), 600, note)
 
     def test_upgrade_attempts_are_polite_between_ticks(self):
         calendar = self.start_calendar()
