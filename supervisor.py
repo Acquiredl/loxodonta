@@ -4275,14 +4275,17 @@ def read_events(root, closed=None):
     tool among `witnessed`, so a refused call's receipt (#476) is its
     own tool's surplus and never pays for another tool's lost call.
     `may_owe` stays empty: a call that ran and failed has a result like
-    any other. `results` holds each such call as (time, tool, call id),
-    the id None where `tool_use_id` is not one a receipt's suffix could
-    name (`is_call_id`), for pairing by the call's id (ADR-0046 ruling
-    3). `latest` is the newest arrival, by `received`, the
-    receiver's own clock: the settle clock, which no timestamp of the
-    harness's moves. `sequences` holds every `event.sequence` seen, the
-    per-session counter whose missing numbers are the second record's
-    gap. Beside the sessions: the newest `received` per sending address
+    any other. `results` holds each such call as (time, tool, call id,
+    arrival): the time is the event's own, for order; the id None where
+    `tool_use_id` is not one a receipt's suffix could name
+    (`is_call_id`), for pairing by the call's id (ADR-0046 ruling 3); the
+    arrival the `received` of the line that carried it, or None, the
+    call's age by ruling 6. `latest` is the newest arrival, by
+    `received`, the receiver's own clock: the settle clock, which no
+    timestamp of the harness's moves. `sequences` holds every
+    `event.sequence` seen, the per-session counter whose missing numbers
+    are the second record's gap, and `arrived` each number's earliest
+    `received`, for a hole below an event older than the window. Beside the sessions: the newest `received` per sending address
     (ruling 5's "last heard"), the days the files are named for, and
     the lines that were not one JSON object holding a `logs` object,
     skipped and counted, never fatal: the files are out of the writer's
@@ -4335,7 +4338,7 @@ def read_events(root, closed=None):
                     "owed": [], "may_owe": {}, "witnessed": set(),
                     "latest": None, "first": None, "worded": 0,
                     "unworded": 0, "closed": [], "sequences": set(),
-                    "results": []})
+                    "results": [], "arrived": {}})
                 if when is not None and (seen["latest"] is None
                                          or when > seen["latest"]):
                     seen["latest"] = when
@@ -4343,6 +4346,10 @@ def read_events(root, closed=None):
                 if isinstance(sequence, int) \
                         and not isinstance(sequence, bool):
                     seen["sequences"].add(sequence)
+                    if when is not None and (
+                            sequence not in seen["arrived"]
+                            or when < seen["arrived"][sequence]):
+                        seen["arrived"][sequence] = when
                 name = attributes.get("event.name")
                 tool = attributes.get("tool_name")
                 tool = tool if isinstance(tool, str) else None
@@ -4355,7 +4362,8 @@ def read_events(root, closed=None):
                     seen["witnessed"].add(tool)
                     seen["owed"].append((stamp, tool))
                     seen["results"].append(
-                        (stamp, tool, call if is_call_id(call) else None))
+                        (stamp, tool, call if is_call_id(call) else None,
+                         when))
                     if stamp is not None and (seen["first"] is None
                                               or stamp < seen["first"]):
                         seen["first"] = stamp
@@ -4392,7 +4400,8 @@ def missing_numbers(sequences):
 def pair_calls(results, calls, witnessed):
     """A settled session's calls, as the harness reported them, against
     its receipts at the receiver, as (rule, owed, deficit, surplus,
-    missing). `results` are the calls as (time, tool, call id or None),
+    missing). `results` are the calls as (time, tool, call id or None,
+    arrival),
     `calls` the receipts as (tool, call id or None). Where both records
     name calls, they are joined on the id (ADR-0046 ruling 3): a call
     reported twice under one id is one call, a receipt pays only the
@@ -4403,17 +4412,17 @@ def pair_calls(results, calls, witnessed):
     named. Where either record names none, the count by tool stands
     (ADR-0034). `owed` is the calls counted, as [(time, tool)]."""
     paying = [call for _, call in calls if call]
-    named = [call for _, _, call in results if call]
+    named = [call for _, _, call, _ in results if call]
     if not paying or not named:
         receipts = {}
         for tool, _ in calls:
             receipts[tool] = receipts.get(tool, 0) + 1
-        owed = [(when, tool) for when, tool, _ in results]
+        owed = [(when, tool) for when, tool, _, _ in results]
         deficit, surplus, _ = reconcile(owed, {}, receipts, witnessed)
         return "count by tool", owed, deficit, surplus, []
     paid = set(paying)
     owed, unnamed, missing, met = [], [], [], set()
-    for when, tool, call in results:
+    for when, tool, call, _ in results:
         if call in met:
             continue
         if call is None:
@@ -4430,6 +4439,57 @@ def pair_calls(results, calls, witnessed):
     deficit, surplus, _ = reconcile(unnamed, {}, loose, witnessed)
     surplus += len(paying) - len(met & paid)
     return "call id", owed, deficit + len(missing), surplus, missing
+
+
+def overdue(seen, calls, now):
+    """What is overdue in a session still PENDING (ADR-0046 ruling 6),
+    as the row's fields, or None when nothing is. A call is overdue when
+    the line that carried its event was `received` more than
+    SETTLE_SECONDS ago, by the receiver's clock and never a time the
+    event states, whatever arrived after it. The overdue calls are
+    paired against every receipt held, by pair_calls() as a settled
+    session's are, so a receipt of a newer call pays an older one only
+    where the count by tool stands; a surplus among them is no finding
+    while the session is pending, since a receipt may be a newer call's.
+    A hole in the counter is overdue below a number that arrived more
+    than the window ago. A call or a number with no arrival time has no
+    age, and is never overdue."""
+    cutoff = now - timedelta(seconds=SETTLE_SECONDS)
+    old = [call for call in seen["results"]
+           if call[3] is not None and call[3] < cutoff]
+    rule, _, deficit, _, missing = pair_calls(old, calls, seen["witnessed"])
+    aged = [number for number, when in seen["arrived"].items()
+            if when < cutoff]
+    count, numbers = missing_numbers(
+        {number for number in seen["sequences"] if number <= max(aged)}
+        if aged else set())
+    if not deficit and not count:
+        return None
+    found = {"deficit": deficit, "paired_by": rule}
+    if missing:
+        found["missing_calls"] = {"count": len(missing),
+                                  "calls": missing[:GAP_NAMED]}
+    if count:
+        found["gap"] = {"count": count, "numbers": numbers}
+    return found
+
+
+def overdue_words(found):
+    """The words of a PENDING-OVERDUE row, saying what is overdue."""
+    late = []
+    if found["deficit"]:
+        late.append(f"{found['deficit']} call(s) the harness reported more "
+                    "than the settle window ago, by the receiver's clock, "
+                    "have no receipt")
+    if "gap" in found:
+        late.append(f"its event counter has {found['gap']['count']} "
+                    "hole(s) below an event that arrived more than the "
+                    "window ago")
+    return ("this session is still arriving, and " + ", and ".join(late)
+            + ". It raises the exit, and cannot be acknowledged while the "
+            "session is still arriving: it ends when the receipts arrive, "
+            "or when the session settles and reads as a finding that can "
+            "be acknowledged (ADR-0046 ruling 6).")
 
 
 def session_counts(row):
@@ -4464,7 +4524,9 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
     once settled. A session is settled when nothing of it has arrived
     for SETTLE_SECONDS, by its events' `received` and its chain copy's
     own modification time; until then it is PENDING, listed with its
-    counts and never an alarm. Settled, it reads by pair_calls() and
+    counts and never an alarm, or PENDING-OVERDUE when a call or a
+    counter number older than that has gone unpaid (overdue(), ADR-0046
+    ruling 6), which raises the exit. Settled, it reads by pair_calls() and
     classify() as a session that ended, ENDED-DEFICIT tool by tool or by
     the call's id, or
     SECOND-RECORD-ABSENT when receipts arrived and no events did, or
@@ -4581,8 +4643,18 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
             continue
         quiet_for = ((now - heard).total_seconds()
                      if heard is not None else None)
+        late = None
         if quiet_for is not None and quiet_for < SETTLE_SECONDS:
-            state = "PENDING"
+            # Ruling 6: the session is not settled, but a call the
+            # harness reported more than the window ago is judged by its
+            # own age, so arrivals after it cannot keep it unjudged. A
+            # session with no events has no call to be overdue (the
+            # ADR's non-claim).
+            late = overdue(seen, family.get("calls", []), now) if seen \
+                else None
+            state = "PENDING-OVERDUE" if late else "PENDING"
+            if late:
+                row.update(late)
         elif seen is None:
             state = "SECOND-RECORD-ABSENT"
             if unread:
@@ -4606,7 +4678,12 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
                 if state != "ENDED-DEFICIT":
                     state = "SECOND-RECORD-GAP"
         row["state"] = state
-        if state == "ENDED-DEFICIT":
+        if late:
+            row["words"] = overdue_words(late)
+            # Never quieted by an acknowledgement: its counts move with
+            # every call of a live session (ADR-0046 ruling 6).
+            row["raises"] = True
+        elif state == "ENDED-DEFICIT":
             row["words"] = RECEIVER_DEFICIT_WORDS
         elif state in WATCH_WORDS:
             row["words"] = WATCH_WORDS[state]
@@ -6282,6 +6359,13 @@ def acknowledge_session(root, path, daybook, session, state):
     state now. Only here: on the agent's machine an ended deficit raises
     nothing, and an acceptance there would sit in the writer's reach
     (ruling 1, Tripwire's lesson)."""
+    if state == "PENDING-OVERDUE":
+        return refused("PENDING-OVERDUE cannot be acknowledged: the session "
+                       "is still arriving, and its counts move with every "
+                       "call, so an acceptance would hold for seconds. It "
+                       "ends when the receipts arrive, or when the session "
+                       "settles and reads as a finding that can be "
+                       "acknowledged (ADR-0046 ruling 6)")
     if state not in RECEIVER_FINDINGS:
         return refused(f"{visible(state)!r} is not a state that raises the "
                        "exit at the receiver: name the one the scan "
@@ -9536,7 +9620,8 @@ KNOWN_COMPLETENESS = ("OK", "LAGGING", "SURPLUS", "QUIET", "ALARM-SILENT",
                       "ALARM-DEFICIT", "IDLE-CLEAN", "IDLE-DEFICIT",
                       "ENDED-CLEAN", "ENDED-DEFICIT", "ENDED-SURPLUS",
                       "UNWITNESSED", "UNWATCHED", "ELSEWHERE", "BEFORE-MEMORY",
-                      "PENDING", "SECOND-RECORD-ABSENT", "SECOND-RECORD-GAP")
+                      "PENDING", "SECOND-RECORD-ABSENT", "SECOND-RECORD-GAP",
+                      "PENDING-OVERDUE")
 KNOWN_LIFECYCLE = ("awake", "waning", "dormant")
 KNOWN_CONSUMPTION = ("RUNNING-HOT", "ENDED-HOT")
 # Every session-end step the recorder writes an attempt row for, in the
@@ -11102,10 +11187,14 @@ function renderStrip(report) {
     r.sessions.flatMap(s => s.chains));
   const live = report.completeness.sessions.filter(s =>
     ["ALARM-SILENT", "ALARM-DEFICIT"].includes(s.state));
-  // At a receiver: settled sessions whose receipts and harness events
-  // disagree, raising the exit until acknowledged there (ADR-0046).
-  // Not live, so not the strip's "stopped arriving" words.
+  // At a receiver: sessions whose receipts and harness events disagree,
+  // raising the exit (ADR-0046). Settled ones until acknowledged there;
+  // ones still arriving with a call or a counter number overdue until
+  // the receipts arrive or they settle (ruling 6). Neither is the
+  // strip's "stopped arriving" words.
   const unaccepted = report.completeness.sessions.filter(s => s.raises);
+  const overdue = unaccepted.filter(s => s.state === "PENDING-OVERDUE");
+  const settled = unaccepted.length - overdue.length;
   const regenerated = chains.filter(c => !c.superseded && c.exit === 3);
   const broken = chains.filter(c => !c.superseded &&
                                     c.verdict === "BROKEN");
@@ -11147,12 +11236,20 @@ function renderStrip(report) {
       " (scan exit " + report.exit + ")";
   } else if (unaccepted.length) {
     colour = "grave";
-    state.textContent = "A FINDING NO ONE HAS ACCEPTED";
-    why.textContent = unaccepted.length + " settled session(s) whose " +
-      "receipts and harness events disagree at the receiver, named in " +
-      "the completeness watch below; each raises the exit until " +
-      "acknowledged here with supervisor acknowledge --receiver DIR " +
-      "--session (scan exit " + report.exit + ")";
+    state.textContent = settled ? "A FINDING NO ONE HAS ACCEPTED"
+                                : "CALLS OVERDUE AT THE RECEIVER";
+    why.textContent = [
+      settled ? settled + " settled session(s) whose receipts and " +
+        "harness events disagree at the receiver, each raising the exit " +
+        "until acknowledged here with supervisor acknowledge --receiver DIR " +
+        "--session" : "",
+      overdue.length ? overdue.length + " session(s) still arriving " +
+        "with a call reported over the settle window ago and no receipt, " +
+        "or a hole in the counter, each raising the exit until the " +
+        "receipts arrive or the session settles" : ""]
+      .filter(Boolean).join("; ") +
+      ", named in the completeness watch below (scan exit " +
+      report.exit + ")";
   } else {
     colour = "quiet";
     state.textContent = "all quiet";
@@ -11727,7 +11824,8 @@ function render(report) {
   const watch = document.getElementById("watch");
   watch.replaceChildren();
   const LIVE = ["ALARM-SILENT", "ALARM-DEFICIT"];
-  const NOTEWORTHY = LIVE.concat(["ENDED-DEFICIT", "ENDED-SURPLUS",
+  const NOTEWORTHY = LIVE.concat(["PENDING-OVERDUE", "ENDED-DEFICIT",
+                                  "ENDED-SURPLUS",
                                   "SURPLUS", "LAGGING", "IDLE-DEFICIT",
                                   "SECOND-RECORD-ABSENT",
                                   "SECOND-RECORD-GAP"]);

@@ -6169,6 +6169,45 @@ def lay_events(data, day=FIXTURE_DAY, drop=()):
     return path
 
 
+def post_event(data, sequence, name, received, tool=None, call=None,
+               session=FIXTURE_SESSION, day=FIXTURE_DAY):
+    """One more event of a session, as the receiver keeps a request at
+    its second door: `received` is the receiver's own arrival time, the
+    clock ADR-0046 ruling 6 ages a call by. A `tool_result` with `tool`
+    and, when given, the harness's `call` id."""
+    pairs = [("session.id", {"stringValue": session}),
+             ("event.name", {"stringValue": name}),
+             ("event.sequence", {"intValue": sequence})]
+    if tool is not None:
+        pairs.append(("tool_name", {"stringValue": tool}))
+    if call is not None:
+        pairs.append(("tool_use_id", {"stringValue": call}))
+    record = {"attributes": [{"key": key, "value": value}
+                             for key, value in pairs]}
+    with open(Path(data) / f"events-{day}.jsonl", "a",
+              encoding="utf-8") as events:
+        events.write(json.dumps({
+            "received": received.isoformat(), "from": "127.0.0.1",
+            "logs": {"resourceLogs": [{"scopeLogs": [
+                {"logRecords": [record]}]}]}}) + "\n")
+
+
+def received_ago(seconds):
+    """A `received` time this many seconds before now, UTC."""
+    return (datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(seconds=seconds))
+
+
+def restamp_events(data, received, day=FIXTURE_DAY):
+    """Every request in the day's events file as received at `received`:
+    the fixture's calls reported then, by the receiver's clock."""
+    path = Path(data) / f"events-{day}.jsonl"
+    lines = [dict(json.loads(line), received=received.isoformat())
+             for line in path.read_text(encoding="utf-8").splitlines()]
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines),
+                    encoding="utf-8")
+
+
 def chain_copy(data, session, actions=FIXTURE_RECEIPTS, epoch=None,
                notes=(), settled=True):
     """A chain copy in the receiver's folder: written by the recorder
@@ -6343,6 +6382,130 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(row["paired_by"], "count by tool")
         self.assertNotIn("missing_calls", row)
 
+    def test_a_settled_deficit_stays_raised_when_the_session_resumes(self):
+        # ADR-0046 ruling 6, the review's case: one event of the session
+        # arriving after its deficit settled made it PENDING, exit 0. Its
+        # calls were reported long ago, by the receiver's clock, so they
+        # are overdue whatever arrives after them.
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        settled = self.report(settle="3600", expect=6)
+        post_event(self.data, 51, "api_request", received_ago(0))
+
+        report = self.report(settle="3600", expect=6)
+
+        self.assertEqual(self.rows(settled)[FIXTURE_SESSION]["state"],
+                         "ENDED-DEFICIT")
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "PENDING-OVERDUE")
+        self.assertTrue(row["raises"])
+        self.assertEqual((row["deficit"], row["paired_by"]),
+                         (1, "count by tool"))
+        self.assertIn("still arriving", row["words"])
+        self.assertIn("1 call(s) the harness reported more than the settle "
+                      "window ago", row["words"])
+        self.assertIn("cannot be acknowledged", row["words"])
+
+    def test_a_newest_call_without_its_receipt_yet_is_only_pending(self):
+        # The calls reported long ago have their receipts; the one
+        # reported just now has none yet, and is not overdue.
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]"))
+        post_event(self.data, 51, "tool_result", received_ago(0),
+                   tool="Bash", call="toolu_000000000000000000000051")
+
+        report = self.report(settle="3600")
+
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "PENDING")
+        self.assertNotIn("raises", row)
+        self.assertNotIn("deficit", row)
+
+    def test_an_overdue_call_is_named_by_id_and_a_newer_receipt_pays_nothing(self):
+        # By id: the newer call's receipt does not pay the old call that
+        # has none, though by count the two would balance.
+        newer = "toolu_000000000000000000000051"
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Bash: ls [call={newer} input=unhashed]"))
+        post_event(self.data, 51, "tool_result", received_ago(0),
+                   tool="Bash", call=newer)
+
+        report = self.report(settle="3600", expect=6)
+
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "PENDING-OVERDUE")
+        self.assertEqual(row["paired_by"], "call id")
+        self.assertEqual(row["missing_calls"],
+                         {"count": 1, "calls": [FIXTURE_CALLS[1]]})
+
+    def test_overdue_calls_by_tool_raise_past_the_receipts_held(self):
+        # Events naming no call: the overdue calls are counted against
+        # every receipt held, so one short raises and two do not.
+        path = self.data / f"events-{FIXTURE_DAY}.jsonl"
+        lines = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            arrival = json.loads(line)
+            for resource in arrival["logs"]["resourceLogs"]:
+                for scope in resource["scopeLogs"]:
+                    for record in scope["logRecords"]:
+                        record["attributes"] = [
+                            pair for pair in record["attributes"]
+                            if pair["key"] != "tool_use_id"]
+            lines.append(json.dumps(arrival))
+        path.write_text("".join(line + "\n" for line in lines),
+                        encoding="utf-8")
+        post_event(self.data, 51, "tool_result", received_ago(0),
+                   tool="Bash")
+        copy = chain_copy(self.data, FIXTURE_SESSION,
+                          actions=FIXTURE_RECEIPTS[:1])
+        short = self.report(settle="3600", expect=6)
+        # One more receipt, appended where the copy was written and sent
+        # on, so the copy grows and the baseline sees no change.
+        log = self.data.parent / "store" / copy.name
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "Bash: false", check=True, timeout=60,
+            env=clean_env())
+        shutil.copyfile(log, copy)
+
+        even = self.report(settle="3600")
+
+        row = self.rows(short)[FIXTURE_SESSION]
+        self.assertEqual((row["state"], row["deficit"], row["paired_by"]),
+                         ("PENDING-OVERDUE", 1, "count by tool"))
+        self.assertEqual(self.rows(even)[FIXTURE_SESSION]["state"],
+                         "PENDING")
+
+    def test_a_hole_in_the_counter_below_an_old_event_is_overdue(self):
+        # A hole between the oldest events and one that arrived just now
+        # is not overdue; a hole below events that arrived long ago is.
+        chain_copy(self.data, FIXTURE_SESSION)
+        post_event(self.data, 53, "api_request", received_ago(0))
+        above = self.report(settle="3600")
+        lay_events(self.data, drop=(29, 30))
+        post_event(self.data, 53, "api_request", received_ago(0))
+
+        below = self.report(settle="3600", expect=6)
+
+        self.assertEqual(self.rows(above)[FIXTURE_SESSION]["state"],
+                         "PENDING")
+        row = self.rows(below)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "PENDING-OVERDUE")
+        self.assertEqual(row["gap"], {"count": 2, "numbers": [29, 30]})
+        self.assertEqual(row["deficit"], 0)
+        self.assertIn("hole(s) below an event", row["words"])
+
+    def test_receipts_with_no_events_are_not_judged_while_they_arrive(self):
+        # The ADR's non-claim: a session with no events has no call to be
+        # overdue, so while its chain keeps growing it stays PENDING.
+        chain_copy(self.data, "cut-session-3333", settled=False)
+
+        row = self.rows(self.report(settle="3600", expect=6))[
+            "cut-session-3333"]
+
+        self.assertEqual(row["state"], "PENDING")
+        self.assertNotIn("raises", row)
+
     def test_two_receipts_of_one_call_pay_it_once_and_read_as_surplus(self):
         # The fixture's session as a recorder with the suffix writes it:
         # two receipts for the failed call and one for the refused call
@@ -6365,12 +6528,16 @@ class ReceiverReadingTest(unittest.TestCase):
 
     def test_the_default_settle_window_is_one_hour(self):
         # ADR-0046 ruling 4: half an hour after the copy last grew the
-        # session is still PENDING; two hours after, it is judged.
+        # session is still PENDING; two hours after, it is judged. Its
+        # calls are reported forty minutes back at first, so none is yet
+        # overdue (ruling 6), and two hours back when it is judged.
         copy = chain_copy(self.data, FIXTURE_SESSION,
                           actions=FIXTURE_RECEIPTS[:1], settled=False)
+        restamp_events(self.data, received_ago(2400))
         half = time.time() - 1800
         os.utime(copy, (half, half))
         pending = self.report(settle=None)
+        restamp_events(self.data, received_ago(7200))
         two = time.time() - 7200
         os.utime(copy, (two, two))
 
@@ -6468,11 +6635,13 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(row["gap"], {"count": 1, "numbers": [29]})
 
     def test_a_session_inside_the_settle_window_is_pending_until_the_knob(self):
-        # The copy arrived just now: inside the one-hour window it is
+        # The copy arrived just now, and the calls ten minutes ago, so
+        # none is overdue (ruling 6): inside the one-hour window it is
         # listed with its counts and judged not at all; the knob settles
         # it on the next look.
         chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1],
                    settled=False)
+        restamp_events(self.data, received_ago(600))
 
         pending = self.report(settle=None)
         judged = self.report(settle="0", expect=6)

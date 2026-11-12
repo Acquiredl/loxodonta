@@ -34,7 +34,8 @@ from support import (LOXODONTA, SUPERVISOR, clean_env,  # noqa: E402
 from test_anchor import FakeCalendar
 from test_supervisor import (BASELINE_NAME, FIXTURE_DAY, FIXTURE_RECEIPTS,
                              FIXTURE_SESSION, FakeCalendarHandler, ago,
-                             chain_copy, lay_events, receiver_folder,
+                             chain_copy, lay_events, post_event,
+                             received_ago, receiver_folder,
                              write_pending_anchor)
 
 
@@ -1408,6 +1409,52 @@ class ReceiverAcknowledgeTest(unittest.TestCase):
 
         self.assertEqual(again.returncode, 64, again.stderr)
         self.assertIn("nothing to acknowledge", again.stderr)
+
+    def test_pending_overdue_cannot_be_acknowledged_nor_quieted(self):
+        # Ruling 6: a session accepted as ENDED-DEFICIT that resumes with
+        # its counts unchanged reads PENDING-OVERDUE, and the earlier
+        # acknowledgement does not quiet it; acknowledging it is refused.
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        self.look(6)
+        self.assertEqual(self.accept("ENDED-DEFICIT").returncode, 0)
+        self.look(0)
+        self.env["SUPERVISOR_SETTLE_SECONDS"] = "3600"
+        post_event(self.data, 51, "api_request", received_ago(0))
+
+        row = self.session_row(self.look(6))
+        shelf = self.data / "supervisor" / "baseline.json"
+        before = shelf.read_bytes()
+        refused = self.accept("PENDING-OVERDUE")
+
+        self.assertEqual(row["state"], "PENDING-OVERDUE")
+        self.assertTrue(row["raises"])
+        self.assertEqual(refused.returncode, 64, refused.stderr)
+        self.assertIn("PENDING-OVERDUE cannot be acknowledged",
+                      refused.stderr)
+        self.assertIn("ruling 6", refused.stderr)
+        self.assertEqual(shelf.read_bytes(), before)
+
+    def test_an_overdue_session_settles_into_a_finding_that_can_be_accepted(self):
+        # A new call of the session half an hour ago, with no receipt:
+        # under the hour's window the session is PENDING-OVERDUE; once
+        # nothing has arrived for the window (the knob at ten minutes)
+        # it reads ENDED-DEFICIT as before, and is acknowledged.
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        post_event(self.data, 51, "tool_result", received_ago(1800),
+                   tool="Bash")
+        self.env["SUPERVISOR_SETTLE_SECONDS"] = "3600"
+        pending = self.session_row(self.look(6))
+        self.env["SUPERVISOR_SETTLE_SECONDS"] = "600"
+
+        settled = self.session_row(self.look(6))
+        accepted = self.accept("ENDED-DEFICIT")
+
+        self.assertEqual(pending["state"], "PENDING-OVERDUE")
+        self.assertEqual((settled["state"], settled["tools"]),
+                         ("ENDED-DEFICIT", 3))
+        self.assertEqual(accepted.returncode, 0,
+                         accepted.stdout + accepted.stderr)
+        self.assertNotIn("raises", self.session_row(self.look(0)))
 
     def test_a_session_is_acknowledged_only_at_a_receiver(self):
         # Ruling 1 and Tripwire's lesson: on the agent's machine an ended

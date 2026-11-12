@@ -1743,6 +1743,10 @@ class ReceiverServeTest(ServerFixture):
                          ("ENDED-DEFICIT", True))
         self.assertIn("sessions.filter(s => s.raises)", page)
         self.assertIn("A FINDING NO ONE HAS ACCEPTED", page)
+        # A session still arriving with a call overdue is not settled,
+        # and the strip has words for it too (ADR-0046 ruling 6).
+        self.assertIn("CALLS OVERDUE AT THE RECEIVER", page)
+        self.assertIn('s.state === "PENDING-OVERDUE"', page)
         self.assertIn("acknowledged here with supervisor acknowledge "
                       "--receiver DIR", page)
 
