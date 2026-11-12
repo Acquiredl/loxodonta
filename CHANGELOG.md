@@ -15,6 +15,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/CLAIMS.md` names a limit ADR-0047's measured run found: where a `PreToolUse` hook rewrites a call's input, the receipt holds the input as the model sent it, not what ran.
 - `docs/CLAIMS.md` names two more limits: a listing drops any group shaped like a receipt's suffix, hand-written or not, and pairing by call id does not compare the receipt's tool with the call's.
 - `docs/CLAIMS.md` says the holder of the receiver's URL can add receipts as well as events: a hand-written receipt carrying a missing call's id pays that call at the receiver.
+- At the receiver, a receipt first seen more than `SUPERVISOR_LATE_RECEIPT_SECONDS` (one hour) after a settled look named its call missing pays nothing: the session keeps its finding until acknowledged, and the row says why (#620).
+- At the receiver, a chain copy carrying the hook's `second-record-cut:` note is never counted as before the second record's memory, whatever dates its entries carry: it reads `SECOND-RECORD-ABSENT` and raises (#486).
 - `anchor --upgrade` asks only the default calendars and each `--calendar` given; a row naming another address is named, skipped and never asked, so upgrading a handed sidecar sends nothing where its issuer chose. The keeper passes its `--calendar` (#415).
 
 ### Fixed
@@ -32,6 +34,9 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The receiver refuses a `RECEIVER_DEADLINE_SECONDS` or `RECEIVER_TIMEOUT_SECONDS` it cannot use by name, exit 64, before it starts: it died at import with a traceback. A crash in it exits 70, never 1 (#589).
 - A number of seconds the supervisor or the receiver waits on, such as `SUPERVISOR_KEEPER_TICK_SECONDS=1e10`, is refused by name with 64 when no wait can take it: the keeper's first turn raised `OverflowError` (#589).
 - `supervisor serve` says nothing on its log when a client leaves before its reply is read: the request's thread printed a traceback there (#589).
+- At the receiver, a receipt pays a call only when it names the tool the event names for that id: one naming another tool pays nothing, and the row, dashboard included, names the id and both tools (#620).
+- At the receiver, a second receipt carrying a call id already paid, as a failed call's two hooks leave, is no longer surplus: the row counts it apart, and it pays no second call under the count by tool (#476).
+- At the receiver, one event posted for a session whose events name no completed call no longer turns its receipts into a surplus, exit 0: the session reads `SECOND-RECORD-ABSENT` and raises, and the row says why (#620).
 
 ## [0.20.0] - 2026-11-12
 

@@ -185,3 +185,54 @@ It does not claim:
   leave as written), ADR-0047 (the receipt names its call)
 - #476 (the surplus), `docs/RECEIVER.md` section 7,
   `docs/CLAIMS.md`
+
+## Addendum, 2026-11-12: what pays a call, and when
+
+*Drafted for the author to confirm (#620).* The author ruled five
+points on a decision sheet the same day; this records them as built.
+
+1. **A receipt pays a call only under the tool the event names.**
+   Joined on the id (ruling 3), a receipt pays the call only when the
+   tool its action line names is the one the harness's event names for
+   that id. One naming another tool pays nothing, the call stays
+   unpaid, and the row names the id and both tools. An event naming no
+   tool pairs on the id alone. The harness's documentation says its
+   `tool_decision` events name every call to a server the user
+   configured `mcp_tool`, where the hook writes
+   `mcp__<server>__<tool>`; its `tool_result` events, which the pairing
+   reads, are not measured for it. So an event naming `mcp_tool` is met
+   by any receipt of an MCP tool, until one measured MCP `tool_result`
+   settles whether that is needed.
+2. **At most one receipt per call id pays** (#476, the reader's half).
+   A further receipt of an id already paid is neither surplus nor
+   deficit; the row counts it, and the chain keeps it. Under the count
+   by tool, a receipt repeating an id pays no second call. A refused
+   call's receipt is read as before, a surplus, until the harness is
+   measured.
+3. **A receipt first seen too late after its call was named missing
+   pays nothing.** The memory at the receiver keeps, per session, each
+   call id a settled look named missing and when, and when a receipt
+   paying it was first seen, by the reader's own looks and never the
+   chain's timestamps. One first seen more than
+   `SUPERVISOR_LATE_RECEIPT_SECONDS` after the naming look (one hour;
+   0, 1 hour and 6 hours the panel) pays nothing, and the session keeps
+   its finding until acknowledged. Inside it, an honest tail re-sent
+   after a failed send still clears. Only a settled look names a call
+   missing: a receipt posted before one has, inside the settle window
+   after the session's last arrival or while events keep the session
+   arriving (a `PENDING-OVERDUE` look records nothing), pays its call,
+   and nothing is recorded. A memory that cannot be read reads as
+   before and says so, beside its exit 5.
+4. **A copy carrying the `second-record-cut:` note is never before
+   memory** (#486 item 11). Its dates are the writer's, and the note
+   exists only since the pin did.
+5. **Events naming no completed call are no second record.** One
+   event posted through the URL for a session with receipts and no
+   events read every receipt as surplus. A settled session whose events
+   hold no `tool_result` while its copy holds receipts reads
+   `SECOND-RECORD-ABSENT`.
+
+What it still does not claim: a receipt posted through the URL inside
+the grace period, or before any settled look has named its call
+missing, pays the call it names, and a receipt naming any MCP tool pays
+a call the events name `mcp_tool`.
