@@ -4485,15 +4485,19 @@ def same_tool(receipt, event):
 def pair_calls(results, calls, witnessed):
     """A session's calls, as the harness reported them, against its
     receipts at the receiver, as a dict: `rule`, `owed`, `deficit`,
-    `surplus`, `missing`, and `mismatched`. `results` are the calls as
-    (time, tool, call id or None, arrival), `calls` the receipts as
-    (tool, call id or None). Where both records name calls, they are
+    `surplus`, `missing`, `mismatched` and `repeated`. `results` are the
+    calls as (time, tool, call id or None, arrival), `calls` the
+    receipts as (tool, call id or None). Where both records name calls, they are
     joined on the id (ADR-0046 ruling 3): a call reported twice under one
     id is one call, and a receipt pays only the call its id names, and
     only when it names the tool the event names for that id (#620); one
     that names another tool pays nothing and is listed in `mismatched`
-    as (id, the receipt's tool, the event's tool). A second receipt of
-    an id pays nothing. `missing` names each call with no receipt, in
+    as (id, the receipt's tool, the event's tool). At most one receipt
+    of an id pays (#476: one harness version fired two hooks for a
+    failed call): a further receipt of an id already paid is neither
+    surplus nor deficit, and `repeated` counts it. Under the count by
+    tool too, a receipt repeating an id an earlier one carries pays no
+    second call. `missing` names each call with no receipt, in
     time order. A call or a receipt naming none is paired by count
     within its tool, among its own kind only, so a receipt with no id
     never pays a call the harness named. Where either record names none,
@@ -4502,13 +4506,19 @@ def pair_calls(results, calls, witnessed):
     paying = [call for _, call in calls if call]
     named = [call for _, _, call, _ in results if call]
     if not paying or not named:
-        receipts = {}
-        for tool, _ in calls:
+        receipts, carried, repeated = {}, set(), 0
+        for tool, call in calls:
+            if call in carried:
+                repeated += 1
+                continue
+            if call:
+                carried.add(call)
             receipts[tool] = receipts.get(tool, 0) + 1
         owed = [(when, tool) for when, tool, _, _ in results]
         deficit, surplus, _ = reconcile(owed, {}, receipts, witnessed)
         return {"rule": "count by tool", "owed": owed, "deficit": deficit,
-                "surplus": surplus, "missing": [], "mismatched": []}
+                "surplus": surplus, "missing": [], "mismatched": [],
+                "repeated": repeated}
     owed, unnamed, order, reported = [], [], [], {}
     for when, tool, call, _ in results:
         if call in reported:
@@ -4519,7 +4529,7 @@ def pair_calls(results, calls, witnessed):
             reported[call] = tool
             order.append(call)
         owed.append((when, tool))
-    paid, mismatched, loose, unpaying = set(), [], {}, 0
+    paid, mismatched, loose, unpaying, repeated = set(), [], {}, 0, 0
     for tool, call in calls:
         if not call:
             loose[tool] = loose.get(tool, 0) + 1
@@ -4529,20 +4539,22 @@ def pair_calls(results, calls, witnessed):
             mismatched.append((call, tool, reported[call]))
             unpaying += 1
         elif call in paid:
-            unpaying += 1
+            repeated += 1
         else:
             paid.add(call)
     missing = [call for call in order if call not in paid]
     deficit, surplus, _ = reconcile(unnamed, {}, loose, witnessed)
     return {"rule": "call id", "owed": owed,
             "deficit": deficit + len(missing), "surplus": surplus + unpaying,
-            "missing": missing, "mismatched": mismatched}
+            "missing": missing, "mismatched": mismatched,
+            "repeated": repeated}
 
 
 def pairing_words(pairing):
     """What a row's note says of receipts the pairing set aside, or None:
-    each receipt carrying a call's id under another tool's name (#620).
-    The receipts' tools are the writer's text, so each is clipped."""
+    each receipt carrying a call's id under another tool's name (#620),
+    and how many repeat an id already paid (#476). The receipts' tools
+    are the writer's text, so each is clipped."""
     said = []
     if pairing["mismatched"]:
         named = "; ".join(
@@ -4554,6 +4566,10 @@ def pairing_words(pairing):
                     "of a call whose event names another tool, and pay "
                     f"nothing: {named}" + (f"; and {more} more" if more > 0
                                            else "") + " (#620)")
+    if pairing["repeated"]:
+        said.append(f"{pairing['repeated']} receipt(s) repeat a call id "
+                    "already paid, and count as neither surplus nor deficit; "
+                    "the chain keeps them (#476)")
     return "; ".join(said) or None
 
 

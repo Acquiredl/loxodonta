@@ -6708,8 +6708,10 @@ class ReceiverReadingTest(unittest.TestCase):
     def test_two_receipts_of_one_call_pay_it_once_and_read_as_surplus(self):
         # The fixture's session as a recorder with the suffix writes it:
         # two receipts for the failed call and one for the refused call
-        # (#476). Joined on the id, every call is paid, and the extra
-        # receipts are the surplus #476 makes, no alarm.
+        # (#476). Joined on the id, every call is paid. The failed call's
+        # second receipt is neither surplus nor deficit, and the row
+        # counts it; the refused call's receipt is still the surplus
+        # #476 makes, no alarm.
         chain_copy(self.data, FIXTURE_SESSION, actions=(
             f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
             f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]",
@@ -6724,6 +6726,51 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual((row["deficit"], row["tools"]), (0, 2))
         self.assertNotIn("missing_calls", row)
         self.assertNotIn("raises", row)
+        self.assertIn("1 receipt(s) repeat a call id already paid",
+                      row["note"])
+
+    def test_a_failed_call_s_second_receipt_alone_reads_clean(self):
+        # #476, the reader's half: a failed call fired two hooks, so two
+        # receipts carry its id. At most one pays; the other is no
+        # surplus, so the session reads clean, and the row says why.
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]",
+            f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]"))
+
+        row = self.rows(self.report())[FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "ENDED-CLEAN")
+        self.assertEqual(row["receipts"], 3)
+        self.assertIn("1 receipt(s) repeat a call id already paid",
+                      row["note"])
+
+    def test_a_repeated_id_pays_once_where_the_count_by_tool_stands(self):
+        # The events name no call, so the count by tool judges: a receipt
+        # repeating an id another receipt carries pays no second call.
+        path = self.data / f"events-{FIXTURE_DAY}.jsonl"
+        lines = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            arrival = json.loads(line)
+            for resource in arrival["logs"]["resourceLogs"]:
+                for scope in resource["scopeLogs"]:
+                    for record in scope["logRecords"]:
+                        record["attributes"] = [
+                            pair for pair in record["attributes"]
+                            if pair["key"] != "tool_use_id"]
+            lines.append(json.dumps(arrival))
+        path.write_text("".join(line + "\n" for line in lines),
+                        encoding="utf-8")
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]"))
+
+        row = self.rows(self.report(expect=6))[FIXTURE_SESSION]
+
+        self.assertEqual((row["state"], row["paired_by"], row["deficit"]),
+                         ("ENDED-DEFICIT", "count by tool", 1))
+        self.assertIn("1 receipt(s) repeat a call id already paid",
+                      row["note"])
 
     def test_a_receipt_naming_another_tool_pays_nothing_and_is_named(self):
         # #620: the second call's id in a receipt whose action line names
