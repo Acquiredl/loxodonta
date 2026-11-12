@@ -85,9 +85,9 @@ The recommended setup posts the head to the receiver at every session end. By ha
 
 The proof that ties the chain to the block is a file beside the chain. The agent cannot forge it but can delete it, and for now nothing sends it off the machine ([#524](https://github.com/Acquiredl/loxodonta/issues/524)), so keep a copy elsewhere. A timestamp authority you choose (RFC 3161) can stamp the same head beside Bitcoin's clock, never instead of it, since an authority can be leaned on and a block cannot: `install-hook --authority URL` asks it at every session end, and `verify --stamps` judges the tokens later with the authority's certificates in hand ([docs/ANCHORING.md](ANCHORING.md)).
 
-**A receiver on another machine.** `receiver.py` runs on a second machine and keeps what is sent to it: every receipt and every head at session end and, in the recommended setup, the harness's own record of each tool call.
+**A receiver on another machine.** `receiver.py` runs on a second machine and keeps what is sent to it: every receipt as it is written, every head at session end and, in the recommended setup, the harness's own record of each tool call.
 
-![Two machines. The hook on the agent's machine sends receipts and the head at session end to the receiver on another machine out of the agent's reach, and the harness sends its own events there. The receiver only ever adds.](images/receiver.svg)
+![Two machines. The hook on the agent's machine sends each receipt as it is written and the head at session end to the receiver on another machine out of the agent's reach, and the harness sends its own events there. The receiver only ever adds.](images/receiver.svg)
 
 It only ever adds, so a wiped machine's chain survives there as of the last send, and many machines can send to one receiver, though it has been run with one. Every command line leaves the machine with it, and whoever runs the receiver can read them ([docs/RECEIVER.md](RECEIVER.md)).
 

@@ -1,6 +1,6 @@
 # ADR-0044: ANCHORED names a block that was checked, and a block that was not is ANCHOR-CLAIMED
 
-**Status:** proposed 2026-11-11. Ruled by the author on that date after a design review of the whole tool, as one answer to the proposal with its three choices. Accepted once the build lands.
+**Status:** accepted 2026-11-11, built (#597). Ruled by the author on that date after a design review of the whole tool, as one answer to the proposal with its three choices.
 **Deciders:** Acquiredl
 
 ## Context

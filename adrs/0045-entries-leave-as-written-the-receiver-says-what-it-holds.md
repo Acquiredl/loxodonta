@@ -1,6 +1,6 @@
 # ADR-0045: Entries leave as they are written, and the receiver says what it holds
 
-**Status:** proposed 2026-11-11. Ruled by the author on that date after a design review of the whole tool, as one answer to the proposal with its three choices and a one-second cap. Nothing is built or measured yet: accepted once the build lands and the numbers under *Measured* are written in.
+**Status:** proposed 2026-11-11. Ruled by the author on that date after a design review of the whole tool, as one answer to the proposal with its three choices and a one-second cap. Built (#600) and not measured yet: accepted once the numbers under *Measured* are written in.
 **Deciders:** Acquiredl
 
 ## Context
