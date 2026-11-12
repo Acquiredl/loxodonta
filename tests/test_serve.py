@@ -2056,15 +2056,20 @@ class ReceiverServeTest(ServerFixture):
         _, _, page = self.get("/")
 
         for reply in (saved, json.loads(listed)):
-            self.assertIn("out of the writer's reach", reply["purpose"])
+            self.assertIn("out of the writer's reach if the receiver is",
+                          reply["purpose"])
             self.assertNotIn("writer-reachable", reply["purpose"])
         kept = (self.data / "supervisor" / "views.json").read_text(
             encoding="utf-8")
         self.assertNotIn("writer-reachable", kept)
         self.assertEqual(json.loads(body)["baseline"]["kept"],
-                         "kept at the receiver, out of the writer's reach")
+                         "kept at the receiver, out of the writer's reach if "
+                         "the receiver is")
+        # One source for every acknowledgement line, a session's and a
+        # change's alike.
         self.assertIn("report.baseline.kept", page)
         self.assertNotIn("kept in a writer-reachable file", page)
+        self.assertNotIn("(an operator's word, kept at the receiver)", page)
 
     def test_the_recall_routes_read_the_receivers_copies(self):
         # #487 item 10: the census counts the copies, and so must the

@@ -612,12 +612,14 @@ BASELINE_NAME = ".supervisor-baseline.json"
 
 # Whose reach the supervisor's own files are in, said wherever they are
 # labelled (#615). On the agent's machine they sit in the account the
-# writer runs as (ADR-0002). Over a receiver's folder they sit on a
-# machine the writer cannot reach (ADR-0046), though whoever holds the
-# receiver's URL can add to the copies and events read there
-# (docs/CLAIMS.md): never more than that is claimed.
+# writer runs as (ADR-0002). Over a receiver's folder they sit wherever
+# DIR is, which the supervisor cannot check: out of the writer's reach
+# only where the setup puts the receiver there (ADR-0046), and even then
+# whoever holds the receiver's URL can add to the copies and events read
+# there (docs/CLAIMS.md). The label states that condition, never more.
 WRITER_REACH = "writer-reachable, trusted for nothing"
-RECEIVER_REACH = "kept at the receiver, out of the writer's reach"
+RECEIVER_REACH = ("kept at the receiver, out of the writer's reach if the "
+                  "receiver is")
 
 
 def memory_reach(receiver):
@@ -1032,8 +1034,8 @@ def rows_skipped(path, skipped):
 def write_daybook(path, days, now, receiver=False):
     """Keep a season, forget the rest, and never let a write failure
     take the tick down with it — the book is a convenience, and the
-    verdicts do not live here. `receiver` for a receiver's folder,
-    whose book is out of the writer's reach (#615).
+    verdicts do not live here. `receiver` for a receiver's folder, whose
+    label says whose reach the book is in (`memory_reach`, #615).
 
     Pruned by date, not by row count: a book that went unwritten for a
     year should forget that year, not keep it because it is short."""
@@ -1145,7 +1147,8 @@ def read_views(path):
 def write_views(path, views, receiver=False):
     """Never let a write failure take the request down with it: the
     views are a convenience, and no verdict lives here. `receiver` for
-    a receiver's folder, out of the writer's reach (#615)."""
+    a receiver's folder, whose label says whose reach the file is in
+    (`memory_reach`, #615)."""
     kept = views[:VIEW_LIMIT]
     try:
         write_whole(path, json.dumps(
@@ -12308,12 +12311,14 @@ function render(report) {
   // What an operator accepted, as kept in the baseline: testimony, drawn
   // plainly, raising nothing.
   for (const record of (report.baseline.acknowledged || [])) {
-    // A session accepted at a receiver (ADR-0046): its memory is out of
-    // the writer's reach, so it is not called writer-reachable.
+    // Whose reach the file is in is the server's to say, one source for
+    // every line (#615): the page cannot tell where it was read.
+    const kept = " (an operator's word, " + report.baseline.kept + ")";
+    // A session accepted at a receiver (ADR-0046).
     if (record.session) {
       tripwire.appendChild(el("p", "claim", "acknowledged " +
         (record.ts || "") + " · session " + record.session + " · " +
-        record.state + " (an operator's word, kept at the receiver)"));
+        record.state + kept));
       continue;
     }
     const what = record.log
@@ -12321,11 +12326,8 @@ function render(report) {
         seen(record.remembered) + " · accepted " + seen(record.accepted)
       : "the baseline itself · " + record.change + " · " +
         (record.stood || "") + " · started afresh";
-    // Whose reach the file is in is the server's to say (#615): at a
-    // receiver it is out of the writer's.
     tripwire.appendChild(el("p", "claim", "acknowledged " +
-      (record.ts || "") + " · " + what +
-      " (an operator's word, " + report.baseline.kept + ")"));
+      (record.ts || "") + " · " + what + kept));
   }
 
   // The completeness watch: only sessions worth a second look get a

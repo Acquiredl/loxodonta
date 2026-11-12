@@ -1307,14 +1307,16 @@ class ReceiverAcknowledgeTest(unittest.TestCase):
         printed = "".join(r.stdout + r.stderr for r in said)
         self.assertNotIn("writer-reachable", printed)
         self.assertNotIn("writer-reachable", json.dumps(clean))
-        self.assertIn("out of the writer's reach", event["investigate"])
+        self.assertIn("out of the writer's reach if the receiver is",
+                      event["investigate"])
         self.assertIn("whoever holds the receiver's URL", event["investigate"])
         self.assertEqual(clean["baseline"]["kept"],
-                         "kept at the receiver, out of the writer's reach")
+                         "kept at the receiver, out of the writer's reach if "
+                         "the receiver is")
         for name in ("baseline.json", "daybook.json"):
             kept = (shelf / name).read_text(encoding="utf-8")
             self.assertNotIn("writer-reachable", kept)
-            self.assertIn("out of the writer's reach",
+            self.assertIn("out of the writer's reach if the receiver is",
                           json.loads(kept)["purpose"])
 
     def accept(self, state, session=FIXTURE_SESSION):
