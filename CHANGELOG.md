@@ -40,6 +40,9 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - At the receiver, a second receipt carrying a call id already paid, as a failed call's two hooks leave, is no longer surplus: the row counts it apart, and it pays no second call under the count by tool (#476).
 - At the receiver, one event posted for a session whose events name no completed call no longer turns its receipts into a surplus, exit 0: the session reads `SECOND-RECORD-ABSENT` and raises, and the row says why (#620).
 - A transcript holding lines, not one of them readable, reads `UNWITNESSED` naming the file and why, as one that cannot be opened does: it counted as a session that ran no tools, so a live alarm read `QUIET` (#473).
+- The scan no longer says the remote "has never taken" a send it took: where the memo shows earlier sends taken and the newest failed, the publishing note says the remote missed the newest (#614).
+- A reading over a receiver's folder no longer labels its memory, day book, saved views or acceptances writer-reachable: they are kept at the receiver, out of the writer's reach if the receiver is. The agent's machine keeps its labels (#615).
+- The help of `scan --receiver` no longer says every session short of receipts raises the exit until acknowledged: a settled one stands until accepted, and one still arriving with a call overdue until the receipts arrive or it settles (#617).
 - `verify` on a chain whose only line is torn says `no entry intact`, where it printed `entries 0..-1 intact`. The verdict and the exit are unchanged (#589).
 - A project record that is an object naming no string `path` (`{}`, `{"path": 5}`) cannot be read as a project record, `it names no project path`, where it read as a missing project named `(None)` or `(5)` (#589).
 - `verify` prints the `--transcript` path and the `--authority-chain` file with control characters escaped, in `TRANSCRIPT-UNRESOLVED`, `STAMPED` and the not-found note, where they printed raw (#589).
