@@ -10,6 +10,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-12
+
 ### Added
 
 - `install-hook --managed --matcher PATTERN` narrows the recorder's matcher in the managed file. Without it a managed install wires `*`, and a matcher narrowed in the operator's own settings file is named and not carried (ADR-0043).
@@ -532,7 +534,8 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - The recorder honors `SOURCE_DATE_EPOCH` for the receipt timestamp, so the demo store writes byte-identical chains; a timestamp is testimony either way (ADR-0002).
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
-[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.19.0...dev
+[Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.20.0...dev
+[0.20.0]: https://github.com/Acquiredl/loxodonta/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/Acquiredl/loxodonta/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Acquiredl/loxodonta/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Acquiredl/loxodonta/compare/v0.16.0...v0.17.0
