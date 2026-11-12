@@ -4865,7 +4865,7 @@ class RecorderDriftTest(unittest.TestCase):
 
         self.assertTrue(recorder["dirty"])
         self.assertIn("uncommitted", recorder["note"])
-        self.assertIn("git has been told not to show them", recorder["note"])
+        self.assertIn("though `git status` shows none", recorder["note"])
         self.assertNotIn("clean", recorder["note"])
 
     def test_an_edit_git_skips_in_the_worktree_is_still_drift(self):
@@ -4873,7 +4873,7 @@ class RecorderDriftTest(unittest.TestCase):
 
         self.assertTrue(recorder["dirty"])
         self.assertIn("uncommitted", recorder["note"])
-        self.assertIn("git has been told not to show them", recorder["note"])
+        self.assertIn("though `git status` shows none", recorder["note"])
 
     def test_a_recorder_git_ignores_and_never_committed_is_drift(self):
         # The same silence from the other side: a recorder taken out of
@@ -4893,7 +4893,7 @@ class RecorderDriftTest(unittest.TestCase):
         recorder = self.notice()
 
         self.assertTrue(recorder["dirty"])
-        self.assertIn("git has been told not to show them", recorder["note"])
+        self.assertIn("though `git status` shows none", recorder["note"])
 
     def assert_unreadable_in_a_checkout(self, recorder, words):
         """#621: git answered, so the checkout is read as one, and a
@@ -4905,7 +4905,7 @@ class RecorderDriftTest(unittest.TestCase):
         self.assertIn(words, recorder["note"])
         self.assertNotIn("not in a git checkout", recorder["note"])
         self.assertNotIn("clean", recorder["note"])
-        self.assertNotIn("told not to show", recorder["note"])
+        self.assertNotIn("shows none", recorder["note"])
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a named pipe")
     def test_a_pipe_in_the_recorders_place_is_named_never_read(self):
@@ -4979,10 +4979,47 @@ class RecorderDriftTest(unittest.TestCase):
         self.assertFalse(recorder["dirty"])
         self.assertIn("clean", recorder["note"])
 
+    def test_a_crlf_doubled_by_a_carriage_return_is_drift(self):
+        # One pass of CRLF to LF folds CR CR LF back to a CRLF the blob
+        # holds, while Python reads one line more; git never writes CR CR
+        # LF on checkout, so it is an edit.
+        home, script = self.make_checkout(autocrlf="false")
+        script.write_bytes(b"one = 1\r\ntwo = 2\n")
+        self.git("commit", "-q", "-am", "mixed endings", cwd=home)
+        script.write_bytes(b"one = 1\r\r\ntwo = 2\n")
+        self.git("update-index", "--assume-unchanged", "loxodonta.py",
+                 cwd=home)
+
+        recorder = self.notice()
+
+        self.assertTrue(recorder["dirty"])
+        self.assertIn("uncommitted", recorder["note"])
+
+    def test_a_replaced_head_never_vouches_for_edited_bytes(self):
+        # `git replace` makes HEAD's tree the writer's, while HEAD still
+        # prints the real commit: the notice reads the commits as made.
+        home, script = self.make_checkout()
+        script.write_bytes(b"# edited, and committed only in a fake\n")
+        self.git("add", "loxodonta.py", cwd=home)
+        tree = self.git("write-tree", cwd=home).stdout.strip()
+        fake = self.git("commit-tree", tree, "-m", "fake",
+                        cwd=home).stdout.strip()
+        real = self.git("rev-parse", "HEAD", cwd=home).stdout.strip()
+        self.assertEqual(self.git("replace", real, fake,
+                                  cwd=home).returncode, 0)
+        said = self.git("status", "--porcelain", "--", "loxodonta.py",
+                        cwd=home)
+        self.assertEqual(said.stdout.strip(), "", "git status still sees it")
+
+        recorder = self.notice()
+
+        self.assertTrue(recorder["dirty"])
+        self.assertIn("uncommitted", recorder["note"])
+
     def test_line_endings_converted_on_checkout_are_not_drift(self):
         # #621: with autocrlf the file on disk ends its lines in CRLF and
-        # the blob in LF; the comparison goes through git's own clean
-        # conversion, so that difference is not an edit.
+        # the blob in LF; the bytes with every CRLF made LF are the blob,
+        # so that difference is not an edit.
         home, script = self.make_checkout(autocrlf="true")
         script.unlink()
         self.git("checkout", "--", "loxodonta.py", cwd=home)
@@ -5003,7 +5040,7 @@ class RecorderDriftTest(unittest.TestCase):
         self.assertEqual(recorder["state"], "tracked")
         self.assertFalse(recorder["dirty"])
         self.assertIn("clean", recorder["note"])
-        self.assertNotIn("told not to show", recorder["note"])
+        self.assertNotIn("shows none", recorder["note"])
 
     def test_a_recorder_outside_git_is_unknown_never_an_error(self):
         # No repo, no git, no upstream: say so plainly rather than
