@@ -1182,6 +1182,114 @@ class LinkThroughLinkTest(ChecksOnly, ManagedBase):
         self.assertIn("more than 40 links", line)
 
 
+def short_spelling(path):
+    """The 8.3 spelling Windows gives an existing `path`, or None where
+    it gives none."""
+    import ctypes
+    buffer = ctypes.create_unicode_buffer(1024)
+    size = ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, 1024)
+    if not size or buffer.value.lower() == str(path).lower():
+        return None
+    return buffer.value
+
+
+@unittest.skipUnless(sys.platform == "win32", "the check by place is Windows's")
+class WindowsPlacesTest(ChecksOnly, ManagedBase):
+    """#574: on Windows a path passes under Program Files, Program Files
+    (x86) and System32, as the registry names them, and nowhere else
+    under the Windows folder; under System32 the folders an ordinary
+    account may write by default are refused by name. Each spelling of a
+    place gets that place's answer. Every case is read through the
+    installer's own warnings and refused at the operator's file before
+    anything is written (ChecksOnly): no case writes into a system
+    folder. A device or network spelling of the copy's folder never
+    reaches the check: the stand-in refuses it first (stand_in)."""
+
+    def system(self, *parts):
+        windows = os.environ.get("SystemRoot", "C:\\Windows")
+        return os.path.join(windows, *parts)
+
+    def unused(self, folder):
+        """A name under `folder` that nothing stands at."""
+        name = os.path.join(folder, f"loxodonta-574-{os.getpid()}")
+        self.assertFalse(os.path.lexists(name))
+        return name
+
+    def assert_refused(self, program, words=None):
+        line = self.folder_said(self.checked(program), program)
+        self.assertIsNotNone(line, f"{program} passed the check")
+        self.assertTrue(line.startswith("warning:"), line)
+        if words:
+            self.assertIn(words, line)
+        self.assertFalse(os.path.lexists(program))
+        return line
+
+    def assert_passes(self, program):
+        stderr = self.checked(program)
+        self.assertIsNone(self.folder_said(stderr, program), stderr)
+        self.assertFalse(os.path.lexists(program))
+
+    def test_the_three_places_pass(self):
+        places = [self.system("System32"),
+                  os.environ.get("ProgramFiles", "C:\\Program Files")]
+        x86 = os.environ.get("ProgramFiles(x86)")
+        if x86:
+            places.append(x86)
+        for place in places:
+            with self.subTest(place=place):
+                self.assert_passes(self.unused(place))
+
+    def test_the_rest_of_the_windows_folder_is_refused(self):
+        # Default-writable folders there passed the check (#574).
+        for parts in ((), ("Tasks",), ("Temp",), ("tracing",)):
+            program = self.unused(self.system(*parts))
+            with self.subTest(program=program):
+                line = self.assert_refused(program, "System32")
+                self.assertNotIn("cannot read that folder's access list",
+                                 line)
+
+    def test_the_folders_under_system32_any_account_writes_are_refused(self):
+        for parts in (("Tasks",), ("spool", "drivers", "color"),
+                      ("spool", "PRINTERS"), ("FxsTmp",), ("com", "dmp"),
+                      ("Microsoft", "Crypto", "RSA", "MachineKeys")):
+            program = self.unused(self.system("System32", *parts))
+            with self.subTest(program=program):
+                self.assert_refused(program, "may write by default")
+
+    def test_every_spelling_of_a_refused_folder_is_refused(self):
+        tasks = self.system("System32", "Tasks")
+        spellings = [self.unused(tasks.upper()), self.unused(tasks.lower()),
+                     tasks + "\\", tasks.replace("\\", "/")]
+        data = short_spelling(os.environ.get("ProgramData",
+                                             "C:\\ProgramData"))
+        if data:
+            spellings.append(self.unused(data))
+        # Beside the test's folder, never in it: everything() would walk
+        # through it into System32.
+        beside = Path(tempfile.mkdtemp())
+        self.addCleanup(os.rmdir, beside)
+        junction = beside / "junction"
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction),
+             self.system("System32")],
+            capture_output=True, encoding="utf-8", timeout=60)
+        if made.returncode == 0:
+            # Removed as a junction, never followed into System32.
+            self.addCleanup(os.rmdir, junction)
+            spellings.append(str(junction / "loxodonta-574"))
+        for program in spellings:
+            with self.subTest(program=program):
+                line = self.folder_said(self.checked(program), program)
+                self.assertIsNotNone(line, f"{program} passed the check")
+
+    def test_a_short_spelling_of_a_passing_place_passes(self):
+        x86 = os.environ.get("ProgramFiles(x86)")
+        short = x86 and short_spelling(x86)
+        if not short:
+            self.skipTest("no 8.3 spelling of Program Files (x86) here")
+        self.assert_passes(self.unused(short))
+
+
 class ManagedUninstallTest(ManagedBase):
 
     def test_it_deletes_that_one_file_and_nothing_else(self):
