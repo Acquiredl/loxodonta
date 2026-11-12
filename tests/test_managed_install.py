@@ -1060,6 +1060,116 @@ class ManagedCopyTest(ManagedBase):
         self.assertIn("no longer anchors at session end", done.stdout)
 
 
+class ChecksOnly:
+    """What a managed install's check says of a path, read without an
+    install: the operator's settings file is not JSON, so the installer
+    prints the check's warnings under the stand-in and refuses at that
+    file (65), before anything is written."""
+
+    def checked(self, program):
+        """The installer's stderr with the copy's stand-in naming
+        `program`, which may be a folder of the machine's own: nothing is
+        written there, or anywhere."""
+        self.operator_file.write_text("{not json", encoding="utf-8")
+        env = {**self.env, "LOXODONTA_PROGRAM_DIR": str(program)}
+        before = self.everything()
+
+        with home_guard.left_to_the_machine("LOXODONTA_PROGRAM_DIR"):
+            done = run(LOXODONTA, "install-hook", "--managed", env=env)
+
+        self.assertEqual(done.returncode, 65, done.stdout + done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertEqual(self.everything(), before)
+        return done.stderr
+
+    def folder_said(self, stderr, program):
+        """The warning the check gave of the copy's folder `program`, or
+        None when it passed."""
+        said = [line for line in stderr.splitlines()
+                if f"the folder the recorder is copied to, {program}," in line]
+        self.assertLessEqual(len(said), 1, stderr)
+        return said[0] if said else None
+
+
+class LinkThroughLinkTest(ChecksOnly, ManagedBase):
+    """#576: the check resolves a path one link at a time, as the system
+    does, and judges every folder that holds a link, at every hop. A link
+    whose target folder holds a second link escaped it: that folder was
+    in neither the walk of the path as written nor of the path resolved.
+
+    Building the case needs a link made by root in a folder only root
+    writes, so the links are made through `sudo -n` in a folder of the
+    test's own under /opt, removed after, and the test is skipped
+    wherever sudo asks for a password."""
+
+    def setUp(self):
+        super().setUp()
+        if sys.platform == "win32" or not hasattr(os, "geteuid") \
+                or os.geteuid() == 0:
+            self.skipTest("needs POSIX, an account that is not root, and sudo")
+        for place in ("/", "/opt"):
+            try:
+                status = os.lstat(place)
+            except OSError:
+                self.skipTest(f"no {place} here")
+            if status.st_uid != 0 or status.st_mode & 0o022 \
+                    or not stat.S_ISDIR(status.st_mode):
+                self.skipTest(f"{place} is not root's alone here")
+        try:
+            made = subprocess.run(
+                ["sudo", "-n", "mktemp", "-d", "/opt/loxodonta-576.XXXXXX"],
+                capture_output=True, encoding="utf-8", timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("no sudo here")
+        if made.returncode != 0:
+            self.skipTest(f"sudo -n does not run here: {made.stderr.strip()}")
+        self.roots = made.stdout.strip()
+        self.addCleanup(subprocess.run, ["sudo", "-n", "rm", "-rf", self.roots],
+                        capture_output=True, timeout=60)
+        self.as_root("chmod", "0755", self.roots)
+
+    def as_root(self, *command):
+        done = subprocess.run(["sudo", "-n", *command], capture_output=True,
+                              encoding="utf-8", timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_a_second_link_is_judged_by_the_folder_that_holds_it(self):
+        # root's link -> an account's folder holding a link -> /usr/bin:
+        # the account retargets its link, and the command runs that.
+        system = "/usr/bin/python3"
+        if not os.path.isfile(system):
+            self.skipTest("needs a system Python")
+        writers = self.work / "writers"
+        writers.mkdir()
+        (writers / "python3").symlink_to(system)
+        link = os.path.join(self.roots, "python3")
+        self.as_root("ln", "-s", str(writers / "python3"), link)
+        said = subprocess.run(
+            [link, "-I", "-c", "import sys; print(sys.executable)"],
+            capture_output=True, encoding="utf-8", timeout=60)
+        if said.returncode != 0 or said.stdout.strip() != link:
+            self.skipTest(f"{system} does not name itself as run through "
+                          f"a link here: {said.stdout.strip()!r}")
+
+        done = subprocess.run(
+            [link, str(LOXODONTA), "install-hook", "--managed"],
+            capture_output=True, encoding="utf-8", env=self.env, timeout=120)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f"warning: the interpreter the hook command would "
+                      f"name, {link}", done.stderr)
+
+    def test_a_path_past_forty_links_is_refused(self):
+        # The kernel gives up past 40 links (ELOOP), and so does the check.
+        loop = os.path.join(self.roots, "loop")
+        self.as_root("ln", "-s", "loop", loop)
+
+        line = self.folder_said(self.checked(loop), loop)
+
+        self.assertIsNotNone(line, "a loop of links passed the check")
+        self.assertIn("more than 40 links", line)
+
+
 class ManagedUninstallTest(ManagedBase):
 
     def test_it_deletes_that_one_file_and_nothing_else(self):
