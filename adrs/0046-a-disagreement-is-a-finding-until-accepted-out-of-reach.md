@@ -1,6 +1,6 @@
 # ADR-0046: A disagreement is a finding until it is accepted out of the writer's reach
 
-**Status:** proposed 2026-11-11. Ruled by the author on that date after a design review of the whole tool, as one answer to the proposal with its four choices and a one-hour settle window. Nothing is built yet: accepted once the build lands.
+**Status:** proposed 2026-11-11. Ruled by the author on that date after a design review of the whole tool, as one answer to the proposal with its four choices and a one-hour settle window. Accepted once the build lands.
 **Deciders:** Acquiredl
 
 ## Context
@@ -84,6 +84,25 @@ readers the completeness promise rests on.
    exit, the acknowledgement, the pairing, the window),
    `docs/TOPOLOGY.md`, the glossary, and an addendum on ADR-0041.
 
+6. **A call is judged by its own age, whatever arrives after it.**
+   Ruled on 2026-11-12, after the review of the build (#601) showed
+   that one event an hour, posted by whoever holds the URL, kept a
+   session `PENDING` and so never judged. The window of ruling 4
+   still decides when a session as a whole has settled. Beside it, in
+   a session that is still `PENDING`, a call the harness reported
+   more than the window ago is overdue: its age is the receiver's own
+   `received` of the arrival that carried it, never a time the event
+   states. An overdue call with no receipt, paired as ruling 3 says,
+   makes the session `PENDING-OVERDUE`, and so does a hole in the
+   events' counter below an event that arrived more than the window
+   ago. `PENDING-OVERDUE` raises the exit as the three findings of
+   ruling 2 do. It cannot be acknowledged: it ends when the receipts
+   arrive, or when the session settles and reads as one of the three,
+   which can. Where the count by tool stands, the overdue calls are
+   counted against every receipt held, so a receipt of a newer call
+   can pay for an older one until the session settles; that reading
+   is never louder than the settled one will be.
+
 ### What it claims, and what it does not
 
 It claims that in the vantage setup, a session the receiver heard of
@@ -101,6 +120,10 @@ It does not claim:
 - **That an acknowledgement is right.** It records that someone
   accepted the state, and when.
 - **Pairing by id where the harness's events name no call.**
+- **An absent second record in a session that is kept arriving.** A
+  writer that cuts the harness's events and keeps posting entries
+  holds its session `PENDING` with no call to be overdue. Ruling 6
+  judges calls the receiver heard of.
 
 ## Consequences
 
@@ -143,6 +166,15 @@ It does not claim:
   longer decides when receipts arrive.
 - **Acknowledge from the agent's machine.** Rejected: Tripwire's
   lesson. The acceptance lives where the baseline does.
+- **Name the limit and keep the session-wide window alone.** The
+  build as first reviewed. Rejected: the finding of ruling 2 could be
+  put to sleep by the party it is kept against.
+- **A session that has raised keeps raising while it is pending.**
+  Rejected: a writer that posts from the first hour is never judged,
+  so never raises once.
+- **Let `PENDING-OVERDUE` be acknowledged.** Rejected for now: its
+  counts move with every call of a live session, so an acceptance
+  would hold for seconds.
 
 ## References
 

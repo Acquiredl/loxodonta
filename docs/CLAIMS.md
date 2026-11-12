@@ -7,7 +7,7 @@ This page is for someone who wants to rely on a loxodonta record, or build a too
 | Question | Answered by | The short answer |
 |---|---|---|
 | Was the record changed after it was written? | The chain, checked against a copy of its head kept off the machine | Promised, under the vantage setup below |
-| Is anything missing from it? | The [witness](GLOSSARY.md#witness), counting against a [second record](GLOSSARY.md#second-record) | Not promised. The witness catches faults; see what it adds, below |
+| Is anything missing from it? | The reading at the [receiver](GLOSSARY.md#receiver), counting against the harness's own events, under the vantage setup | Not promised yet. On the agent's machine the [witness](GLOSSARY.md#witness) catches faults; see what each adds, below |
 | Is what was written true? | Nothing | Never promised. A receipt is what the hook was handed |
 
 ## The two promises
@@ -17,11 +17,11 @@ This page is for someone who wants to rely on a loxodonta record, or build a too
 
 ## What the witness adds
 
-It is not a promise. A Claude Code session that ran tool calls owing a receipt and wrote fewer is reported by the supervisor. That catches faults: a hook that stopped firing, a wedged lock, a silent fork. It does not hold against a writer who can edit or delete the transcript: the second record it counts against is on the same machine, and a session whose transcript is garbled, emptied or gone reads as quiet or is not seen at all (#473). Its other limits are under *Where the promises stop*. (GLOSSARY, *Second record*; GROUNDING section 3.)
+It is not a promise, and on one machine it is not a defence against the writer: every file it reads is in the account the writer runs as (ADR-0046). A Claude Code session that ran tool calls owing a receipt and wrote fewer is reported by the supervisor. That catches faults: a hook that stopped firing, a wedged lock, a silent fork. It does not hold against a writer who can edit or delete the transcript: the second record it counts against is on the same machine, and a session whose transcript is garbled, emptied or gone reads as quiet or is not seen at all (#473). Its other limits are under *Where the promises stop*. (GLOSSARY, *Second record*; GROUNDING section 3.)
 
-At the receiver the same count runs against the harness's own events. At `full`, a managed install pins those events to the receiver, and `supervisor scan --receiver DIR`, run on the receiver's machine, counts each session's receipts against them tool by tool once nothing of the session has arrived for the settle window. It names a session short of receipts, one whose events never arrived, and one whose events' counter has holes (RECEIVER.md section 7). The agent cannot delete those events once they land. It holds the URL, though, so it can add events, and the reading cannot tell an event it posted from one the harness sent.
+At the receiver the same count runs against the harness's own events. At `full`, a managed install pins those events to the receiver, and `supervisor scan --receiver DIR`, run on the receiver's machine, counts each session's receipts against them tool by tool, or call by call where both name the call, once nothing of the session has arrived for the settle window, one hour. It names a session short of receipts, one whose events never arrived, and one whose events' counter has holes, and each raises the scan's exit until someone with access to the receiver accepts it there, and again if its counts change after. One whose events never arrived is judged only once it has settled, so receipts that keep arriving keep it unjudged (RECEIVER.md section 7, ADR-0046). The agent cannot delete those events once they land. It holds the URL, though, so it can add events, and the reading cannot tell an event it posted from one the harness sent.
 
-That count is not a promise either. ADR-0041 is still proposed, and the promise it names for a session the receiver heard from waits on a ruling.
+That count is where the promise that a call without a receipt shows will rest, and it is not a promise yet: ADR-0041 names it for a session the receiver heard from, and it waits on a run end to end on two machines.
 
 ## The vantage setup
 
@@ -55,7 +55,7 @@ The full setup is what the two promises are made for, and it is the one to run w
 | 3, a copy off the machine | At `local`, a chain regenerated whole or a store wiped does not show. At `timestamped`, a regeneration shows once the anchor matures, if a copy of its proof was kept off the machine, since nothing sends it there (#524); and a wiped store is gone |
 | 4, somebody reading it | Nothing is detected until someone looks |
 
-The full setup does not make the record complete. Whether anything is missing is the witness's question, and its limit is above.
+The full setup does not make the record complete. Whether anything is missing is the reading at the receiver's question, and the witness on the agent's machine catches faults; the limits of both are above.
 
 ## What each profile adds
 
@@ -100,7 +100,7 @@ Stated here once, so that none of them is a discovery.
 
 - The baseline, the day book and the coverage marker are files on the agent's machine. A baseline deleted alone is an alarm. The baseline and the day book deleted together read as a new install, and a session the scan had already reported as silent is then never judged again (ADR-0039, ADR-0029).
 - An edit in place to the baseline or the day book is not detected either, and `acknowledge`, which stands an alarm down, can be run by the account the agent runs as.
-- What holds against the writer is what is kept off the machine: the anchor, the published head and the published chain. Nothing the supervisor remembers about sessions is kept there today, so a machine that keeps its only memory beside the agent is at risk of losing it to the agent.
+- What holds against the writer is what is kept off the machine: the anchor, the published head and the published chain. Nothing the supervisor on the agent's machine remembers about sessions is kept there, so a machine that keeps its only memory beside the agent is at risk of losing it to the agent. The reading at the receiver keeps its own memory, and the acknowledgements that stand its findings down, on the receiver's machine (ADR-0046).
 
 **Limits of what a receipt holds:**
 

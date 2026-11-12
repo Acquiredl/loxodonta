@@ -2411,13 +2411,12 @@ TAIL_KEEPER = environment("SUPERVISOR_TAIL_KEEPER", "1") != "0"
 # The settle window of the reading over a receiver's folder (ADR-0041
 # ruling 4): a session is judged there once nothing of it has arrived
 # for this long, by its events' arrival times and its chain copy's own
-# modification time. Receipts reach the receiver at session end, and a
-# killed session's chain only when the keeper on the agent's machine
-# sends it on its cadence, six hours by default, so the window is that
-# cadence plus one. Judged early, a deficit resolves on the look after
-# the chain lands, and the day book keeps the day's worst claim; the
-# window is what keeps that rare.
-SETTLE_SECONDS = env_number("SUPERVISOR_SETTLE_SECONDS", 7 * 3600)
+# modification time. One hour (ADR-0046 ruling 4): entries leave as
+# they are written (ADR-0045), so the window need only clear a closed
+# lid or a dropped network, and a real deficit shows the same day. The
+# ruling's panel: 5 minutes is tight, 1 hour the default, 7 hours, the
+# keeper's cadence plus one, generous.
+SETTLE_SECONDS = env_number("SUPERVISOR_SETTLE_SECONDS", 3600)
 
 WITNESS_ROOT = Path.home() / ".claude" / "projects"
 # What the recorder writes down about the coverage it wired (ADR-0030).
@@ -2478,13 +2477,27 @@ WATCH_WORDS = {
                             "with the telemetry cut reads this way, and so "
                             "does a machine whose events go nowhere; never "
                             "read as clean, and the chain's own note says "
-                            "why when it carries one (ADR-0041).",
+                            "why when it carries one (ADR-0041). It raises "
+                            "the exit until it is acknowledged here "
+                            "(ADR-0046).",
     "SECOND-RECORD-GAP": "numbers are missing from this session's event "
                          "counter between the lowest and the highest the "
                          "receiver holds — events were lost on the way, so "
                          "not every call it owed is known here; the missing "
-                         "numbers are named (ADR-0041).",
+                         "numbers are named (ADR-0041). It raises the exit "
+                         "until it is acknowledged here (ADR-0046).",
 }
+# The reading over a receiver's folder words its deficit apart: there it
+# is a finding, not evidence kept quiet (ADR-0046 ruling 2).
+RECEIVER_DEFICIT_WORDS = (
+    "the harness reported calls this session's receipts fall short of, "
+    "tool by tool or by the call's id — those receipts never reached the "
+    "receiver. It raises the exit at every scan until it is acknowledged "
+    "here, and again if its counts change after (ADR-0046).")
+# The settled states that raise the exit of a scan over a receiver's
+# folder until acknowledged there (ADR-0046 ruling 2).
+RECEIVER_FINDINGS = ("ENDED-DEFICIT", "SECOND-RECORD-ABSENT",
+                     "SECOND-RECORD-GAP")
 UNREADABLE_TRANSCRIPT_WORDS = (
     "a transcript pairs with this session and cannot be read as one — "
     "completeness cannot be watched for it; nothing is assumed either "
@@ -4262,11 +4275,17 @@ def read_events(root, closed=None):
     tool among `witnessed`, so a refused call's receipt (#476) is its
     own tool's surplus and never pays for another tool's lost call.
     `may_owe` stays empty: a call that ran and failed has a result like
-    any other. `latest` is the newest arrival, by `received`, the
-    receiver's own clock: the settle clock, which no timestamp of the
-    harness's moves. `sequences` holds every `event.sequence` seen, the
-    per-session counter whose missing numbers are the second record's
-    gap. Beside the sessions: the newest `received` per sending address
+    any other. `results` holds each such call as (time, tool, call id,
+    arrival): the time is the event's own, for order; the id None where
+    `tool_use_id` is not one a receipt's suffix could name
+    (`is_call_id`), for pairing by the call's id (ADR-0046 ruling 3); the
+    arrival the `received` of the line that carried it, or None, the
+    call's age by ruling 6. `latest` is the newest arrival, by
+    `received`, the receiver's own clock: the settle clock, which no
+    timestamp of the harness's moves. `sequences` holds every
+    `event.sequence` seen, the per-session counter whose missing numbers
+    are the second record's gap, and `arrived` each number's earliest
+    `received`, for a hole below an event older than the window. Beside the sessions: the newest `received` per sending address
     (ruling 5's "last heard"), the days the files are named for, and
     the lines that were not one JSON object holding a `logs` object,
     skipped and counted, never fatal: the files are out of the writer's
@@ -4318,7 +4337,8 @@ def read_events(root, closed=None):
                 seen = sessions.setdefault(session, {
                     "owed": [], "may_owe": {}, "witnessed": set(),
                     "latest": None, "first": None, "worded": 0,
-                    "unworded": 0, "closed": [], "sequences": set()})
+                    "unworded": 0, "closed": [], "sequences": set(),
+                    "results": [], "arrived": {}})
                 if when is not None and (seen["latest"] is None
                                          or when > seen["latest"]):
                     seen["latest"] = when
@@ -4326,6 +4346,10 @@ def read_events(root, closed=None):
                 if isinstance(sequence, int) \
                         and not isinstance(sequence, bool):
                     seen["sequences"].add(sequence)
+                    if when is not None and (
+                            sequence not in seen["arrived"]
+                            or when < seen["arrived"][sequence]):
+                        seen["arrived"][sequence] = when
                 name = attributes.get("event.name")
                 tool = attributes.get("tool_name")
                 tool = tool if isinstance(tool, str) else None
@@ -4334,13 +4358,18 @@ def read_events(root, closed=None):
                 elif name == TOOL_RESULT:
                     stamp = attributes.get("event.timestamp")
                     stamp = stamp if isinstance(stamp, str) else None
+                    call = attributes.get("tool_use_id")
                     seen["witnessed"].add(tool)
                     seen["owed"].append((stamp, tool))
+                    seen["results"].append(
+                        (stamp, tool, call if is_call_id(call) else None,
+                         when))
                     if stamp is not None and (seen["first"] is None
                                               or stamp < seen["first"]):
                         seen["first"] = stamp
     for seen in sessions.values():
         seen["owed"].sort(key=lambda call: call[0] or "")
+        seen["results"].sort(key=lambda call: call[0] or "")
     return {"sessions": sessions,
             "addresses": {sender: received
                           for sender, (_, received) in addresses.items()},
@@ -4368,15 +4397,138 @@ def missing_numbers(sequences):
     return high - low + 1 - len(seen), named
 
 
-def watch_receiver(root, families, events, now, show_before_memory=False):
+def pair_calls(results, calls, witnessed):
+    """A settled session's calls, as the harness reported them, against
+    its receipts at the receiver, as (rule, owed, deficit, surplus,
+    missing). `results` are the calls as (time, tool, call id or None,
+    arrival),
+    `calls` the receipts as (tool, call id or None). Where both records
+    name calls, they are joined on the id (ADR-0046 ruling 3): a call
+    reported twice under one id is one call, a receipt pays only the
+    call its id names and a second receipt of that id pays nothing, and
+    `missing` names each call with no receipt, in time order. A call or
+    a receipt naming none is paired by count within its tool, among its
+    own kind only, so a receipt with no id never pays a call the harness
+    named. Where either record names none, the count by tool stands
+    (ADR-0034). `owed` is the calls counted, as [(time, tool)]."""
+    paying = [call for _, call in calls if call]
+    named = [call for _, _, call, _ in results if call]
+    if not paying or not named:
+        receipts = {}
+        for tool, _ in calls:
+            receipts[tool] = receipts.get(tool, 0) + 1
+        owed = [(when, tool) for when, tool, _, _ in results]
+        deficit, surplus, _ = reconcile(owed, {}, receipts, witnessed)
+        return "count by tool", owed, deficit, surplus, []
+    paid = set(paying)
+    owed, unnamed, missing, met = [], [], [], set()
+    for when, tool, call, _ in results:
+        if call in met:
+            continue
+        if call is None:
+            unnamed.append((when, tool))
+        else:
+            met.add(call)
+            if call not in paid:
+                missing.append(call)
+        owed.append((when, tool))
+    loose = {}
+    for tool, call in calls:
+        if not call:
+            loose[tool] = loose.get(tool, 0) + 1
+    deficit, surplus, _ = reconcile(unnamed, {}, loose, witnessed)
+    surplus += len(paying) - len(met & paid)
+    return "call id", owed, deficit + len(missing), surplus, missing
+
+
+def overdue(seen, calls, now):
+    """What is overdue in a session still PENDING (ADR-0046 ruling 6),
+    as the row's fields, or None when nothing is. A call is overdue when
+    the line that carried its event was `received` more than
+    SETTLE_SECONDS ago, by the receiver's clock and never a time the
+    event states, whatever arrived after it. The overdue calls are
+    paired against every receipt held, by pair_calls() as a settled
+    session's are, so a receipt of a newer call pays an older one only
+    where the count by tool stands; a surplus among them is no finding
+    while the session is pending, since a receipt may be a newer call's.
+    A hole in the counter is overdue below a number that arrived more
+    than the window ago. A call or a number with no arrival time has no
+    age, and is never overdue."""
+    cutoff = now - timedelta(seconds=SETTLE_SECONDS)
+    old = [call for call in seen["results"]
+           if call[3] is not None and call[3] < cutoff]
+    rule, _, deficit, _, missing = pair_calls(old, calls, seen["witnessed"])
+    aged = [number for number, when in seen["arrived"].items()
+            if when < cutoff]
+    count, numbers = missing_numbers(
+        {number for number in seen["sequences"] if number <= max(aged)}
+        if aged else set())
+    if not deficit and not count:
+        return None
+    found = {"deficit": deficit, "paired_by": rule}
+    if missing:
+        found["missing_calls"] = {"count": len(missing),
+                                  "calls": missing[:GAP_NAMED]}
+    if count:
+        found["gap"] = {"count": count, "numbers": numbers}
+    return found
+
+
+def overdue_words(found):
+    """The words of a PENDING-OVERDUE row, saying what is overdue."""
+    late = []
+    if found["deficit"]:
+        late.append(f"{found['deficit']} call(s) the harness reported more "
+                    "than the settle window ago, by the receiver's clock, "
+                    "have no receipt")
+    if "gap" in found:
+        late.append(f"its event counter has {found['gap']['count']} "
+                    "hole(s) below an event that arrived more than the "
+                    "window ago")
+    return ("this session is still arriving, and " + ", and ".join(late)
+            + ". It raises the exit, and cannot be acknowledged while the "
+            "session is still arriving: it ends when the receipts arrive, "
+            "or when the session settles and reads as a finding that can "
+            "be acknowledged (ADR-0046 ruling 6).")
+
+
+def session_counts(row):
+    """What an acknowledgement at the receiver accepts beside the state:
+    the counts the session's row reports. A session whose counts differ
+    from these after it was acknowledged is a finding again (ADR-0046
+    ruling 2)."""
+    return {"tools": row["tools"], "receipts": row["receipts"],
+            "by_tool": row["by_tool"],
+            "gap": (row.get("gap") or {}).get("count", 0)}
+
+
+def session_acknowledgement(acknowledged, session):
+    """The newest acknowledgement on record for a session at the
+    receiver, or None. The memory is out of the writer's reach there,
+    but a record of the wrong shape is still read as none, which keeps
+    the finding raising."""
+    found = None
+    for record in acknowledged:
+        if record.get("session") == session \
+                and isinstance(record.get("state"), str) \
+                and isinstance(record.get("counts"), dict):
+            found = record
+    return found
+
+
+def watch_receiver(root, families, events, now, show_before_memory=False,
+                   acknowledged=()):
     """The completeness half of a tick over a receiver's folder (ADR-0041
     rulings 4 and 5): every session the chain copies or the events name,
     the copies as what was paid and the events as what was owed, judged
     once settled. A session is settled when nothing of it has arrived
     for SETTLE_SECONDS, by its events' `received` and its chain copy's
     own modification time; until then it is PENDING, listed with its
-    counts and never an alarm. Settled, it reads by reconcile() and
-    classify() as a session that ended, ENDED-DEFICIT tool by tool, or
+    counts and never an alarm, or PENDING-OVERDUE when a call or a
+    counter number older than that has gone unpaid (overdue(), ADR-0046
+    ruling 6), which raises the exit. Settled, it reads by pair_calls() and
+    classify() as a session that ended, ENDED-DEFICIT tool by tool or by
+    the call's id, or
     SECOND-RECORD-ABSENT when receipts arrived and no events did, or
     SECOND-RECORD-GAP when its counter has holes and no deficit, else
     ENDED-SURPLUS or ENDED-CLEAN. A surplus is expected while #476
@@ -4386,8 +4538,9 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
     never a row, as ADR-0029 counts sessions older than the calibration
     memory (#559 ruling 3). The hook's note
     that the second record was cut is quoted on the row when the copy
-    carries one. None of these states is live, so none raises the exit:
-    an ended deficit is evidence here as on the agent's machine."""
+    carries one. A row in one of RECEIVER_FINDINGS carries `raises`, and
+    raises the exit, unless `acknowledged`, the memory's records, accepts
+    that state with the counts it now reports (ADR-0046 ruling 2)."""
     days = events["days"]
     oldest = min(days) if days else None
     newest = max(days) if days else None
@@ -4451,7 +4604,9 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
         by_tool = {}
         for _, tool in family.get("moments", ()):
             by_tool[tool] = by_tool.get(tool, 0) + 1
-        owed = seen["owed"] if seen else []
+        rule, owed, deficit, surplus, missing = pair_calls(
+            seen["results"] if seen else [], family.get("calls", []),
+            seen["witnessed"] if seen else set())
         counts = {}
         for _, tool in owed:
             counts.setdefault(tool, {"owed": 0, "receipts": 0})["owed"] += 1
@@ -4488,8 +4643,18 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
             continue
         quiet_for = ((now - heard).total_seconds()
                      if heard is not None else None)
+        late = None
         if quiet_for is not None and quiet_for < SETTLE_SECONDS:
-            state = "PENDING"
+            # Ruling 6: the session is not settled, but a call the
+            # harness reported more than the window ago is judged by its
+            # own age, so arrivals after it cannot keep it unjudged. A
+            # session with no events has no call to be overdue (the
+            # ADR's non-claim).
+            late = overdue(seen, family.get("calls", []), now) if seen \
+                else None
+            state = "PENDING-OVERDUE" if late else "PENDING"
+            if late:
+                row.update(late)
         elif seen is None:
             state = "SECOND-RECORD-ABSENT"
             if unread:
@@ -4498,11 +4663,13 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
                 # a file went unread (#559 ruling 3).
                 row["note"] = unread
         else:
-            deficit, surplus, _ = reconcile(owed, seen["may_owe"], by_tool,
-                                            seen["witnessed"])
             state = classify(len(owed), deficit, surplus, True, True,
                              None, False)
             row["deficit"] = deficit
+            row["paired_by"] = rule
+            if missing:
+                row["missing_calls"] = {"count": len(missing),
+                                        "calls": missing[:GAP_NAMED]}
             count, numbers = missing_numbers(seen["sequences"])
             if count:
                 row["gap"] = {"count": count, "numbers": numbers}
@@ -4511,8 +4678,34 @@ def watch_receiver(root, families, events, now, show_before_memory=False):
                 if state != "ENDED-DEFICIT":
                     state = "SECOND-RECORD-GAP"
         row["state"] = state
-        if state in WATCH_WORDS:
+        if late:
+            row["words"] = overdue_words(late)
+            # Never quieted by an acknowledgement: its counts move with
+            # every call of a live session (ADR-0046 ruling 6).
+            row["raises"] = True
+        elif state == "ENDED-DEFICIT":
+            row["words"] = RECEIVER_DEFICIT_WORDS
+        elif state in WATCH_WORDS:
             row["words"] = WATCH_WORDS[state]
+        if state in RECEIVER_FINDINGS:
+            record = session_acknowledgement(acknowledged, session)
+            holds = (record is not None and record["state"] == state
+                     and record["counts"] == session_counts(row))
+            if record is not None:
+                row["acknowledged"] = {
+                    "ts": record.get("ts"), "state": record["state"],
+                    "counts": record["counts"], "holds": holds,
+                    "words": (
+                        "accepted here by someone with access to the "
+                        "receiver, so it raises nothing while its state "
+                        "and counts stay as accepted; the record says it "
+                        "was accepted, not that it is right (ADR-0046)"
+                        if holds else
+                        "the session has changed since it was "
+                        "acknowledged, so it is a finding again "
+                        "(ADR-0046)")}
+            if not holds:
+                row["raises"] = True
         watch["sessions"].append(row)
     watch["last_heard"] = {
         "addresses": [{"from": sender, "received": received}
@@ -5191,6 +5384,12 @@ def family_facts(look, relpath, log, entries, grew):
         stamped = [e["ts"] for e in entries if isinstance(e.get("ts"), str)]
         if stamped:
             facts["newest_ts"] = max(stamped)
+        # Each receipt's tool and the call its suffix names, or None, for
+        # pairing by the call's id (ADR-0046 ruling 3, ADR-0047).
+        facts["calls"] = [
+            (tool_of(e.get("action")),
+             (split_suffix(e.get("action"))[1] or {}).get("call"))
+            for e in logged]
         for e in entries:
             if e.get("actor") == "receipts" and str(
                     e.get("action", "")).startswith("second-record-cut:"):
@@ -5210,6 +5409,8 @@ def fold_facts(family, facts):
     met last is the one still being written to (ADR-0018)."""
     family["receipts"] += facts["receipts"]
     family["moments"] += facts["moments"]
+    if "calls" in facts:
+        family["calls"] = family.get("calls", []) + facts["calls"]
     if facts["last"]:
         family["last"] = max(family["last"] or "", facts["last"])
     for key in ("last_grew", "touched", "newest_ts"):
@@ -5368,7 +5569,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     if look.receiver:
         completeness = watch_receiver(
             look.root, families, read_events(look.root, closed), now,
-            show_before_memory=look.show_before_memory)
+            show_before_memory=look.show_before_memory,
+            acknowledged=memory["acknowledged"])
     else:
         completeness = watch_completeness(
             look.root, look.witness, families, everywhere=look.store,
@@ -5388,10 +5590,14 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # The consumption watch never touches `worst`: a hot session is a
     # reason to look, and the brake is the operator's (issue #67).
     consumption = watch_consumption(families, now)
-    # Only a live alarm raises the exit: an ended deficit is evidence,
-    # and a siren that never stops sounding trains the operator to
-    # ignore the band (the dogfood's lesson).
+    # On the agent's machine only a live alarm raises the exit: an ended
+    # deficit is evidence, and a siren that never stops sounding trains
+    # the operator to ignore the band (the dogfood's lesson). At the
+    # receiver a settled disagreement raises it too, until it is
+    # acknowledged there, since nothing else reads it unprompted
+    # (ADR-0046 ruling 2).
     alarms = sum(s["state"] in ("ALARM-SILENT", "ALARM-DEFICIT")
+                 or s.get("raises", False)
                  for s in completeness["sessions"])
     if alarms:
         worst = max(worst, 6)
@@ -5954,9 +6160,19 @@ def keep_memory(path, seen, data, what):
 
 def cmd_acknowledge(args):
     root, store, receiver = chosen_universe(args)
+    if args.session is not None:
+        if not receiver:
+            args.spoken_wrong("--session acknowledges a session at a "
+                              "receiver, where its memory is (ADR-0046): "
+                              "give --receiver DIR")
+        if args.baseline or args.log is not None:
+            args.spoken_wrong("--session takes a SESSION and its STATE, "
+                              "and no LOG, STATE or --baseline beside them")
     if receiver and receiver_missing(root) is not None:
         return EX_NOINPUT
     path, daybook = memory_paths(root, store, receiver)
+    if args.session is not None:
+        return acknowledge_session(root, path, daybook, *args.session)
     if args.baseline:
         if args.log is not None or args.state is not None:
             args.spoken_wrong("--baseline acknowledges the memory itself "
@@ -6112,6 +6328,88 @@ def acknowledge_baseline(root, store, path, daybook, receiver=False):
           f"{len(heads)} chain(s) as they stand now, and {lost}, so the "
           "next scan stamps a new inception and sessions before it go "
           "unjudged. " + MOVES_NO_VERDICT.format("every chain"))
+    return 0
+
+
+def receiver_reading(root, acknowledged):
+    """The completeness reading a scan over a receiver's folder makes
+    now, with nothing written: the chain copies folded by session as the
+    census folds them, against the events there (`watch_receiver`)."""
+    look = Look(root, tick=False, remember=False, receiver=True)
+    closed = []
+    families = {}
+    for (repo, session, _), log in sorted(
+            (look.identity(log), log) for log in look.chains(closed)):
+        relpath = log.relative_to(root).as_posix()
+        fold_facts(families.setdefault((repo, session),
+                                       {"receipts": 0, "last": None,
+                                        "moments": []}),
+                   family_facts(look, relpath, log, read_entries(log), None))
+    return watch_receiver(root, families, read_events(root, closed),
+                          datetime.now(timezone.utc),
+                          acknowledged=acknowledged)
+
+
+def acknowledge_session(root, path, daybook, session, state):
+    """`acknowledge --receiver DIR --session SESSION STATE` (ADR-0046
+    ruling 2): one record in the memory at the receiver, accepting the
+    state a scan reported for a session and the counts it reports now,
+    so the session no longer raises the exit while both stay as they
+    are. Refused, and nothing written, when the session is not in that
+    state now. Only here: on the agent's machine an ended deficit raises
+    nothing, and an acceptance there would sit in the writer's reach
+    (ruling 1, Tripwire's lesson)."""
+    if state == "PENDING-OVERDUE":
+        return refused("PENDING-OVERDUE cannot be acknowledged: the session "
+                       "is still arriving, and its counts move with every "
+                       "call, so an acceptance would hold for seconds. It "
+                       "ends when the receipts arrive, or when the session "
+                       "settles and reads as a finding that can be "
+                       "acknowledged (ADR-0046 ruling 6)")
+    if state not in RECEIVER_FINDINGS:
+        return refused(f"{visible(state)!r} is not a state that raises the "
+                       "exit at the receiver: name the one the scan "
+                       f"reported, {', '.join(RECEIVER_FINDINGS[:-1])} or "
+                       f"{RECEIVER_FINDINGS[-1]}")
+    memory = read_baseline(path, daybook)
+    if memory["blind"]:
+        return refused(f"{memory['note']}. A session is acknowledged once "
+                       "the memory can be read: `supervisor acknowledge "
+                       "--receiver DIR --baseline` comes first")
+    if memory["seen"] is None:
+        return refused(f"there is no baseline at {path.as_posix()}: run "
+                       "`supervisor scan --receiver DIR` first, and "
+                       "acknowledge the state it reports")
+    rows = {row["session"]: row for row in receiver_reading(
+        root, memory["acknowledged"])["sessions"]}
+    row = rows.get(session)
+    if row is None:
+        return refused(f"no session {visible(session)} is read at "
+                       f"{root.as_posix()}: name it as the scan's row "
+                       "prints its `session`")
+    if row["state"] != state:
+        return refused(f"session {visible(session)} reads {row['state']} "
+                       f"now, not {state}: an acknowledgement accepts only "
+                       "the state a scan reported, so look again with "
+                       "`supervisor scan --receiver DIR`")
+    if not row.get("raises"):
+        return refused(f"session {visible(session)} was acknowledged as "
+                       f"{state} at {row['acknowledged']['ts']}, with the "
+                       "counts it reports now; nothing to acknowledge")
+    counts = session_counts(row)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    data = json.loads(memory["seen"])
+    data["acknowledged"] = memory["acknowledged"] + [{
+        "ts": stamp, "session": session, "state": state, "counts": counts}]
+    code = keep_memory(path, memory["seen"], data, "acknowledged")
+    if code is not None:
+        return code
+    print(f"acknowledged: session {visible(session)}, {state}, with "
+          f"{counts['tools']} call(s) reported and {counts['receipts']} "
+          "receipt(s) held; it raises the exit no longer while its state "
+          "and counts stay as they are, and again if they change. The "
+          "record says someone accepted it, not that it is right "
+          "(ADR-0046).")
     return 0
 
 
@@ -9322,7 +9620,8 @@ KNOWN_COMPLETENESS = ("OK", "LAGGING", "SURPLUS", "QUIET", "ALARM-SILENT",
                       "ALARM-DEFICIT", "IDLE-CLEAN", "IDLE-DEFICIT",
                       "ENDED-CLEAN", "ENDED-DEFICIT", "ENDED-SURPLUS",
                       "UNWITNESSED", "UNWATCHED", "ELSEWHERE", "BEFORE-MEMORY",
-                      "PENDING", "SECOND-RECORD-ABSENT", "SECOND-RECORD-GAP")
+                      "PENDING", "SECOND-RECORD-ABSENT", "SECOND-RECORD-GAP",
+                      "PENDING-OVERDUE")
 KNOWN_LIFECYCLE = ("awake", "waning", "dormant")
 KNOWN_CONSUMPTION = ("RUNNING-HOT", "ENDED-HOT")
 # Every session-end step the recorder writes an attempt row for, in the
@@ -9389,8 +9688,9 @@ def metrics_text(report, age_seconds):
           "change appends cannot explain, or could not be read or kept, "
           "or the census could not list a folder, "
           "6 a live session is behind its "
-          "witness, 7 a chain's transcript commitments contradict each "
-          "other", "witness verdict", [((), report.get("exit") or 0)])
+          "witness, or at a receiver a settled session's receipts or "
+          "events fall short and no acknowledgement stands, 7 a chain's "
+          "transcript commitments contradict each other", "witness verdict", [((), report.get("exit") or 0)])
     gauge("loxodonta_scan_age_seconds",
           "Seconds since the scan these numbers come from; a gauge is as "
           "fresh as the last tick", "witness verdict",
@@ -9399,8 +9699,9 @@ def metrics_text(report, age_seconds):
     # the writer-reachable baseline: a count a scrape keeps off the
     # machine, so a list that shrinks is seen to.
     gauge("loxodonta_baseline_acknowledgements",
-          "Acknowledgements on record in the baseline: changes an operator "
-          "accepted with supervisor acknowledge", "testimony",
+          "Acknowledgements on record in the baseline: changes, and at a "
+          "receiver settled sessions, an operator accepted with supervisor "
+          "acknowledge", "testimony",
           [((), len((report.get("baseline") or {}).get("acknowledged")
                     or []))])
 
@@ -10886,6 +11187,14 @@ function renderStrip(report) {
     r.sessions.flatMap(s => s.chains));
   const live = report.completeness.sessions.filter(s =>
     ["ALARM-SILENT", "ALARM-DEFICIT"].includes(s.state));
+  // At a receiver: sessions whose receipts and harness events disagree,
+  // raising the exit (ADR-0046). Settled ones until acknowledged there;
+  // ones still arriving with a call or a counter number overdue until
+  // the receipts arrive or they settle (ruling 6). Neither is the
+  // strip's "stopped arriving" words.
+  const unaccepted = report.completeness.sessions.filter(s => s.raises);
+  const overdue = unaccepted.filter(s => s.state === "PENDING-OVERDUE");
+  const settled = unaccepted.length - overdue.length;
   const regenerated = chains.filter(c => !c.superseded && c.exit === 3);
   const broken = chains.filter(c => !c.superseded &&
                                     c.verdict === "BROKEN");
@@ -10906,7 +11215,8 @@ function renderStrip(report) {
     state.textContent = "RECEIPTS STOPPED ARRIVING";
     why.textContent = live.length + " session(s) visibly active while " +
       "the chain goes quiet — investigate while it is live";
-  } else if (broken.length || changes || report.exit !== 0) {
+  } else if (broken.length || changes || blind || shut ||
+             (report.exit !== 0 && !unaccepted.length)) {
     colour = "damage";
     state.textContent = broken.length ? "HISTORY WAS ALTERED"
                       : changes ? "CHANGED SINCE LAST LOOK"
@@ -10924,6 +11234,22 @@ function renderStrip(report) {
         "unknown, never read as empty"
       : "details in the band below") +
       " (scan exit " + report.exit + ")";
+  } else if (unaccepted.length) {
+    colour = "grave";
+    state.textContent = settled ? "A FINDING NO ONE HAS ACCEPTED"
+                                : "CALLS OVERDUE AT THE RECEIVER";
+    why.textContent = [
+      settled ? settled + " settled session(s) whose receipts and " +
+        "harness events disagree at the receiver, each raising the exit " +
+        "until acknowledged here with supervisor acknowledge --receiver DIR " +
+        "--session" : "",
+      overdue.length ? overdue.length + " session(s) still arriving " +
+        "with a call reported over the settle window ago and no receipt, " +
+        "or a hole in the counter, each raising the exit until the " +
+        "receipts arrive or the session settles" : ""]
+      .filter(Boolean).join("; ") +
+      ", named in the completeness watch below (scan exit " +
+      report.exit + ")";
   } else {
     colour = "quiet";
     state.textContent = "all quiet";
@@ -10966,7 +11292,7 @@ const SEVERITY = ["alarm", "regenerated", "broken", "tripwire", "hot",
 function attentionItems(report) {
   const items = [];
   for (const s of report.completeness.sessions) {
-    if (["ALARM-SILENT", "ALARM-DEFICIT"].includes(s.state)) {
+    if (["ALARM-SILENT", "ALARM-DEFICIT"].includes(s.state) || s.raises) {
       items.push({rank: "alarm", tone: "grave", chip: s.state,
         text: s.repo + " · " + s.session.slice(0, 8) + " — " +
               (s.words || "receipts behind the witness"),
@@ -11475,6 +11801,14 @@ function render(report) {
   // What an operator accepted, as kept in the baseline: testimony, drawn
   // plainly, raising nothing.
   for (const record of (report.baseline.acknowledged || [])) {
+    // A session accepted at a receiver (ADR-0046): its memory is out of
+    // the writer's reach, so it is not called writer-reachable.
+    if (record.session) {
+      tripwire.appendChild(el("p", "claim", "acknowledged " +
+        (record.ts || "") + " · session " + record.session + " · " +
+        record.state + " (an operator's word, kept at the receiver)"));
+      continue;
+    }
     const what = record.log
       ? record.log + " · " + record.change + " · remembered " +
         seen(record.remembered) + " · accepted " + seen(record.accepted)
@@ -11490,12 +11824,16 @@ function render(report) {
   const watch = document.getElementById("watch");
   watch.replaceChildren();
   const LIVE = ["ALARM-SILENT", "ALARM-DEFICIT"];
-  const NOTEWORTHY = LIVE.concat(["ENDED-DEFICIT", "ENDED-SURPLUS",
+  const NOTEWORTHY = LIVE.concat(["PENDING-OVERDUE", "ENDED-DEFICIT",
+                                  "ENDED-SURPLUS",
                                   "SURPLUS", "LAGGING", "IDLE-DEFICIT",
                                   "SECOND-RECORD-ABSENT",
                                   "SECOND-RECORD-GAP"]);
+  // At a receiver a settled disagreement raises the exit until it is
+  // acknowledged there (ADR-0046), and is drawn as live as it counts.
+  const raising = s => LIVE.includes(s.state) || Boolean(s.raises);
   const watchRow = s => {
-    const live = LIVE.includes(s.state);
+    const live = raising(s);
     const row = el("div", "watch-row " + (live ? "live" : "quiet"));
     row.appendChild(el("span", "chip", s.state));
     // Paired tool by tool (ADR-0034), the totals can match while a tool
@@ -11519,6 +11857,15 @@ function render(report) {
       (s.gap.count > s.gap.numbers.length ? ", …" : "")));
     if (s.second_record_cut) row.appendChild(el("p", "claim",
       "the chain says: " + s.second_record_cut));
+    if (s.missing_calls) row.appendChild(el("p", "claim",
+      s.missing_calls.count + " call(s) with no receipt, by id: " +
+      s.missing_calls.calls.join(", ") +
+      (s.missing_calls.count > s.missing_calls.calls.length ? ", …" : "")));
+    if (s.paired_by) row.appendChild(el("p", "claim",
+      "paired by " + s.paired_by));
+    if (s.acknowledged) row.appendChild(el("p", "claim",
+      "acknowledged " + (s.acknowledged.ts || "") + " as " +
+      s.acknowledged.state + ": " + s.acknowledged.words));
     // A session whose receipts landed in more than one drawer is
     // counted once, against the whole family — say so, so the tally
     // never looks larger than the drawer it is filed under.
@@ -11532,10 +11879,10 @@ function render(report) {
   // the quiet ones fold away, present but not shouting.
   const noteworthy = report.completeness.sessions.filter(
     s => NOTEWORTHY.includes(s.state));
-  for (const s of noteworthy.filter(s => LIVE.includes(s.state))) {
+  for (const s of noteworthy.filter(raising)) {
     watch.appendChild(watchRow(s));
   }
-  const quiet = noteworthy.filter(s => !LIVE.includes(s.state));
+  const quiet = noteworthy.filter(s => !raising(s));
   if (quiet.length) {
     const fold = el("details");
     fold.appendChild(el("summary", "", quiet.length +
@@ -12732,7 +13079,10 @@ def main(argv):
                            "as the witness, every tool owing a receipt, "
                            "the memory in DIR/supervisor. A session is "
                            "judged once nothing of it has arrived for "
-                           "SUPERVISOR_SETTLE_SECONDS (7 hours). Not "
+                           "SUPERVISOR_SETTLE_SECONDS (1 hour), and a "
+                           "session short of receipts, or of events, "
+                           "raises the exit until `acknowledge --receiver "
+                           "DIR --session` accepts it (ADR-0046). Not "
                            "with --root")
     scan.add_argument("--json", action="store_true",
                       help="compact machine output (default pretty-prints)")
@@ -12771,9 +13121,10 @@ def main(argv):
     calibrate_cmd.set_defaults(func=cmd_calibrate)
     acknowledge = sub.add_parser(
         "acknowledge",
-        help="accept the state a scan reported for one chain, or start a "
-             "baseline that cannot be read afresh (ADR-0039): one record "
-             "every later report shows; it moves no verdict")
+        help="accept the state a scan reported for one chain, or at a "
+             "receiver for one session, or start a baseline that cannot "
+             "be read afresh (ADR-0039, ADR-0046): one record every later "
+             "report shows; it moves no verdict of verify's")
     acknowledge.add_argument(
         "log", nargs="?", default=None, metavar="LOG",
         help="the chain, as the scan's event prints its `log`")
@@ -12798,6 +13149,13 @@ def main(argv):
         "--receiver", default=None, metavar="DIR",
         help="the receiver's data directory whose memory this moves, "
              "DIR/supervisor, and no other (ADR-0041). Not with --root")
+    acknowledge.add_argument(
+        "--session", nargs=2, default=None, metavar=("SESSION", "STATE"),
+        help="with --receiver: accept the state a scan there reported for "
+             "a session, ENDED-DEFICIT, SECOND-RECORD-ABSENT or "
+             "SECOND-RECORD-GAP, with the counts it reports now, so it "
+             "raises the exit no longer until they change (ADR-0046). "
+             "Refused when the session is not in that state")
     acknowledge.set_defaults(func=cmd_acknowledge,
                              spoken_wrong=acknowledge.error)
     serve = sub.add_parser(
