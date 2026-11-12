@@ -1888,6 +1888,133 @@ class SupervisorReadsBothHomesTest(ManagedBase):
         self.assertEqual(report["recorder"]["state"], "unwired")
 
 
+FOOTING = "the account this supervisor runs as can write"
+NAMED_BY_VARIABLE = "LOXODONTA_MANAGED_DIR is set where this scan runs"
+
+
+class FootingNoteTest(ManagedBase):
+    """#469 and #466 ruling 1: a managed install holds only while the
+    account the agent runs as cannot write the managed hook file or the
+    copy, and the supervisor runs as that account, so each scan asks and
+    says so on the settings note. A note about the setup, never a
+    verdict: no exit moves. The suite's managed folder is one this
+    account writes, which is the "can" side; the "cannot" side needs a
+    file this account cannot write."""
+
+    def setUp(self):
+        super().setUp()
+        self.witness = self.home / ".claude" / "projects"
+        self.witness.mkdir()
+        self.root = self.work / "repos"
+        self.root.mkdir()
+        prime_memory(self.root, matcher="*", failures="*")
+
+    def scan(self):
+        result = run_scan(self.root, "--witness", str(self.witness),
+                          env=self.env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(result.stdout).get("settings_note", "")
+
+    def managed_and_copy(self):
+        """Every file and folder of the managed folder and the copy's,
+        with its bytes and its mtime: what the probe must leave as it
+        found it."""
+        found = {}
+        for top in (self.managed, self.program):
+            for path in [top] + sorted(top.rglob("*")):
+                status = os.lstat(path)
+                found[str(path)] = (status.st_mtime_ns,
+                                    path.read_bytes() if path.is_file()
+                                    else None)
+        return found
+
+    def test_a_managed_install_this_account_can_write_is_said(self):
+        self.install("--managed")
+        before = self.managed_and_copy()
+
+        note = self.scan()
+
+        said = " ".join(note.split())
+        self.assertIn(FOOTING, said)
+        self.assertIn(self.managed_file.as_posix(), said)
+        self.assertIn(self.copy.as_posix(), said)
+        self.assertIn("not of a session", said)
+        self.assertEqual(self.managed_and_copy(), before,
+                         "the probe changed, made or left something")
+
+    def test_the_variable_naming_the_managed_folder_is_said(self):
+        self.install("--managed")
+
+        note = self.scan()
+
+        self.assertIn(NAMED_BY_VARIABLE, note)
+        self.assertIn(self.managed_file.as_posix(), note)
+        self.assertIn(HARNESS_FOLDER, note)
+
+    def test_a_plain_install_says_nothing_of_the_footing(self):
+        # The hook in the operator's own file: the account writes it by
+        # design, and the docs say so. The variable, which the suite
+        # always sets, is still named.
+        self.install()
+
+        note = self.scan()
+
+        self.assertNotIn(FOOTING, note)
+        self.assertIn(NAMED_BY_VARIABLE, note)
+
+    @unittest.skipIf(sys.platform == "win32",
+                     "an access list this account cannot write needs icacls")
+    def test_files_this_account_cannot_write_say_nothing(self):
+        # Root's files and folders, through sudo -n, skipped where sudo
+        # asks for a password.
+        if os.geteuid() == 0:
+            self.skipTest("root can write everything")
+        self.install("--managed")
+        try:
+            done = subprocess.run(
+                ["sudo", "-n", "chown", "-R", "0:0", str(self.managed),
+                 str(self.program)],
+                capture_output=True, encoding="utf-8", timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("no sudo here")
+        if done.returncode != 0:
+            self.skipTest(f"sudo -n does not run here: {done.stderr.strip()}")
+        self.addCleanup(subprocess.run, [
+            "sudo", "-n", "chown", "-R", f"{os.geteuid()}:{os.getegid()}",
+            str(self.managed), str(self.program)],
+            capture_output=True, timeout=60)
+
+        note = self.scan()
+
+        self.assertNotIn(FOOTING, note)
+        self.assertIn(NAMED_BY_VARIABLE, note)
+
+    @unittest.skipUnless(sys.platform == "win32", "icacls is Windows's")
+    def test_a_file_denied_to_this_account_says_nothing(self):
+        # A deny on the test's own files, taken off before they are
+        # removed. Folders are asked of the token: skipped where this
+        # runs elevated, which can write them.
+        import ctypes
+        if ctypes.windll.shell32.IsUserAnAdmin():
+            self.skipTest("an elevated token can write the folders")
+        self.install("--managed")
+        denied = [self.managed_file, self.copy, self.copy_supervisor]
+        account = os.environ.get("USERNAME")
+        for path in denied:
+            done = subprocess.run(["icacls", str(path), "/deny",
+                                   f"{account}:(W)"],
+                                  capture_output=True, encoding="utf-8",
+                                  timeout=60)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.addCleanup(subprocess.run,
+                            ["icacls", str(path), "/remove:d", account],
+                            capture_output=True, timeout=60)
+
+        note = self.scan()
+
+        self.assertNotIn(FOOTING, note)
+
+
 # The pin as the installer writes it for REMOTE: the four switches and
 # nothing else (ADR-0041 ruling 7).
 PIN_ENV = {"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
