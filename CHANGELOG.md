@@ -21,6 +21,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Changed
 
+- The README is rebuilt short, with two new diagrams and a new recording; its longer sections moved unchanged to `docs/HOW-IT-WORKS.md`, and three diagrams show the current demo head.
 - A managed install writes `--managed` on the hook's and the digest's commands. Under it they read no environment variable but `CLAUDE_PROJECT_DIR`, and the hook sends through no proxy. The first managed install after this rewrites the managed file once (ADR-0043).
 - `docs/CLAIMS.md`, `docs/RECEIVER.md`, `docs/TOPOLOGY.md` and `README.md` agree with each other and with the code at v0.19.0: the count at the receiver is built and not a promise, and limits they left unsaid are stated.
 - `verify --anchors` and `verify-package` print `ANCHORED` only for a block a given `--block-header` checked; a block nobody checked is `ANCHOR-CLAIMED` and earns a package no rung. A script reading `ANCHORED` to mean a completed proof now reads two words (ADR-0044).

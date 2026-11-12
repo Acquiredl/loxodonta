@@ -14,8 +14,10 @@ The blocks pinned:
 
 - `tamper-demo` — the first-screen transcript: record, verify VALID,
   tamper one entry, verify BROKEN at that entry with exit 1.
-- `quickstart-tryit` — the by-hand chain a reader copies into a folder.
-- `bad-day-check` — verify and drill over the committed demo chain.
+- `quickstart-tryit` — the by-hand chain a reader copies into a folder
+  (in docs/HOW-IT-WORKS.md, the walk the README links to).
+- `bad-day-check` — verify and drill over the committed demo chain (same
+  page).
 
 Commands run cross-platform: `python loxodonta.py ...` runs through the
 copy in the working directory, and `sed -i 's/A/B/' FILE` is applied as
@@ -42,6 +44,9 @@ from support import (LOXODONTA, REPO_ROOT, SUPERVISOR,  # noqa: E402
 
 
 README = REPO_ROOT / "README.md"
+# The longer walk the README links to; it holds the two blocks a reader
+# copies after the first screen.
+WALK = REPO_ROOT / "docs" / "HOW-IT-WORKS.md"
 
 # A verify verdict on stdout implies an exit code (README "Exit codes").
 VERDICT_EXIT = [
@@ -163,11 +168,15 @@ class TranscriptPinTest(unittest.TestCase):
                 f"README implies {implied_exit(expected)}")
 
     def test_tamper_demo_records_verifies_and_breaks(self):
-        blocks = pinned_blocks(README.read_text(encoding="utf-8"))
-        self.assertIn("tamper-demo", blocks, "the demo block lost its marker")
-        with tempfile.TemporaryDirectory() as tmp:
-            shutil.copy(LOXODONTA, Path(tmp) / "loxodonta.py")
-            self.check_transcript("tamper-demo", blocks["tamper-demo"], tmp)
+        # Shown on both pages, so pinned on both.
+        for page in (README, WALK):
+            blocks = pinned_blocks(page.read_text(encoding="utf-8"))
+            self.assertIn("tamper-demo", blocks,
+                          f"the demo block lost its marker in {page.name}")
+            with tempfile.TemporaryDirectory() as tmp:
+                shutil.copy(LOXODONTA, Path(tmp) / "loxodonta.py")
+                self.check_transcript("tamper-demo", blocks["tamper-demo"],
+                                      tmp)
 
 
 class CommandListPinTest(unittest.TestCase):
@@ -191,7 +200,7 @@ class CommandListPinTest(unittest.TestCase):
         self.assertTrue(ran, f"[pin:{name}] the block ran no commands")
 
     def test_quickstart_tryit_block_runs_clean(self):
-        blocks = pinned_blocks(README.read_text(encoding="utf-8"))
+        blocks = pinned_blocks(WALK.read_text(encoding="utf-8"))
         self.assertIn("quickstart-tryit", blocks,
                       "the quick-start try-it block lost its marker")
         with tempfile.TemporaryDirectory() as tmp:
@@ -200,7 +209,7 @@ class CommandListPinTest(unittest.TestCase):
                                 tool_copies=(LOXODONTA,))
 
     def test_bad_day_check_verifies_and_drills(self):
-        blocks = pinned_blocks(README.read_text(encoding="utf-8"))
+        blocks = pinned_blocks(WALK.read_text(encoding="utf-8"))
         self.assertIn("bad-day-check", blocks,
                       "the bad-day check block lost its marker")
         # The lines a reader copies, run as written from the root of a

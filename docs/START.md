@@ -144,7 +144,7 @@ even if you got nowhere. "I could not get past step 2" is a finding about
 step 2, and right now the install path has been walked by one person. A verdict that looks wrong, a count that does not add up, a session
 the scan will not read: all of it is the same kind of useful.
 
-Everything else this tool does is in the [README](../README.md): anchoring a
+Everything else this tool does is in [HOW-IT-WORKS.md](HOW-IT-WORKS.md): anchoring a
 chain head to Bitcoin, handing a session to someone off the machine as a
 sealed package, agents reading their own history. None of it is needed for
 these five steps.
