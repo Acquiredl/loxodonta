@@ -25,6 +25,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The dashboard's verdict strip names every condition one look found, the worst first: a broken chain no longer hides a finding at the receiver no one has accepted, nor a live alarm a broken chain (#612).
 - The recorder notice hashes the recorder against its committed blob, so an edit `git status` hides (assume-unchanged, skip-worktree, ignored and never committed) reads as uncommitted changes; autocrlf line endings do not (#621).
 - The recorder notice reads the checkout's commits as made, never through `git replace`: a replaced HEAD whose tree holds an edited recorder no longer reads as clean (#621).
+- A listing marks `[...]` each line it shows without its receipt suffix and says once what that means: a hand-written line ending in a group of that shape lost it silently, and no entry tells it from a hook's receipt (#619).
 - The dashboard no longer says "every receipt accounted for" while a session is short of receipts: the quiet strip names each finding accepted at the receiver and each deficit kept as evidence, with owed, received and missing counts (#613).
 
 ## [0.20.0] - 2026-11-12

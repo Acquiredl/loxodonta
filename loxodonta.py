@@ -5851,6 +5851,14 @@ def cmd_report(args):
     print()
     for line in timeline_lines(entries, breaks, warns):
         print(line)
+    # Printed here and not in the timeline: explain hands the timeline to
+    # a model as the observed agent's words, and this line is the tool's.
+    if any(entry is not None and split_suffix(entry.get("action"))[1]
+           for entry in entries):
+        print()
+        print(f"a line ending {FOLDED_MARK} is listed without its last "
+              "group, the call's id and input hash; the chain holds the "
+              "line whole")
     if breaks:
         print()
         print("chain integrity: BROKEN — this timeline is testimony only "
@@ -6236,12 +6244,19 @@ def split_suffix(action):
     return action[:at], fields
 
 
+# Ends every line a listing shows without its suffix. Nothing in an
+# entry the writer cannot set tells a hook's receipt from a line logged
+# by hand, the actor included, so every folded line is marked (#619).
+FOLDED_MARK = "[...]"
+
+
 def listed_action(action):
-    """An action line as a listing shows it, without its suffix: the
-    suffix is for a reader that checks, and a listing for a person
-    scanning (ADR-0047). A whole line is in the chain, in `show` and in
-    every JSON output."""
-    return split_suffix(action)[0]
+    """An action line as a listing shows it, its suffix folded to
+    `FOLDED_MARK`: the suffix is for a reader that checks, and a listing
+    for a person scanning (ADR-0047). A whole line is in the chain, in
+    `show` and in every JSON output."""
+    head, fields = split_suffix(action)
+    return head if fields is None else f"{head} {FOLDED_MARK}"
 
 
 def main_repo_root(project):
