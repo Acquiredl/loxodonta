@@ -4825,6 +4825,7 @@ def deliver(log, url, session, start, budget, steady=False):
     # for every entry below it, one known not to for every entry above
     # it, and halving the stretch between them finds the last that does.
     good, bad = -1, None
+    heard = False   # the remote has answered a post of this step
     while True:
         first, last, head = batch[0][0], batch[-1][0], batch[-1][1]
         wait = step_wait(budget, deadline)
@@ -4839,7 +4840,12 @@ def deliver(log, url, session, start, budget, steady=False):
             lambda: post_batch(url, body, wait, headers, words), wait,
             Answer(False, False, None, False, 0, no_answer(words)))
         if answer.failure:
+            if steady and heard and answer.failure == no_answer(words):
+                # The remote answered earlier in this second, so it is
+                # the cap that cut the step: not a remote that is silent.
+                return Delivery(TIME_RAN_OUT, batches, True, held)
             return Delivery(answer.failure, batches, True, held)
+        heard = True
         if not answer.says:
             batches.append((first, last, head, answer.appended))
             return Delivery("sent", batches, False, held)
