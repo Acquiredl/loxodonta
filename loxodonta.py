@@ -3745,16 +3745,25 @@ def append_sidecar_record(path, record):
     shape every sidecar record has. The sidecar is opened without
     waiting and written only when it is a regular file: an ordinary open
     of a pipe with no reader never returns, so one at the sidecar's name
-    would hang every writer (#364). Here a pipe with no reader fails at
-    once, and anything else that is not a file is refused before a byte
-    is written, as an OSError the caller already answers."""
+    would hang every writer (#364). Here anything that is not a file, a
+    pipe included, is refused before a byte is written, as an OSError the
+    caller already answers. A sidecar whose last line has no line end, a
+    torn line a crash or a full disk left, gets one before the record, so
+    the record starts on a line of its own and only the torn line, left
+    as it lies, is unreadable (#610). The file is opened for reading too,
+    to see how it ends."""
     line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT
                  | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0),
                  0o644)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
             raise OSError(errno.EINVAL, NOT_REGULAR, path)
+        if opened.st_size > 0:
+            os.lseek(fd, -1, os.SEEK_END)
+            if os.read(fd, 1) != b"\n":
+                line = "\n" + line
         with os.fdopen(os.dup(fd), "ab") as f:
             f.write(line.encode("utf-8"))
     finally:
