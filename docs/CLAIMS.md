@@ -133,4 +133,4 @@ Today [FIRE-DRILL.md](FIRE-DRILL.md) rehearses four alarms on sandbox copies: an
 
 ## Standing of this page
 
-This page describes v0.19.0, as of 2026-11-10. Condition 1 is measured on one machine and one version of the harness (Claude Code 2.1.287, Windows). What a managed hook does under `--bare` is measured there and not documented by the harness.
+This page describes v0.20.0, as of 2026-11-12. Condition 1 is measured on one machine and one version of the harness (Claude Code 2.1.287, Windows). What a managed hook does under `--bare` is measured there and not documented by the harness.
