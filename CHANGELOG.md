@@ -26,6 +26,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The recorder notice hashes the recorder against its committed blob, so an edit `git status` hides (assume-unchanged, skip-worktree, ignored and never committed) reads as uncommitted changes; autocrlf line endings do not (#621).
 - The recorder notice reads the checkout's commits as made, never through `git replace`: a replaced HEAD whose tree holds an edited recorder no longer reads as clean (#621).
 - `verify` on a chain whose only line is torn says `no entry intact`, where it printed `entries 0..-1 intact`. The verdict and the exit are unchanged (#589).
+- A project record that is an object naming no string `path` (`{}`, `{"path": 5}`) cannot be read as a project record, `it names no project path`, where it read as a missing project named `(None)` or `(5)` (#589).
 
 ## [0.20.0] - 2026-11-12
 
