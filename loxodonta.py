@@ -5810,8 +5810,10 @@ def timeline_lines(entries, breaks, warns):
     for n, message in breaks + warns:
         flags.setdefault(n, []).append(message)
     out = []
+    folded = False
     for n, entry in enumerate(entries):
         if entry is not None:
+            folded = folded or split_suffix(entry.get("action"))[1] is not None
             out.append(f"  {n:>4}  {visible(entry.get('ts'))}  "
                        f"{visible(entry.get('actor'))}: "
                        f"{visible(listed_action(entry.get('action')))}")
@@ -5820,6 +5822,10 @@ def timeline_lines(entries, breaks, warns):
                            f"({visible(ref['sha256'][:12])}…)")
         for message in flags.get(n, []):
             out.append(f"        !! {visible(message)}")
+    if folded:
+        out += ["", f"a line ending {FOLDED_MARK} is listed without its "
+                "last group, the call's id and input hash; the chain holds "
+                "the line whole"]
     return out
 
 
@@ -6227,12 +6233,19 @@ def split_suffix(action):
     return action[:at], fields
 
 
+# Ends every line a listing shows without its suffix. Nothing in an
+# entry the writer cannot set tells a hook's receipt from a line logged
+# by hand, the actor included, so every folded line is marked (#619).
+FOLDED_MARK = "[...]"
+
+
 def listed_action(action):
-    """An action line as a listing shows it, without its suffix: the
-    suffix is for a reader that checks, and a listing for a person
-    scanning (ADR-0047). A whole line is in the chain, in `show` and in
-    every JSON output."""
-    return split_suffix(action)[0]
+    """An action line as a listing shows it, its suffix folded to
+    `FOLDED_MARK`: the suffix is for a reader that checks, and a listing
+    for a person scanning (ADR-0047). A whole line is in the chain, in
+    `show` and in every JSON output."""
+    head, fields = split_suffix(action)
+    return head if fields is None else f"{head} {FOLDED_MARK}"
 
 
 def main_repo_root(project):

@@ -765,7 +765,7 @@ class ShowCallTest(RecallBase):
                 out = run_py(SUPERVISOR, verb, *args, "--repo",
                              str(self.project), env_extra=self.env)
                 self.assertEqual(out.returncode, 0, out.stderr)
-                self.assertIn("Bash: pytest -q [...]\n", out.stdout)
+                self.assertIn("Bash: pytest -q [...]", out.stdout)
                 self.assertNotIn("[call=", out.stdout)
                 self.assertEqual(out.stdout.count(FOLDED_NOTE), 1)
 

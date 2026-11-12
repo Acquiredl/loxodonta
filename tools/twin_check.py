@@ -266,14 +266,15 @@ TWINS = (
     Twin("A receipt's suffix",
          ("CALL_ID_CHARACTERS", "CALL_ID_LONGEST",
           "UNHASHED_INPUT", "is_call_id", "holds_fraction", "input_form",
-          "split_suffix", "listed_action"),
+          "split_suffix", "FOLDED_MARK", "listed_action"),
          ORIGINAL, SUPERVISOR,
          "The hook writes the call's id and a hash of the call's input in "
          "SPEC section 4's canonical form at the end of its action line, "
          "and the supervisor reads that suffix, setting it aside to name "
          "the tool and, in `show`, hashing the transcript's record of the "
          "call by the same form to compare; both fold it out of the lines "
-         "they list for a person (ADR-0047)."),
+         "they list for a person and mark each line they fold with the "
+         "same mark (ADR-0047, #619)."),
 )
 
 DIFFERENT = (
