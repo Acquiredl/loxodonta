@@ -477,6 +477,23 @@ class StoreStandingAlarmTest(StoreFixture):
         self.assertEqual((record["log"], record["change"]),
                          (relpath, "regressed"))
 
+    def test_the_store_reading_labels_its_memory_writer_reachable(self):
+        # #615's other half: on the agent's machine the labels stay.
+        self.look(0)
+        lines = self.log.read_bytes().splitlines(keepends=True)
+        self.log.write_bytes(b"".join(lines[:-1]))
+
+        report = self.look(5)
+
+        (event,) = report["baseline"]["events"]
+        self.assertIn("this memory is writer-reachable", event["investigate"])
+        self.assertEqual(report["baseline"]["kept"],
+                         "kept in a writer-reachable file")
+        for name in ("baseline.json", "daybook.json"):
+            purpose = json.loads((self.home / name).read_text(
+                encoding="utf-8"))["purpose"]
+            self.assertIn("writer-reachable, trusted for nothing", purpose)
+
 
 class AcknowledgeTest(LegacyRoot):
     """`supervisor acknowledge LOG STATE` (#401 ruling, part 3): it
@@ -1266,6 +1283,45 @@ class ReceiverAcknowledgeTest(unittest.TestCase):
                             .read_text(encoding="utf-8"))
         self.assertEqual(list(memory["chains"]), [self.relpath])
         self.look(0)
+
+    def test_the_reading_says_its_memory_is_out_of_the_writers_reach(self):
+        # #615: the folder is on the receiver's machine, which the writer
+        # cannot reach (ADR-0046), so no label the reading prints or
+        # writes there calls it writer-reachable; and whoever holds the
+        # receiver's URL can add to what the memory reads (docs/CLAIMS.md).
+        said = [self.run_supervisor("scan", "--receiver", str(self.data))]
+        lines = self.log.read_bytes().splitlines(keepends=True)
+        self.log.write_bytes(b"".join(lines[:-1]))
+        said.append(self.run_supervisor("scan", "--receiver", str(self.data),
+                                        "--json"))
+        report = json.loads(said[-1].stdout)
+        (event,) = report["baseline"]["events"]
+        said.append(self.run_supervisor("scan", "--receiver", str(self.data)))
+        said.append(self.run_supervisor("acknowledge", "--receiver",
+                                        str(self.data), self.relpath,
+                                        event["found"]["head"]))
+        clean = self.look(0)
+        shelf = self.data / "supervisor"
+        (shelf / "baseline.json").write_text("{not json", encoding="utf-8")
+        self.look(5)
+        said.append(self.run_supervisor("acknowledge", "--receiver",
+                                        str(self.data), "--baseline"))
+        self.look(0)
+
+        printed = "".join(r.stdout + r.stderr for r in said)
+        self.assertNotIn("writer-reachable", printed)
+        self.assertNotIn("writer-reachable", json.dumps(clean))
+        self.assertIn("out of the writer's reach if the receiver is",
+                      event["investigate"])
+        self.assertIn("whoever holds the receiver's URL", event["investigate"])
+        self.assertEqual(clean["baseline"]["kept"],
+                         "kept at the receiver, out of the writer's reach if "
+                         "the receiver is")
+        for name in ("baseline.json", "daybook.json"):
+            kept = (shelf / name).read_text(encoding="utf-8")
+            self.assertNotIn("writer-reachable", kept)
+            self.assertIn("out of the writer's reach if the receiver is",
+                          json.loads(kept)["purpose"])
 
     def accept(self, state, session=FIXTURE_SESSION):
         return self.run_supervisor("acknowledge", "--receiver",
