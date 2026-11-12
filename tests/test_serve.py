@@ -146,6 +146,29 @@ def strip_drawn(test, page, report):
     return json.loads(result.stdout)
 
 
+def note_drawn(test, page, row):
+    """What the completeness watch draws for a receiver row's `note`, by
+    the page's own `rowNote` under a JavaScript runtime, as
+    `strip_drawn` draws the strip; skips where none is installed."""
+    runner = shutil.which("node") or shutil.which("bun")
+    if runner is None:
+        test.skipTest("no node or bun on this machine to draw the note")
+    script = page.split("<script>")[1].split("</script>")[0]
+    at = script.index("function rowNote(")
+    folder = temp_folder(test)
+    probe, served = folder / "note.js", folder / "row.json"
+    served.write_text(json.dumps(row), encoding="utf-8")
+    probe.write_text(
+        script[at:script.index("\n}\n", at) + 3]
+        + "console.log(JSON.stringify(rowNote(JSON.parse(require('fs')"
+          ".readFileSync(process.argv[2], 'utf8')))));\n", encoding="utf-8")
+    result = subprocess.run([runner, str(probe), str(served)],
+                            capture_output=True, encoding="utf-8",
+                            env=test.env, timeout=120)
+    test.assertEqual(result.returncode, 0, result.stderr)
+    return json.loads(result.stdout)
+
+
 class ServerFixture(unittest.TestCase):
     """A temp root and a real `serve` subprocess on an ephemeral port, in
     a home of the test's own: serve reads the coverage marker and follows
@@ -1923,6 +1946,34 @@ class ReceiverServeTest(ServerFixture):
         self.assertIn('s.state === "PENDING-OVERDUE"', page)
         self.assertIn("acknowledged here with supervisor acknowledge "
                       "--receiver DIR", page)
+
+    def test_a_row_s_note_is_drawn_with_only_safe_characters(self):
+        # #620: the note says why a receipt paid nothing, and names the
+        # tool the receipt's line gives, which the writer chooses. Its
+        # status carries the tool in a safe alphabet, and the page draws
+        # the note with no control or bidi character in it.
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            "Bash: git status [call=toolu_000000000000000000000001 "
+            "input=unhashed]",
+            "Re‮ad: notes.md [call=toolu_000000000000000000000002 "
+            "input=unhashed]"))
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        (row,) = json.loads(body)["completeness"]["sessions"]
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertIn("toolu_000000000000000000000002 names Re?ad where the "
+                      "harness's event names Bash", row["note"])
+        self.assertIn("rowNote(s)", page)
+        drawn = note_drawn(self, page, dict(row, note=row["note"]
+                                            + " ‮\u0007tail"))
+        self.assertIn("names Re?ad where", drawn)
+        self.assertNotIn("‮", drawn)
+        self.assertNotIn("\u0007", drawn)
+        self.assertEqual(note_drawn(self, page, {"state": "ENDED-CLEAN",
+                                                 "by_tool": {}}), "")
 
     def test_a_broken_chain_does_not_hide_a_finding_no_one_has_accepted(self):
         # #612: one look, both findings. The exit carries the worse (6,
