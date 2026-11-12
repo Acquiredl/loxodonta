@@ -4763,7 +4763,9 @@ class WalkFindingsTest(unittest.TestCase):
         (self.root / ".supervisor-baseline.json").write_text(json.dumps({
             "chains": {},
             "keeper": {relpath: "2099-01-01T00:00:00Z"}}), encoding="utf-8")
-        finished = run_scan(self.root, env=self.env)
+        # The row's calendar named, so the upgrade asks it (#415).
+        finished = run_scan(self.root, "--calendar", "http://127.0.0.1:1",
+                            env=self.env)
         report = json.loads(finished.stdout)
         chain = chains_by_session(report)[("alpha", "sess-futr")][0]
         # the upgrade was attempted (and failed fast, offline): the note
@@ -4784,7 +4786,9 @@ class WalkFindingsTest(unittest.TestCase):
             "chains": {},
             "keeper": {relpath: "2026-08-22T09:00:00"}}), encoding="utf-8")
 
-        finished = run_scan(self.root, env=self.env)
+        # The row's calendar named, so the upgrade asks it (#415).
+        finished = run_scan(self.root, "--calendar", "http://127.0.0.1:1",
+                            env=self.env)
 
         self.assertNotIn("Traceback", finished.stderr)
         report = json.loads(finished.stdout)
