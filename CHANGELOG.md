@@ -21,6 +21,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - At the receiver, an acknowledged session whose events hold a call naming no tool stays acknowledged: its counts were compared before the memory's JSON had turned the missing name into `"null"`, so they never matched (ADR-0046).
 - The help of `install-hook --publish-chain` and of the supervisor's `--publish-chain` says what ADR-0045 built: each entry leaves as it is written, and a send carries what the remote does not hold.
 - A row appended to a sidecar whose last line is torn starts on a line of its own: it was glued onto the torn line, and both were unreadable. The torn line stays as it lies (#610).
+- `docs/TOUR.md` says where the hook puts a chain today: the store's drawer for the project, read from `CLAUDE_PROJECT_DIR` or the payload's `cwd`, and fingerprints files under the project, not the log's folder (#611).
 - A listing marks `[...]` each line it shows without its receipt suffix and says once what that means: a hand-written line ending in a group of that shape lost it silently, and no entry tells it from a hook's receipt (#619).
 
 ## [0.20.0] - 2026-11-12
