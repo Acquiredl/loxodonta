@@ -2102,6 +2102,30 @@ class ReceiverServeTest(ServerFixture):
                         strip["why"].index("1 chain(s) fail verification"))
         self.assertEqual(strip["why"].count("(scan exit 6)"), 1)
 
+    def test_a_session_still_arriving_stands_until_it_settles(self):
+        # #617: a session still arriving with a call overdue raises the
+        # exit and cannot be accepted (ADR-0046 ruling 6), so the strip
+        # says it stands until its receipts arrive or it settles, and
+        # names no acknowledgement for it.
+        self.env["SUPERVISOR_SETTLE_SECONDS"] = "3600"
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        post_event(self.data, 51, "api_request", received_ago(0))
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 6)
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["raises"]),
+                         ("PENDING-OVERDUE", True))
+        strip = strip_drawn(self, page, served)
+        self.assertEqual(strip["state"], "CALLS OVERDUE AT THE RECEIVER")
+        self.assertIn("until the receipts arrive or the session settles",
+                      strip["why"])
+        self.assertNotIn("acknowledge", strip["why"])
+
     def test_the_startup_line_says_no_keeper_runs_at_the_far_end(self):
         # #487 item 12, and #281: no keeper, and the watch's own clock.
         self.assertIsNotNone(self.serve_receiver())
@@ -2159,6 +2183,41 @@ class ReceiverServeTest(ServerFixture):
                                  result.stdout + result.stderr)
                 self.assertIn(NO_KEEPER_THERE + named + "\n", result.stderr)
                 self.assertEqual(result.stdout, "")
+
+    def test_the_views_and_the_acknowledged_lines_say_whose_reach(self):
+        # #615: the saved views sit in the receiver's folder, out of the
+        # writer's reach, and so does the record of what an operator
+        # accepted there. The page draws an acknowledged change with the
+        # words the server gives for where its memory is kept, and no
+        # longer calls every such record writer-reachable itself.
+        self.assertIsNotNone(self.serve_receiver())
+        self.get("/api/status")   # the first look makes the memory's folder
+        request = urllib.request.Request(
+            self.url + "/api/views",
+            data=json.dumps({"save": {"name": "lately"}}).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with OPENER.open(request, timeout=30) as response:
+            saved = json.loads(response.read().decode("utf-8"))
+
+        _, _, listed = self.get("/api/views")
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        for reply in (saved, json.loads(listed)):
+            self.assertIn("out of the writer's reach if the receiver is",
+                          reply["purpose"])
+            self.assertNotIn("writer-reachable", reply["purpose"])
+        kept = (self.data / "supervisor" / "views.json").read_text(
+            encoding="utf-8")
+        self.assertNotIn("writer-reachable", kept)
+        self.assertEqual(json.loads(body)["baseline"]["kept"],
+                         "kept at the receiver, out of the writer's reach if "
+                         "the receiver is")
+        # One source for every acknowledgement line, a session's and a
+        # change's alike.
+        self.assertIn("report.baseline.kept", page)
+        self.assertNotIn("kept in a writer-reachable file", page)
+        self.assertNotIn("(an operator's word, kept at the receiver)", page)
 
     def test_the_recall_routes_read_the_receivers_copies(self):
         # #487 item 10: the census counts the copies, and so must the

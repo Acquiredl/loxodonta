@@ -7004,6 +7004,21 @@ class ReceiverReadingTest(unittest.TestCase):
                       "window ago", row["words"])
         self.assertIn("cannot be acknowledged", row["words"])
 
+    def test_the_help_tells_a_settled_finding_from_one_still_arriving(self):
+        # #617: a settled finding stands until it is accepted; one still
+        # arriving cannot be accepted, and stands until it settles or its
+        # receipts arrive (ADR-0046 ruling 6).
+        result = run(SUPERVISOR, "scan", "--help", timeout=60, env=self.env)
+
+        said = " ".join(result.stdout.split())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("A settled session short of receipts, or of events, "
+                      "raises the exit until `acknowledge --receiver DIR "
+                      "--session` accepts it", said)
+        self.assertIn("one still arriving with a call or a counter number "
+                      "overdue raises it until the receipts arrive or it "
+                      "settles", said)
+
     def test_a_newest_call_without_its_receipt_yet_is_only_pending(self):
         # The calls reported long ago have their receipts; the one
         # reported just now has none yet, and is not overdue.
