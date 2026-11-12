@@ -5660,6 +5660,7 @@ class UsageExitTest(unittest.TestCase):
                        "SUPERVISOR_WANING_SECONDS": True,
                        "SUPERVISOR_DORMANT_SECONDS": True,
                        "SUPERVISOR_SETTLE_SECONDS": True,
+                       "SUPERVISOR_LATE_RECEIPT_SECONDS": True,
                        "SUPERVISOR_HOT_TIMES": True,
                        "SUPERVISOR_HOT_FLOOR": True,
                        "SUPERVISOR_SCAN_TTL_SECONDS": False,
@@ -6830,6 +6831,137 @@ class ReceiverReadingTest(unittest.TestCase):
                          {"count": 1, "calls": ["toolu_mcp_2"]})
         self.assertIn("toolu_mcp_2 names Bash where the harness's event "
                       "names mcp_tool", row["note"])
+
+    # #620's second case, the issue comment's four steps: two calls
+    # reported, one receipt; a settled look names the second missing;
+    # a sibling chain then brings a hand-written receipt carrying its id.
+    LATE_SESSION = "late-session-0001"
+
+    def named_missing(self, data):
+        """Steps 1 and 2 in a folder of their own: the look that names
+        `toolu_b` missing, exit 6."""
+        for sequence, call in enumerate(("toolu_a", "toolu_b")):
+            post_event(data, sequence, "tool_result", received_ago(7200),
+                       tool="Bash", call=call, session=self.LATE_SESSION)
+        chain_copy(data, self.LATE_SESSION, actions=(
+            "Bash: echo one [call=toolu_a input=unhashed]",))
+        row = self.rows(self.report(expect=6, data=data))[self.LATE_SESSION]
+        self.assertEqual((row["state"], row["missing_calls"]["calls"]),
+                         ("ENDED-DEFICIT", ["toolu_b"]))
+
+    def late_receipt(self, data):
+        """Step 3: the sibling chain holding the hand-written receipt."""
+        chain_copy(data, self.LATE_SESSION + "-002", actions=(
+            "Bash: echo harmless [call=toolu_b input=unhashed]",))
+
+    def remembered(self, data):
+        return json.loads((data / "supervisor" / "baseline.json")
+                          .read_text(encoding="utf-8"))
+
+    def move_memory_back(self, data, seconds, keys=("named",)):
+        """The look's clock moved: what the memory says a look named (and
+        first saw) dated `seconds` earlier, as if that look ran then."""
+        memory = self.remembered(data)
+        for calls in memory["named_missing"].values():
+            for record in calls.values():
+                for key in keys:
+                    if key in record:
+                        when = datetime.datetime.strptime(
+                            record[key], "%Y-%m-%dT%H:%M:%SZ")
+                        record[key] = (when - datetime.timedelta(
+                            seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (data / "supervisor" / "baseline.json").write_text(
+            json.dumps(memory), encoding="utf-8")
+
+    def test_a_receipt_arriving_after_its_call_was_named_missing_pays_nothing(self):
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        self.move_memory_back(data, 7200)
+        self.late_receipt(data)
+
+        report = self.report(expect=6, data=data)
+        again = self.report(expect=6, data=data)
+
+        for look in (report, again):
+            row = self.rows(look)[self.LATE_SESSION]
+            self.assertEqual(row["state"], "ENDED-DEFICIT")
+            self.assertEqual(row["missing_calls"]["calls"], ["toolu_b"])
+            self.assertTrue(row["raises"])
+            self.assertIn("1 receipt(s) arrived after their call was named "
+                          "missing", row["note"])
+        self.assertEqual(
+            [chain["verdict"] for chain in
+             chains_by_session(report)[("receiver", self.LATE_SESSION)]],
+            ["VALID", "VALID"])
+        # It keeps its finding until accepted here (ADR-0046 ruling 2).
+        accepted = run(SUPERVISOR, "acknowledge", "--receiver", str(data),
+                       "--session", self.LATE_SESSION, "ENDED-DEFICIT",
+                       timeout=180, env={**self.env,
+                                         "SUPERVISOR_SETTLE_SECONDS": "0"})
+        self.assertEqual(accepted.returncode, 0,
+                         accepted.stdout + accepted.stderr)
+        self.report(data=data)
+
+    def test_a_receipt_arriving_inside_the_grace_pays_its_call(self):
+        # An honest tail re-sent after a failed send still clears; the
+        # memory keeps when it was first seen, so it stays paid after.
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        self.late_receipt(data)
+
+        paid = self.report(data=data)
+        self.move_memory_back(data, 7200, keys=("named", "seen"))
+        later = self.report(data=data)
+
+        for look in (paid, later):
+            row = self.rows(look)[self.LATE_SESSION]
+            self.assertEqual(row["state"], "ENDED-CLEAN")
+            self.assertNotIn("note", row)
+
+    def test_an_unreadable_memory_reads_as_before_and_says_so(self):
+        # Never a crash, never quieter than before the memory was kept:
+        # the receipt pays, and the baseline's own alarm stands (exit 5).
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        (data / "supervisor" / "baseline.json").write_text(
+            "{not json", encoding="utf-8")
+        self.late_receipt(data)
+
+        report = self.report(expect=5, data=data)
+
+        self.assertEqual(self.rows(report)[self.LATE_SESSION]["state"],
+                         "ENDED-CLEAN")
+        self.assertIn("no call an earlier look named missing is remembered",
+                      report["completeness"]["note"])
+
+    def test_a_memory_written_before_it_kept_named_calls_says_so(self):
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        memory = self.remembered(data)
+        del memory["named_missing"]
+        (data / "supervisor" / "baseline.json").write_text(
+            json.dumps(memory), encoding="utf-8")
+        self.late_receipt(data)
+
+        report = self.report(data=data)
+
+        self.assertEqual(self.rows(report)[self.LATE_SESSION]["state"],
+                         "ENDED-CLEAN")
+        self.assertIn("no call an earlier look named missing is remembered",
+                      report["completeness"]["note"])
+        self.assertIn("named_missing", self.remembered(data))
+
+    def test_a_named_call_of_the_wrong_shape_makes_the_memory_unreadable(self):
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        memory = self.remembered(data)
+        memory["named_missing"][self.LATE_SESSION]["toolu_b"] = "yesterday"
+        (data / "supervisor" / "baseline.json").write_text(
+            json.dumps(memory), encoding="utf-8")
+
+        report = self.report(expect=6, data=data)
+
+        self.assertIn("named_missing", report["baseline"]["note"])
 
     def test_the_default_settle_window_is_one_hour(self):
         # ADR-0046 ruling 4: half an hour after the copy last grew the
