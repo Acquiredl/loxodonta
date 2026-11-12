@@ -64,6 +64,7 @@ import tempfile
 import threading
 import unicodedata
 import time
+import traceback
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -103,11 +104,14 @@ EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no drill sandbox, no
                    # package, no baseline for calibrate or acknowledge, no
                    # export; and what the keeper reads from a recorder verb
 
-# Read by the keepers from a recorder verb; the supervisor exits with none.
+# The first three are read by the keepers from a recorder verb. 70 and
+# 141 the supervisor also gives itself, through run_main as the recorder
+# does (#449): when it crashes, and when its reader hangs up.
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_UNAVAILABLE = 69  # the far end: a calendar, an authority or a remote
-EX_SOFTWARE = 70  # the recorder itself failed
+EX_SOFTWARE = 70  # the recorder, or the supervisor itself, failed
 EX_TEMPFAIL = 75  # another writer holds the chain's lock
+EXIT_READER_GONE = 141
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
@@ -132,15 +136,15 @@ def environment(name, default=None):
     return os.environ.get(name, default)
 
 
-def env_number(name, default, kind=int):
-    """The number in environment variable `name`, read as `kind` (int
-    or float), or `default` when it is unset. A value that is not such a
-    number, or is negative or infinite, is refused by name: one line on
-    stderr and exit 64, at import and so before any verb runs, never a
-    traceback (#487)."""
-    raw = environment(name)
-    if raw is None:
-        return default
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def number_setting(name, raw, kind=int, waited=False):
+    """The number the text `raw` of environment variable `name` says,
+    read as `kind` (int or float). A value that is not such a number,
+    or is negative or infinite, is refused by name: one line on stderr
+    and exit 64, never a traceback (#487). When the number is a wait,
+    one past threading.TIMEOUT_MAX is refused the same way, since no
+    wait can take it (#589); a number only compared has no such
+    bound."""
     try:
         value = kind(raw)
     except ValueError:
@@ -150,7 +154,22 @@ def env_number(name, default, kind=int):
               f"{'whole' if kind is int else 'finite'} number 0 or more",
               file=sys.stderr)
         sys.exit(EX_USAGE)
+    if waited and value > threading.TIMEOUT_MAX:
+        print(f"error: {name}={ascii(raw)} is more seconds than a wait "
+              f"can take (at most {int(threading.TIMEOUT_MAX)} here)",
+              file=sys.stderr)
+        sys.exit(EX_USAGE)
     return value
+
+
+def env_number(name, default, kind=int, waited=False):
+    """The number in environment variable `name`, or `default` when it
+    is unset. Read at import, so a value `number_setting` refuses is
+    refused before any verb runs (#487); `waited` for a number a wait
+    is given."""
+    raw = environment(name)
+    return default if raw is None else number_setting(name, raw, kind,
+                                                      waited)
 
 
 # --- Census -------------------------------------------------------------------
@@ -9948,7 +9967,8 @@ SCAN_TTL_SECONDS = env_number("SUPERVISOR_SCAN_TTL_SECONDS", 3.0, float)
 # constantly. The 0.1 s floor matters: the suite's idiom
 # SUPERVISOR_SCAN_TTL_SECONDS=0, typed here, would spin a core.
 KEEPER_TICK_SECONDS = max(
-    env_number("SUPERVISOR_KEEPER_TICK_SECONDS", 60.0, float), 0.1)
+    env_number("SUPERVISOR_KEEPER_TICK_SECONDS", 60.0, float, waited=True),
+    0.1)
 
 
 def trouble_words(failure):
@@ -10000,6 +10020,15 @@ class Watchtower(ThreadingHTTPServer):
         # every `serve` test paid at startup. Bind, name it ourselves.
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
+
+    def handle_error(self, request, client_address):
+        # A client that left before its reply was read (a closed tab, a
+        # scraper's timeout) is not the supervisor's fault, and says
+        # nothing on the serve log (#589). Narrower than the receiver's
+        # OSError: a request here reads the store, and an OSError from a
+        # file is still the stdlib's traceback.
+        if not isinstance(sys.exc_info()[1], ConnectionError):
+            super().handle_error(request, client_address)
 
     def remember_look(self):
         """One opening of the front page, under the scan lock — the day
@@ -13176,6 +13205,43 @@ def speak_utf8():
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def reader_gone(error):
+    """True when `error` is the reader hanging up on stdout (`loxodonta
+    report | head`). POSIX raises BrokenPipeError (EPIPE); Windows
+    reports a plain EINVAL from the closed handle instead, so match on
+    both or the quiet death is a traceback on half the platforms. EINVAL
+    means nothing about pipes off Windows, and on Windows it counts only
+    when it names no file: a write to stdout never does, and a file
+    refused for not being a regular one always does, so that refusal is
+    never taken for a reader that left."""
+    return isinstance(error, BrokenPipeError) or (
+        os.name == "nt" and isinstance(error, OSError)
+        and error.errno == errno.EINVAL and error.filename is None)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def run_main(main):
+    """Run a command line to its exit code, as every tool's entry point.
+    Two endings are not the command's own (ADR-0037). A reader that hung
+    up gets a quiet 141, what a shell reports for that: never 0 (VALID)
+    or 1 (BROKEN), since the unread lines were never judged. A crash
+    prints its traceback to stderr and exits 70, sysexits' internal
+    error, so it is never read as a verdict. SystemExit (argparse's 64,
+    `--version`'s 0) and Ctrl-C pass through as Python ends them."""
+    try:
+        speak_utf8()  # before anything prints
+        code = main()
+    except Exception as e:  # noqa: BLE001 - every failure gets its exit
+        if not reader_gone(e):
+            traceback.print_exc()
+            sys.exit(EX_SOFTWARE)
+        # Give the interpreter a sink to flush into, or shutdown re-raises.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(EXIT_READER_GONE)
+    sys.exit(code)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own. A wrong flag, a
     missing argument, or a malformed value exits 64 instead of argparse's
@@ -13189,7 +13255,7 @@ class UsageParser(argparse.ArgumentParser):
         self.exit(EX_USAGE, f"{self.prog}: error: {message}\n")
 
 
-def main(argv):
+def main(argv=None):
     parser = UsageParser(prog="supervisor",
                          description=__doc__.splitlines()[0])
     parser.add_argument("--version", action=VersionAction,
@@ -13564,5 +13630,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    speak_utf8()  # before anything prints
-    sys.exit(main(sys.argv[1:]))
+    run_main(main)

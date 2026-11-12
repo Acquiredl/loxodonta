@@ -800,6 +800,8 @@ ALLOWED_OPENS = {
     ("loxodonta.py", "judge_manifest_signature"): (
         1, "writes the allowed-signers line into a temporary folder of "
            "its own"),
+    ("supervisor.py", "run_main"): (
+        1, "the null device, a sink for a reader that has gone"),
     ("supervisor.py", "open_regular"): (1, NEVER_WAITS),
     ("supervisor.py", "copy_regular"): (
         1, "copies between two files already open: the source by "
@@ -826,6 +828,8 @@ ALLOWED_OPENS = {
            "named pipe put there after the question"),
     ("supervisor.py", "Face.answer_get"): (
         1, "serves docs/FIRE-DRILL.md from the supervisor's own checkout"),
+    ("receiver.py", "run_main"): (
+        1, "the null device, a sink for a reader that has gone"),
     ("receiver.py", "mint_token"): (1, RECEIVER_DATA),
     ("receiver.py", "current_token"): (1, RECEIVER_DATA),
     ("receiver.py", "ends_mid_line"): (1, RECEIVER_DATA),
