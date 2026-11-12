@@ -14,6 +14,8 @@ import json
 import os
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import time
@@ -1040,6 +1042,36 @@ class FortnightTest(ServerFixture):
 
 
 class ServeTest(ServerFixture):
+    def test_a_client_that_hangs_up_leaves_no_traceback(self):
+        # #589 item 18: a client that leaves mid-request is not the
+        # supervisor's fault, and its request thread printed a traceback
+        # to the serve log. Half a request, then a reset rather than a
+        # close, so the thread's next read of the connection fails, as
+        # its write of a reply does when the client is gone.
+        #
+        # Nothing the server says marks that thread done, and the next
+        # request can be answered first (seen on Windows), so the log is
+        # given a bound to say anything at all. A quiet log waits the
+        # bound out and passes on any machine; only a regression whose
+        # print came later than the bound could slip by.
+        self.serve()
+        port = int(self.url.rsplit(":", 1)[1])
+        leaving = socket.create_connection(("127.0.0.1", port), timeout=30)
+        leaving.sendall(b"GET /api/status HTTP/1.1\r\n")
+        # SO_LINGER on, zero seconds: the close sends a reset. Windows'
+        # struct linger is two shorts, POSIX's two ints.
+        leaving.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                           struct.pack("HH" if os.name == "nt" else "ii",
+                                       1, 0))
+        leaving.close()
+
+        status, _, _ = self.get("/api/status")
+        said = read_line_within(self.proc.stderr, bound=3)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(said, "", "a client that left put this on the "
+                                   "serve log")
+
     def test_serve_binds_localhost_only(self):
         # The announcement is the bind: an ephemeral port on 127.0.0.1,
         # answering — nothing is offered to any other interface.
