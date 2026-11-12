@@ -7457,6 +7457,16 @@ COPIED = ("loxodonta.py", "supervisor.py")
 # Where Windows keeps what only an administrator writes, by name: the
 # standard library reads no access list (ADR-0042 ruling 3).
 SYSTEM_PLACES = ("C:\\Program Files", "C:\\Windows")
+# The kernel follows at most this many links in one path (Linux's
+# MAXSYMLINKS), and the check follows no more (#576).
+LINK_HOPS = 40
+# Whether a path can be walked one folder descriptor at a time, each
+# folder held open as it is judged and the next step taken inside it
+# (#574). Not on Windows, where the check is by place, nor where one of
+# these calls takes no dir_fd (os.replace rides on os.rename's).
+HELD_WALK = (hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+             and {os.open, os.stat, os.readlink, os.mkdir, os.rename,
+                  os.unlink} <= os.supports_dir_fd)
 
 
 def system_program_folder():
@@ -7548,17 +7558,12 @@ def within(path, folder):
 
 def in_reach(path):
     """Why an ordinary account can reach `path`, as far as this tool can
-    see, or None when it cannot (ADR-0042 ruling 3). Asked of the path
-    as written, which is what the command names and what a link in a
-    folder the account owns could later be retargeted under, and of the
-    path resolved, which is what runs today. On POSIX, every component
-    from the root down that exists, of the path as written and of the
-    path and its folder resolved: owned by root, with no group or other
-    write bit, else the first that is not. A symbolic link is judged by
-    the folder that holds it, which is in the walk, never by its own
-    bits, which say nothing. A component not made yet is the
-    installer's to make. On Windows, by place, both spellings: the
-    standard library reads no access list."""
+    see, or None when it cannot (ADR-0042 ruling 3). On POSIX the walk
+    of walk_path. On Windows by place, asked of the path as written,
+    which is what the command names and what a junction in a folder
+    the account owns could later be retargeted under, and of the path
+    resolved, which is what runs today: the standard library reads no
+    access list."""
     written = os.path.abspath(path)
     if sys.platform == "win32":
         real = os.path.realpath(path)
@@ -7574,28 +7579,132 @@ def in_reach(path):
                     "this installer cannot read that folder's access list "
                     "from here")
         return None
-    places = set()
-    for start in (written, os.path.realpath(path),
-                  os.path.realpath(os.path.dirname(written))):
-        while start not in places:
-            places.add(start)
-            start = os.path.dirname(start)
-    for place in sorted(places, key=len):
-        try:
-            status = os.lstat(place)
-        except (FileNotFoundError, NotADirectoryError):
-            continue
-        except OSError as error:
-            return f"{place} cannot be looked at: {error.strerror or error}"
-        if stat.S_ISLNK(status.st_mode):
-            continue
+    return walk_path(path)[0]
+
+
+def walk_path(path, made=None, judge=True):
+    """Walk the POSIX `path` from the root as the system resolves it,
+    one component and one link at a time (#576), and judge each step:
+    every folder entered, and the last component, must be root's with
+    no group or other write bit. A symbolic link is judged by the folder
+    that holds it, which the walk has entered, never by its own bits,
+    which say nothing; its target is then walked from the root or from
+    that folder, so a link reached through another link is judged where
+    it lies. Past LINK_HOPS links the path is refused, as the kernel
+    refuses it. A component not made yet is the installer's to make.
+
+    Returns (why, held): why an ordinary account can reach the path, or
+    None, and None or a descriptor. Without `made` the walk ends where
+    the path stops existing. With a list as `made` the path is a folder
+    to write in: what is missing is made (0755) and appended there, top
+    first, an OSError is raised, and once nothing was found in reach
+    `held` is the descriptor of the folder the walk ended in, for the
+    caller to write through and close (None where HELD_WALK is false).
+    With HELD_WALK each folder is held open from the moment it is judged
+    and the next step is taken inside it, so no link put in place after
+    a step can redirect the rest (#574). `judge` false judges nothing,
+    for a check the stand-in waived."""
+    def judged(status, place):
+        if not judge:
+            return None
         if status.st_uid != 0:
             return f"{place} belongs to uid {status.st_uid}, not to root"
         if status.st_mode & 0o022:
             return (f"{place} can be written by "
                     + ("its group" if status.st_mode & 0o020
                        else "every account"))
-    return None
+        return None
+
+    def steps(text):
+        return [part for part in text.split("/") if part not in ("", ".")]
+
+    held, make = HELD_WALK, made is not None
+    directory = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    parts = steps(path if os.path.isabs(path)
+                  else os.path.join(os.getcwd(), path))
+    trail = [(os.open("/", directory) if held else None, "/")]
+    hops, place = 0, "/"
+    try:
+        why = judged(os.fstat(trail[0][0]) if held else os.stat("/"), "/")
+        while parts and not why:
+            name = parts.pop(0)
+            if name == "..":
+                if len(trail) > 1:
+                    gone = trail.pop()[0]
+                    if gone is not None:
+                        os.close(gone)
+                continue
+            fd, here = trail[-1]
+            place = os.path.join(here, name)
+            at = name if held else place
+            try:
+                status = os.stat(at, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                if not make:
+                    break
+                os.mkdir(at, 0o755, dir_fd=fd)
+                made.append(place)
+                status = None
+            if status is not None and stat.S_ISLNK(status.st_mode):
+                hops += 1
+                if hops > LINK_HOPS:
+                    why = (f"{path} goes through more than {LINK_HOPS} links, "
+                           "more than the system follows, so where it leads "
+                           "cannot be judged")
+                    break
+                target = os.readlink(at, dir_fd=fd)
+                if target.startswith("/"):
+                    for gone, _ in trail[1:]:
+                        if gone is not None:
+                            os.close(gone)
+                    del trail[1:]
+                parts = steps(target) + parts
+                continue
+            if status is not None and not stat.S_ISDIR(status.st_mode):
+                why = judged(status, place)
+                if make and not why:
+                    raise NotADirectoryError(
+                        errno.ENOTDIR, os.strerror(errno.ENOTDIR), place)
+                break
+            # A folder is judged as opened, never by its name again.
+            if held:
+                trail.append((os.open(name, directory | os.O_NOFOLLOW,
+                                      dir_fd=fd), place))
+                opened = os.fstat(trail[-1][0])
+            else:
+                trail.append((None, place))
+                opened = os.stat(place, follow_symlinks=False)
+            if status is None:
+                if held:
+                    os.fchmod(trail[-1][0], 0o755)
+                else:
+                    os.chmod(place, 0o755)
+            else:
+                why = judged(opened, place)
+        return why, (trail.pop()[0] if make and not why else None)
+    except OSError as error:
+        if make:
+            raise
+        return f"{place} cannot be looked at: {error.strerror or error}", None
+    finally:
+        for fd, _ in trail:
+            if fd is not None:
+                os.close(fd)
+
+
+def folder_refused(folder, why):
+    """The refusal's words for the copy's folder."""
+    return (f"the folder the recorder is copied to, {folder}, is not out "
+            f"of an ordinary account's reach: {why}. Only an administrator "
+            "may write there for the copy to hold: give it to one, or move "
+            "it away and let the installer make it.")
+
+
+def copy_refused(copy, why):
+    """The refusal's words for what stands at a copy's name."""
+    return (f"the file at the copy's name, {copy}, is not out of an "
+            f"ordinary account's reach: {why}. Move it away and let the "
+            "installer write it.")
 
 
 def reach_refusals():
@@ -7615,21 +7724,14 @@ def reach_refusals():
     folder = program_folder()
     why = in_reach(folder)
     if why:
-        refusals.append(
-            f"the folder the recorder is copied to, {folder}, is not out of "
-            f"an ordinary account's reach: {why}. Only an administrator may "
-            "write there for the copy to hold: give it to one, or move it "
-            "away and let the installer make it.")
+        refusals.append(folder_refused(folder, why))
     # What already stands at a copy's name: identical bytes are never
     # rewritten, so its owner, its bits and a link there are read here.
     for name in COPIED:
         copy = os.path.join(folder, name)
         why = in_reach(copy) if os.path.lexists(copy) else None
         if why:
-            refusals.append(
-                f"the file at the copy's name, {copy}, is not out of an "
-                f"ordinary account's reach: {why}. Move it away and let the "
-                "installer write it.")
+            refusals.append(copy_refused(copy, why))
     return refusals
 
 
@@ -7680,31 +7782,101 @@ def copy_plan(folder):
     return plan
 
 
-def write_copy(plan, folder):
+def write_copy(plan, folder, judged=True):
     """Write each copy in `plan` whose bytes differ, through a temporary
-    file beside it moved into place (replace_file), making the folders
-    above that are absent, readable by every account as the managed
-    file is. Returns (what was written, for put_copy_back; None), or
-    (None, (the path refused, the OSError)) with everything this wrote
-    taken back: without the right, nothing is written anywhere
-    (ADR-0042 ruling 2)."""
-    made, above = [], os.path.abspath(folder)
-    while not os.path.lexists(above) and os.path.dirname(above) != above:
-        made.append(above)
-        above = os.path.dirname(above)
-    written, target = ([], made), folder
+    file beside it moved into place, making the folders above that are
+    absent, readable by every account as the managed file is. The check
+    holds at the write, not only before it (#574). With HELD_WALK the
+    folder is walked as the check walks it, each folder held open from
+    the moment it is judged, and each copy is written through the
+    descriptor the walk ended in (replace_at): what was judged is what
+    is written. Elsewhere, Windows included, the check is asked again
+    just before each write, which narrows the window between the two
+    and does not close it. `judged` is false where the stand-in waived
+    the check, and nothing is judged then. Returns (what was written,
+    for put_copy_back; None); (None, (the path refused, the OSError));
+    or (None, the refusal's words) when the check now fails. Either
+    way everything this wrote is taken back: without the right, nothing
+    is written anywhere (ADR-0042 ruling 2)."""
+    written, target = ([], []), folder
     try:
-        for each in reversed(made):
+        if HELD_WALK:
+            made = []
+            try:
+                why, held = walk_path(folder, made, judge=judged)
+            finally:
+                written[1].extend(reversed(made))
+            if why:
+                put_copy_back(written)
+                return None, folder_refused(folder, why)
+            try:
+                for target, data, old, mode in plan:
+                    name = os.path.basename(target)
+                    if data != old or name_is_link(name, held):
+                        replace_at(held, name, data, 0o644)
+                        written[0].append((target, old, mode))
+            finally:
+                os.close(held)
+            return written, None
+        above = os.path.abspath(folder)
+        while not os.path.lexists(above) and os.path.dirname(above) != above:
+            written[1].append(above)
+            above = os.path.dirname(above)
+        for each in reversed(written[1]):
+            why = judged and in_reach(folder)
+            if why:
+                put_copy_back(written)
+                return None, folder_refused(folder, why)
             os.mkdir(each)
             os.chmod(each, 0o755)
         for target, data, old, mode in plan:
             if data != old or os.path.islink(target):
+                why = judged and in_reach(folder)
+                refusal = why and folder_refused(folder, why)
+                why = judged and not refusal and os.path.lexists(target)                     and in_reach(target)
+                refusal = refusal or (why and copy_refused(target, why))
+                if refusal:
+                    put_copy_back(written)
+                    return None, refusal
                 replace_file(target, data, mode=0o644, through_links=False)
                 written[0].append((target, old, mode))
     except OSError as error:
         put_copy_back(written)
         return None, (target, error)
     return written, None
+
+
+def name_is_link(name, folder):
+    """Whether what stands at `name` in the folder held as `folder` is a
+    link, or is gone since the plan read it: either is written again."""
+    try:
+        return stat.S_ISLNK(os.stat(name, dir_fd=folder,
+                                    follow_symlinks=False).st_mode)
+    except FileNotFoundError:
+        return True
+
+
+def replace_at(folder, name, data, mode):
+    """replace_file inside the folder held open as the descriptor
+    `folder` (#574): a temporary file made there exclusively, never
+    through a link, flushed to disk and given `mode`, then moved over
+    `name` itself, a link at that name included."""
+    temp = f"{name}.{os.urandom(6).hex()}.tmp"
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                 0o600, dir_fd=folder)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+            os.fchmod(f.fileno(), mode)
+        os.replace(temp, name, src_dir_fd=folder, dst_dir_fd=folder)
+    except BaseException:
+        try:
+            os.unlink(temp, dir_fd=folder)
+        except OSError:
+            pass
+        raise
 
 
 def put_copy_back(written):
@@ -8618,7 +8790,11 @@ def install_managed_hooks(args):
                    for block in our_hooks(settings)["hooks"].get(event, [])}
                   - {"*", wanted})
 
-    copied, refusal = write_copy(plan, folder)
+    copied, refusal = write_copy(plan, folder, judged=not waived)
+    if isinstance(refusal, str):
+        print(f"refusing: {refusal} Nothing was written (ADR-0042).",
+              file=sys.stderr)
+        return EX_USAGE
     if refusal:
         return cannot_write(*refusal)
     pinned, refused = settle_telemetry_pin(pin_path, wanted_pin, found_pin,

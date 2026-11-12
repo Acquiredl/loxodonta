@@ -20,6 +20,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Fixed
 
+- The managed install's check follows a path one link at a time and judges every folder holding a link, at every hop: a link reached through another link escaped it. A path through more than 40 links is refused (#576).
+- On POSIX the managed install writes its copy through the folders its check held open, so a link put in place after the check cannot redirect it. On Windows the check is asked again just before each write (#574).
 - At the receiver, an acknowledged session whose events hold a call naming no tool stays acknowledged: its counts were compared before the memory's JSON had turned the missing name into `"null"`, so they never matched (ADR-0046).
 - The help of `install-hook --publish-chain` and of the supervisor's `--publish-chain` says what ADR-0045 built: each entry leaves as it is written, and a send carries what the remote does not hold.
 - A row appended to a sidecar whose last line is torn starts on a line of its own: it was glued onto the torn line, and both were unreadable. The torn line stays as it lies (#610).
