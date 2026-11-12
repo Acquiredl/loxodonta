@@ -20,6 +20,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - At the receiver, an acknowledged session whose events hold a call naming no tool stays acknowledged: its counts were compared before the memory's JSON had turned the missing name into `"null"`, so they never matched (ADR-0046).
 - The help of `install-hook --publish-chain` and of the supervisor's `--publish-chain` says what ADR-0045 built: each entry leaves as it is written, and a send carries what the remote does not hold.
+- A row appended to a sidecar whose last line is torn starts on a line of its own: it was glued onto the torn line, and both were unreadable. The torn line stays as it lies (#610).
 - The dashboard's verdict strip names every condition one look found, the worst first: a broken chain no longer hides a finding at the receiver no one has accepted, nor a live alarm a broken chain (#612).
 
 ## [0.20.0] - 2026-11-12
