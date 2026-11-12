@@ -1099,25 +1099,37 @@ class LinkThroughLinkTest(ChecksOnly, ManagedBase):
 
     Building the case needs a link made by root in a folder only root
     writes, so the links are made through `sudo -n` in a folder of the
-    test's own under /opt, removed after, and the test is skipped
-    wherever sudo asks for a password."""
+    test's own there, removed after, and the test is skipped wherever
+    sudo asks for a password."""
 
     def setUp(self):
         super().setUp()
         if sys.platform == "win32" or not hasattr(os, "geteuid") \
                 or os.geteuid() == 0:
             self.skipTest("needs POSIX, an account that is not root, and sudo")
-        for place in ("/", "/opt"):
-            try:
-                status = os.lstat(place)
-            except OSError:
-                self.skipTest(f"no {place} here")
-            if status.st_uid != 0 or status.st_mode & 0o022 \
-                    or not stat.S_ISDIR(status.st_mode):
-                self.skipTest(f"{place} is not root's alone here")
+        def roots_alone(place):
+            while True:
+                try:
+                    status = os.lstat(place)
+                except OSError:
+                    return False
+                if status.st_uid != 0 or status.st_mode & 0o022 \
+                        or not stat.S_ISDIR(status.st_mode):
+                    return False
+                if place == "/":
+                    return True
+                place = os.path.dirname(place)
+
+        # The first folder whose whole path only root writes. A runner's
+        # /opt can be the runner account's.
+        under = next((place for place in ("/opt", "/usr/local", "/srv", "/")
+                      if roots_alone(place)), None)
+        if under is None:
+            self.skipTest("no folder here that only root writes")
         try:
             made = subprocess.run(
-                ["sudo", "-n", "mktemp", "-d", "/opt/loxodonta-576.XXXXXX"],
+                ["sudo", "-n", "mktemp", "-d",
+                 os.path.join(under, "loxodonta-576.XXXXXX")],
                 capture_output=True, encoding="utf-8", timeout=60)
         except (OSError, subprocess.SubprocessError):
             self.skipTest("no sudo here")
