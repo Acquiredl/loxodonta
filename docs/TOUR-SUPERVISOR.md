@@ -136,7 +136,9 @@ Since ADR-0041 the same witness also reads a second record out of the
 writer's reach. `read_events` is the transcript reader's twin in
 shape: from the harness's own `tool_result` events, as a receiver kept
 them, it returns per session the dict `read_witness` returns, so
-`reconcile` and `classify` judge both records by one rule, and
+`classify` judges both records by one rule. At the receiver
+`pair_calls` pairs them, by the call's id where both name it and
+otherwise by `reconcile`'s count by tool (ADR-0046), and
 `watch_receiver` runs that reading over a receiver's folder (`scan
 --receiver`, docs/RECEIVER.md section 7) with three words of its own:
 PENDING inside the settle window, SECOND-RECORD-ABSENT for receipts
@@ -290,9 +292,11 @@ The exit ladder is a `max()`, worst wins: 1–4 the gravest verify exit
 a chain verify could not judge at all counts as 4, ADR-0037),
 5 a baseline event appends cannot explain, or a baseline that cannot be
 read or kept, 6 a *live* completeness
-alarm. Only live alarms raise the exit: an ended deficit is evidence,
-and a siren that never stops sounding trains the operator to ignore
-the band (the dogfood's lesson). The recorder notice never raises it —
+alarm. On the agent's machine only live alarms raise the exit: an ended
+deficit is evidence, and a siren that never stops sounding trains the
+operator to ignore the band (the dogfood's lesson). At the receiver a
+settled deficit, an absent or a gapped second record raises it too,
+until it is acknowledged there (ADR-0046). The recorder notice never raises it —
 drift is the operator's to resolve, deliberately.
 
 Two subtleties. Baseline events **stand**: the baseline keeps the head
