@@ -11103,9 +11103,9 @@ const CLAIM = {
               "sibling chain; kept as quiet evidence",
 };
 
-// The shape half of the strip's redundant encoding. Colour, words and
-// shape all carry the same one condition, so the state still reads for
-// someone who cannot separate the hues — and still reads in a
+// The shape half of the strip's redundant encoding. Colour and shape
+// carry the worst condition the look found and the words name it first,
+// so it still reads for someone who cannot separate the hues — and in a
 // screenshot printed in black and white.
 const MARK = { quiet: "●", damage: "▲", grave: "✕",
                unwatched: "·" };
@@ -11240,30 +11240,54 @@ function renderStrip(report) {
       .filter(Boolean).join("; ") +
       ", named in the completeness watch below"});
   }
-  // The last clause catches an exit nothing above explains.
-  if (broken.length || changes || blind || shut ||
-      (report.exit !== 0 && !found.length)) {
+  if (broken.length) {
+    found.push({colour: "damage", exit: true, state: "HISTORY WAS ALTERED",
+      why: broken.length + " chain(s) fail verification — " +
+      "details in the band below"});
+  }
+  if (changes) {
     found.push({colour: "damage", exit: true,
-      state: broken.length ? "HISTORY WAS ALTERED"
-           : changes ? "CHANGED SINCE LAST LOOK"
-           : blind ? "TRIPWIRE BLIND"
-           : shut ? "FOLDER CANNOT BE LISTED"
-           : "CHANGED SINCE LAST LOOK",
-      why: (broken.length
-      ? broken.length + " chain(s) fail verification — "
-      : "") + (changes
-      ? changes + " change(s) the baseline cannot explain as appends"
-      : blind
-      ? "the baseline could not be read or kept, so nothing was compared"
-      : shut
-      ? shut + " folder(s) the scan cannot list, so what they hold is " +
-        "unknown, never read as empty"
-      : "details in the band below")});
+      state: "CHANGED SINCE LAST LOOK",
+      why: changes + " change(s) the baseline cannot explain as appends"});
+  }
+  if (blind) {
+    found.push({colour: "damage", exit: true, state: "TRIPWIRE BLIND",
+      why: "the baseline could not be read or kept, so nothing was " +
+      "compared"});
+  }
+  if (shut) {
+    found.push({colour: "damage", exit: true,
+      state: "FOLDER CANNOT BE LISTED",
+      why: shut + " folder(s) the scan cannot list, so what they hold is " +
+      "unknown, never read as empty"});
+  }
+  // The last clause: what raised the exit and has no words above, a
+  // chain verify could not judge (4), whose files (2) or transcript (7)
+  // diverged. Beside other words it is named by the chains' verdicts;
+  // an exit with no fact behind it at all still reads here.
+  const unexplained = {};
+  for (const c of chains) {
+    if (!c.superseded && c.exit !== 0 && c.exit !== 3 &&
+        c.verdict !== "BROKEN") {
+      unexplained[c.verdict] = (unexplained[c.verdict] || 0) + 1;
+    }
+  }
+  const verdicts = Object.keys(unexplained);
+  if (verdicts.length || (report.exit !== 0 && !found.length)) {
+    found.push({colour: "damage", exit: true,
+      state: "CHANGED SINCE LAST LOOK",
+      why: (found.length
+      ? verdicts.map(v => unexplained[v] + " chain(s) " + v).join(", ") +
+        " — "
+      : "") + "details in the band below"});
   }
   let colour;
   if (found.length) {
     colour = found[0].colour;
-    state.textContent = found.map(f => f.state).join(" · ");
+    // Two conditions can share their state words (a change, and the
+    // last clause): said once.
+    state.textContent = found.map(f => f.state)
+      .filter((words, i, all) => all.indexOf(words) === i).join(" · ");
     why.textContent = found.map(f => f.why).join(" · ") +
       (found.some(f => f.exit) ? " (scan exit " + report.exit + ")" : "");
   } else {
