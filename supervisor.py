@@ -11258,8 +11258,22 @@ function renderStrip(report) {
   } else {
     colour = "quiet";
     state.textContent = "all quiet";
-    why.textContent = chains.length + " chain(s), every receipt " +
-      "accounted for" +
+    // A finding accepted at the receiver raises nothing, and what it
+    // found is still missing: it is said as accepted, with its counts,
+    // and the strip never reads as complete over it (#613, ADR-0046).
+    const accepted = report.completeness.sessions.filter(s =>
+      s.acknowledged && s.acknowledged.holds);
+    why.textContent = chains.length + " chain(s), " + (accepted.length
+      ? accepted.length + " finding(s) accepted at the receiver, still " +
+        "short as found: " + accepted.map(s =>
+          s.session.slice(0, 8) + " " + s.state + ", " +
+          (s.state === "SECOND-RECORD-ABSENT"
+            ? s.receipts + " received, no harness events"
+            : s.tools + " owed, " + s.receipts + " received" +
+              (s.deficit ? ", " + s.deficit + " missing" : "")) +
+          (s.gap ? ", " + s.gap.count + " event number(s) missing" : ""))
+          .join("; ")
+      : "every receipt accounted for") +
       (quietEvidence ? " — " + quietEvidence + " superseded tear(s) " +
                        "kept as quiet evidence" : "");
   }

@@ -32,7 +32,7 @@ from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
 
 from test_supervisor import (FIXTURE_RECEIPTS, FIXTURE_SESSION,
                              assert_replaced_whole, chain_copy, hold,
-                             read_line_within, receiver_folder,
+                             lay_events, read_line_within, receiver_folder,
                              unreadable_depth)
 
 
@@ -90,6 +90,43 @@ def log_entry(log, action, actor="claude-code", files=()):
     file_args = [arg for f in files for arg in ("--file", str(f))]
     run(LOXODONTA, "log", "--log", str(log), "--actor", actor, "--action",
         action, *file_args, check=True)
+
+
+def strip_drawn(test, page, report):
+    """What the page's verdict strip says over `report`: its colour, its
+    state line and its why. The words are chosen by the page's script,
+    so this runs `renderStrip` itself under a JavaScript runtime, with a
+    stand-in for the document (#612). Skips where no runtime is
+    installed: neither is a dependency of this repo."""
+    runner = shutil.which("node") or shutil.which("bun")
+    if runner is None:
+        test.skipTest("no node or bun on this machine to draw the strip")
+    script = page.split("<script>")[1].split("</script>")[0]
+
+    def declared(start):
+        at = script.index(start)
+        return script[at:script.index("\n}\n", at) + 3]
+
+    folder = temp_folder(test)
+    probe, served = folder / "strip.js", folder / "status.json"
+    served.write_text(json.dumps(report), encoding="utf-8")
+    probe.write_text(
+        "const drawn = {};\n"
+        "const document = {getElementById: id => drawn[id] || (drawn[id] ="
+        " {textContent: '', className: '', hidden: false,"
+        " classList: {toggle() {}}})};\n"
+        + re.search(r"const MARK = \{.*?\};\n", script, re.S).group()
+        + declared("function since(") + declared("function renderStrip(")
+        + "renderStrip(JSON.parse(require('fs').readFileSync("
+          "process.argv[2], 'utf8')));\n"
+          "console.log(JSON.stringify({colour: drawn.strip.className, "
+          "state: drawn.stateline.textContent, "
+          "why: drawn.statewhy.textContent}));\n", encoding="utf-8")
+    result = subprocess.run([runner, str(probe), str(served)],
+                            capture_output=True, encoding="utf-8",
+                            timeout=120)
+    test.assertEqual(result.returncode, 0, result.stderr)
+    return json.loads(result.stdout)
 
 
 class ServerFixture(unittest.TestCase):
@@ -1793,3 +1830,63 @@ class ReceiverServeTest(ServerFixture):
 
         self.assertEqual(self.proc.returncode, 64, err)
         self.assertIn("--receiver reads a receiver's data directory", err)
+
+    def accepted_strip(self, *findings):
+        """Scan the receiver's folder, accept each (session, state) there
+        with `acknowledge --receiver`, then serve it: the strip the page
+        draws once nothing raises (#613)."""
+        scan = run(SUPERVISOR, "scan", "--receiver", str(self.data), "--json",
+                   timeout=180, env=self.env)
+        self.assertEqual(scan.returncode, 6, scan.stderr)
+        for session, state in findings:
+            accepted = run(SUPERVISOR, "acknowledge", "--receiver",
+                           str(self.data), "--session", session, state,
+                           timeout=180, env=self.env)
+            self.assertEqual(accepted.returncode, 0,
+                             accepted.stdout + accepted.stderr)
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 0)
+        rows = {row["session"]: row
+                for row in served["completeness"]["sessions"]}
+        for session, state in findings:
+            self.assertEqual(rows[session]["state"], state)
+            self.assertTrue(rows[session]["acknowledged"]["holds"])
+        return strip_drawn(self, page, served)
+
+    def test_an_accepted_shortfall_says_it_was_accepted_with_its_counts(self):
+        # #613: the receipts are still missing once someone accepts the
+        # shortfall; the strip says so, with the counts, never "every
+        # receipt accounted for". The exit stays 0 (ADR-0046 ruling 2).
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+
+        strip = self.accepted_strip((FIXTURE_SESSION, "ENDED-DEFICIT"))
+
+        self.assertEqual((strip["colour"], strip["state"]),
+                         ("quiet", "all quiet"))
+        self.assertEqual(strip["why"], (
+            "1 chain(s), 1 finding(s) accepted at the receiver, still short "
+            "as found: 3253bacd ENDED-DEFICIT, 2 owed, 1 received, "
+            "1 missing"))
+
+    def test_an_accepted_absent_or_gapped_second_record_never_reads_complete(self):
+        # #613 on the other two findings the receiver accepts: events that
+        # never arrived, and events lost on the way.
+        lay_events(self.data, drop=(29, 30))
+        chain_copy(self.data, "cut-session-1111")
+
+        strip = self.accepted_strip(("cut-session-1111", "SECOND-RECORD-ABSENT"),
+                                    (FIXTURE_SESSION, "SECOND-RECORD-GAP"))
+
+        self.assertEqual((strip["colour"], strip["state"]),
+                         ("quiet", "all quiet"))
+        self.assertNotIn("accounted for", strip["why"])
+        self.assertIn("2 finding(s) accepted at the receiver", strip["why"])
+        self.assertIn("3253bacd SECOND-RECORD-GAP, 2 owed, 4 received, "
+                      "2 event number(s) missing", strip["why"])
+        self.assertIn("cut-sess SECOND-RECORD-ABSENT, 4 received, no harness "
+                      "events", strip["why"])
