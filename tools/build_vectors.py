@@ -125,7 +125,8 @@ SINCE = {
         package-tool-nan package-anchored package-anchored-unchecked""",
     "0.1.5": "files-unsorted",
     "0.1.7": """tail-forked tail-forked-head entry-hash-not-hex
-        entry-hash-not-hex-head""",
+        entry-hash-not-hex-head tail-no-n tail-no-n-head tail-n-float
+        tail-n-float-head""",
 }
 SINCE = {name: revision for revision, names in SINCE.items()
          for name in names.split()}
@@ -468,6 +469,22 @@ def build(workdir):
     row("entry-hash-not-hex-head", "head", "No head: the final entry_hash is "
         "not 64 lowercase hex (SPEC section 6, v0.1.7).", 1, "",
         log="entry-hash-not-hex")
+
+    # n is an integer equal to the line number, never a float or absent:
+    # 3.0 == 3 in Python, so a reader comparing values alone prints a head.
+    chain("tail-no-n", base[:3] + [stored(sealed(
+        {k: v for k, v in e[3].items() if k != "n"}))])
+    row("tail-no-n", "verify", "The final entry holds no n, with a hash "
+        "that holds for it.", 1, "BROKEN at entry 3: n is not an integer")
+    row("tail-no-n-head", "head", "No head: the final line holds no n "
+        "(SPEC section 6, v0.1.7).", 1, "", log="tail-no-n")
+    chain("tail-n-float", base[:3] + [stored(sealed({**e[3], "n": 3.0}))])
+    row("tail-n-float", "verify", "The final entry's n is 3.0, a float, "
+        "with a hash that holds for it.", 1,
+        "BROKEN at entry 3: n is not an integer")
+    row("tail-n-float-head", "head", "No head: the final line's n is a "
+        "float, not an integer, though it equals 3 (SPEC section 6, "
+        "v0.1.7).", 1, "", log="tail-n-float")
 
     # The last-wins reading of this line is entry 3 exactly, hash and
     # all; a first-wins reader sees an action that says the tests failed.

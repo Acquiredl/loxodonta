@@ -157,9 +157,13 @@ def tail_entry(lines):
         last = json.loads(lines[-1])
     except (ValueError, RecursionError):
         return None
-    if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
+    if not isinstance(last, dict) or "entry_hash" not in last:
         return None
-    if last["n"] != len(lines) - 1:
+    # An integer, never a boolean or a float, since Python takes 2.0 and
+    # True as equal to 2 and 1, and the walk calls such an n BROKEN; no
+    # n at all is refused alike (#587).
+    n = last.get("n")
+    if type(n) is not int or n != len(lines) - 1:
         return None
     return last
 
@@ -1833,7 +1837,8 @@ def cmd_head(args):
         return EX_NOINPUT
     last = tail_entry(lines)
     if last is None:
-        # `verify`, not `loxodonta verify`: both files have it.
+        # `verify`, not `loxodonta verify`: the recorder and verifier.py
+        # both have it.
         print(f"error: {visible(args.log)} has a damaged tail — run "
               "`verify` on it for the verdict (a damaged tail has no head "
               "to record)", file=sys.stderr)

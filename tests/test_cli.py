@@ -780,6 +780,42 @@ class HeadTest(ReceiptsCliTest):
                 self.assertNotIn("VALID", result.stderr)
                 self.assertEqual(verify.returncode, 1, verify.stdout)
 
+    def test_a_tail_whose_n_is_not_its_integer_line_number_has_no_head(self):
+        # #587 (review of #634): `head` prints only when the final line's n
+        # is an integer, never a boolean or a float, equal to its line
+        # number. 2.0 == 2 and True == 1 in Python, so such a tail printed
+        # a head on a chain the walk calls BROKEN; no n was refused, and
+        # stays refused. Each line is rehashed, so only n is wrong.
+        run(LOXODONTA, "init", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
+            cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 2",
+            cwd=self.workdir)
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        # (what the tail is, the line count, the change to the last line)
+        for name, count, change in (
+                ("no n", 3, lambda e: e.pop("n")),
+                ("n 2.0", 3, lambda e: e.update(n=2.0)),
+                ("n true on line 1", 2, lambda e: e.update(n=True))):
+            with self.subTest(tail=name):
+                last = json.loads(lines[count - 1])
+                change(last)
+                last.pop("entry_hash")
+                last["entry_hash"] = spec_hash(last)
+                chain = lines[:count - 1] + [json.dumps(last)]
+                self.log_path.write_text("\n".join(chain) + "\n",
+                                         encoding="utf-8")
+
+                for tool in (LOXODONTA, VERIFIER):
+                    head = run(tool, "head", cwd=self.workdir)
+                    verify = run(tool, "verify", cwd=self.workdir)
+
+                    self.assertEqual(head.returncode, 1,
+                                     head.stdout + head.stderr)
+                    self.assertEqual(head.stdout, "")
+                    self.assertIn("has a damaged tail", head.stderr)
+                    self.assertEqual(verify.returncode, 1, verify.stdout)
+
     def test_verify_expect_head_with_true_head_is_valid(self):
         run(LOXODONTA, "init", cwd=self.workdir)
         run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)

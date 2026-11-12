@@ -226,6 +226,54 @@
       "last_line": ""
     },
     {
+      "name": "tail-no-n",
+      "about": "The final entry holds no n, with a hash that holds for it.",
+      "args": [
+        "verify",
+        "--log",
+        "tail-no-n.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": "BROKEN at entry 3: n is not an integer"
+    },
+    {
+      "name": "tail-no-n-head",
+      "about": "No head: the final line holds no n (SPEC section 6, v0.1.7).",
+      "args": [
+        "head",
+        "--log",
+        "tail-no-n.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": ""
+    },
+    {
+      "name": "tail-n-float",
+      "about": "The final entry's n is 3.0, a float, with a hash that holds for it.",
+      "args": [
+        "verify",
+        "--log",
+        "tail-n-float.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": "BROKEN at entry 3: n is not an integer"
+    },
+    {
+      "name": "tail-n-float-head",
+      "about": "No head: the final line's n is a float, not an integer, though it equals 3 (SPEC section 6, v0.1.7).",
+      "args": [
+        "head",
+        "--log",
+        "tail-n-float.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": ""
+    },
+    {
       "name": "key-given-twice",
       "about": "Entry 3 names action twice; its hash holds for the last of the two.",
       "args": [

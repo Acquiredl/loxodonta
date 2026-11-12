@@ -10,7 +10,7 @@ These are small receipt chains and packages, each with the verdict a verifier mu
 - `about`: what the chain holds and why the verdict is what it is.
 - `args`: the command line, run from inside this folder, so every path in it is relative to here. A chain row names its chain by `--log`; a sidecar row is a chain row with `--anchors` or `--stamps`, and its sidecar sits beside the chain under the chain's name; a package row's verb is `verify-package`, followed by the package, a folder or a zip here, and it has no `--log`.
 - `exit`: the exit code expected.
-- `since`: the amendment of the chain format, from SPEC's version list, that was the latest when the row was written. A verifier written from the spec as amended through that revision, or a later one, can be held to the row.
+- `since`: the amendment of the chain format, from SPEC's version list, that was the latest when the row was written. It is a date, not a rule's origin: a row can pin a reading the spec stated after that revision, as `tail-torn-head` and `files-unsorted` do, so a verifier written from the spec of that revision may miss it.
 - `last_line` or `last_line_prefix`: the last line of stdout expected, exactly or as its start. An empty `last_line` means nothing is printed on stdout.
 - `canonical` (on some rows): `{"entry": N, "text": ...}`, entry N's canonical form (SPEC section 4) written out in full. Its SHA256 is that entry's `entry_hash`, so the bytes to reproduce are stated, not only their hash.
 - `log_absent` (on one row): `true` when the file `--log` names is deliberately not in this folder, because a missing log is the case the row tests.
@@ -18,7 +18,7 @@ These are small receipt chains and packages, each with the verdict a verifier mu
 
 Rows that share a chain name it by `--log`: `valid-chain.jsonl` is run as `verify`, `verify --files`, `head` and with `--expect-head`. `notes.txt` is the file `valid-chain.jsonl` references, and `transcript.txt` is the transcript its commitments cover.
 
-`tail-forked.jsonl` ends in a second entry claiming `n` 2, as two writers that read one tail leave it, and `entry-hash-not-hex.jsonl` in an entry whose `entry_hash` is in uppercase hex: each is `BROKEN`, and neither has a head (SPEC section 6, v0.1.7).
+`tail-forked.jsonl` ends in a second entry claiming `n` 2, as two writers that read one tail leave it, `entry-hash-not-hex.jsonl` in an entry whose `entry_hash` is in uppercase hex, `tail-no-n.jsonl` in an entry with no `n`, and `tail-n-float.jsonl` in one whose `n` is `3.0`: each is `BROKEN`, and none has a head (SPEC section 6, v0.1.7).
 
 `files-unsorted.jsonl` holds an entry whose `files` lists `b.txt` before `a.txt`, hashed over the array as stored, which no recorder writes since it sorts at intake: it is `VALID`, because canonical form keeps an array's order (SPEC section 4) and a verifier neither sorts `files` nor refuses it unsorted.
 
