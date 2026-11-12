@@ -7114,6 +7114,24 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
 
+    def test_a_copy_carrying_the_cut_note_is_never_before_memory(self):
+        # #486 item 11: a run with the telemetry cut and its timestamps
+        # pinned to 1970 dates its chain before the oldest events file.
+        # The note exists only after the pin did, so the copy is read as
+        # any session after the edge: absent, and raising.
+        chain_copy(self.data, "cut-epoch-session-0001", epoch=0, notes=(
+            "second-record-cut: reason=telemetry-off",))
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        report = self.report(expect=6)
+
+        row = self.rows(report)["cut-epoch-session-0001"]
+        self.assertEqual(row["state"], "SECOND-RECORD-ABSENT")
+        self.assertTrue(row["raises"])
+        self.assertEqual(row["second_record_cut"],
+                         "second-record-cut: reason=telemetry-off")
+        self.assertNotIn("before_memory", report["completeness"])
+
     def test_last_heard_is_in_the_report_per_address_and_per_session(self):
         chain_copy(self.data, FIXTURE_SESSION)
 

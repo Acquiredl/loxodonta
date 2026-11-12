@@ -4737,7 +4737,8 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
     predates the day of the oldest events file held, readable or not,
     is from before the second record's memory: counted in one block,
     never a row, as ADR-0029 counts sessions older than the calibration
-    memory (#559 ruling 3). The hook's note
+    memory (#559 ruling 3), unless the copy carries the hook's note that
+    the second record was cut (#486 item 11). The hook's note
     that the second record was cut is quoted on the row when the copy
     carries one. A row in one of RECEIVER_FINDINGS carries `raises`, and
     raises the exit, unless `acknowledged`, the memory's records, accepts
@@ -4846,8 +4847,11 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
         if family.get("cut"):
             row["second_record_cut"] = family["cut"]
         copy_newest = family.get("newest_ts")
+        # A copy carrying the cut note is never before memory: the note
+        # exists only since the pin did, and the dates beside it are the
+        # writer's, which SOURCE_DATE_EPOCH sets (#486 item 11).
         if seen is None and oldest and isinstance(copy_newest, str) \
-                and copy_newest[:10] < oldest:
+                and copy_newest[:10] < oldest and not family.get("cut"):
             # Not WATCH_WORDS' entry: that one offers `calibrate
             # --since`, which seeds a coverage memory this reading does
             # not keep.
