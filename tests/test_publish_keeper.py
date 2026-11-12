@@ -977,9 +977,11 @@ class HeadlessKeeperTest(ReceiverFixture):
 
         # A publish cadence in force, so the clock turns, and a day's
         # cadence, so no head in this fresh root is ripe: what reaches
-        # the calendar reaches it on the anchor keeper's upgrade alone.
+        # the calendar reaches it on the anchor keeper's upgrade alone,
+        # which asks a calendar `serve --calendar` names (#415).
         self.serve("--publish-every", "1d", "--publish-url",
-                   self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
+                   self.receiver.url, "--calendar", calendar.url,
+                   SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
                    SUPERVISOR_SCAN_TTL_SECONDS="0")
         self.wait_for(lambda: bool(calendar.polled),
                       missing="the calendar was never asked")
