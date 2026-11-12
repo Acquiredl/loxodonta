@@ -403,7 +403,7 @@ class SealedPackageTest(AnchoredStoreCase):
 
         upgrade = run(LOXODONTA, "anchor", "--upgrade", "--manifest",
                       str(folder / "manifest.json"), "--calendar",
-                      self.server.url, env=self.env)
+                      self.server.url, "--calendar", lags.url, env=self.env)
 
         self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
         self.assertEqual(lags.polled, [], "the lagging calendar was re-asked")
