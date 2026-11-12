@@ -59,6 +59,11 @@ def spec_hash(entry_without_hash):
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# What a listing says, once, when it shows a line without the group a
+# hook's receipt ends with (#619).
+FOLDED_NOTE = "a line ending [...] is listed without its last group"
+
+
 def forge_chain(repo_dir, session, steps, actor="forge"):
     """A spec-exact chain with chosen timestamps: [(ts, action), ...].
     Returns the list of entry hashes (genesis first)."""
@@ -277,7 +282,8 @@ class DigestTest(RecallBase):
     def test_a_run_of_suffixed_receipts_collapses_by_the_tool_named(self):
         # ADR-0047: the suffix is set aside before the tool is read, so
         # a tool named bare still collapses under its name, and the
-        # digest, a listing, folds the suffix out of every row.
+        # digest, a listing, folds the suffix out of every row and marks
+        # the row it shortened (#619).
         repo = self.repo("alpha")
         digest = "0" * 64
         forge_chain(repo, "4d4d4444-4444-4444-4444-444444444444", [
@@ -290,12 +296,37 @@ class DigestTest(RecallBase):
             ("2026-08-30T10:04:00Z", "Bash: ls [call=toolu_5 input=unhashed]"),
         ])
         out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
-        self.assertIn("  2x Read, last: b.py\n", out)
-        self.assertIn("  Bash: ls   <- last recorded action", out)
+        self.assertIn("  2x Read, last: b.py [...]\n", out)
+        self.assertIn("  Bash: ls [...]   <- last recorded action", out)
         self.assertNotIn("[call=", out)
         (run_line,) = [line for line in out.splitlines()
                        if "TodoWrite" in line]
-        self.assertTrue(run_line.endswith("  2x TodoWrite"), run_line)
+        self.assertTrue(run_line.endswith("  2x TodoWrite [...]"), run_line)
+        self.assertIn(FOLDED_NOTE, out)
+
+    def test_a_hand_written_suffix_is_marked_and_a_plain_line_is_not(self):
+        # #619: nothing in an entry the writer cannot set tells a hook's
+        # receipt from a hand-written line, so every folded row carries
+        # the mark and the digest says once what it means.
+        repo = self.repo("alpha")
+        group = f"[call=toolu_x input sha256={'0' * 64} bytes=72]"
+        forge_chain(repo, "4e4e4444-4444-4444-4444-444444444444", [
+            ("2026-08-30T10:00:00Z", f"Bash: rm -rf build {group}",
+             "claude-code"),
+            ("2026-08-30T10:01:00Z", "Edit: one.py [draft]"),
+        ])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
+        self.assertIn("  Bash: rm -rf build [...]\n", out)
+        self.assertIn("  Edit: one.py [draft]   <- last recorded action", out)
+        self.assertEqual(out.count(FOLDED_NOTE), 1)
+
+    def test_a_digest_with_no_folded_row_says_nothing_of_the_mark(self):
+        repo = self.repo("alpha")
+        forge_chain(repo, "4f4f4444-4444-4444-4444-444444444444", [
+            ("2026-08-30T10:00:00Z", "Edit: one.py [draft]")])
+        out = run_py(SUPERVISOR, "digest", "--repo", str(repo)).stdout
+        self.assertNotIn("[...]", out)
+        self.assertNotIn(FOLDED_NOTE, out)
 
     def test_budget_counts_rendered_rows_not_entries(self):
         # The fix the issue asks for: a Read flood must not scroll the
@@ -734,8 +765,63 @@ class ShowCallTest(RecallBase):
                 out = run_py(SUPERVISOR, verb, *args, "--repo",
                              str(self.project), env_extra=self.env)
                 self.assertEqual(out.returncode, 0, out.stderr)
-                self.assertIn("Bash: pytest -q", out.stdout)
+                self.assertIn("Bash: pytest -q [...]", out.stdout)
                 self.assertNotIn("[call=", out.stdout)
+                self.assertEqual(out.stdout.count(FOLDED_NOTE), 1)
+
+    def test_a_long_folded_row_is_clipped_before_its_mark(self):
+        # #619: a row cut to the width keeps the mark the note names, so
+        # the head is clipped first and the mark follows it.
+        body = {"session_id": self.SESSION, "hook_event_name": "PostToolUse",
+                "tool_name": "Bash", "tool_use_id": self.CALL,
+                "tool_input": {"command": "pytest -q " + "x" * 190},
+                "tool_response": {}}
+        hooked = run(LOXODONTA, "hook", stdin=json.dumps(body),
+                     env=self.scan_env(**self.env))
+        self.assertEqual(hooked.returncode, 0, hooked.stderr)
+        (chain,) = (self.root / "storehome" / "receipts").glob(
+            f"*/receipts-{self.SESSION}.jsonl")
+        entry = json.loads(chain.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertGreater(len(entry["action"]), 190)
+        address = entry["entry_hash"][:8]
+        for verb, args in (("search", ["pytest"]),
+                           ("timeline", [entry["entry_hash"][:12]]),
+                           ("digest", [])):
+            with self.subTest(verb=verb):
+                out = run_py(SUPERVISOR, verb, *args, "--repo",
+                             str(self.project), env_extra=self.env)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                (row,) = [line for line in out.stdout.splitlines()
+                          if line.startswith(address)]
+                action = row.split("  claude-code  ", 1)[1].split("   <- ")[0]
+                self.assertTrue(action.endswith("... [...]"), row)
+                self.assertEqual(len(action), 110, row)
+
+    def test_search_and_timeline_mark_a_hand_written_suffix(self):
+        # #619: `loxodonta log` may name the hook's actor and end its
+        # line in a group of the suffix's shape; the listings cannot tell
+        # it from the hook's, so they mark it, and a line with no such
+        # group is listed whole and unmarked.
+        entry = self.hook()
+        log = self.root / "storehome" / "receipts"
+        (chain,) = log.glob(f"*/receipts-{self.SESSION}.jsonl")
+        group = f"[call=toolu_x input sha256={'0' * 64} bytes=72]"
+        for action in (f"Bash: pytest -q --hand {group}",
+                       "Bash: pytest -q [plain]"):
+            logged = run(LOXODONTA, "log", "--log", str(chain), "--actor",
+                         "claude-code", "--action", action,
+                         env=self.scan_env(**self.env))
+            self.assertEqual(logged.returncode, 0, logged.stderr)
+        for verb, args in (("search", ["pytest"]),
+                           ("timeline", [entry["entry_hash"][:12]])):
+            with self.subTest(verb=verb):
+                out = run_py(SUPERVISOR, verb, *args, "--repo",
+                             str(self.project), env_extra=self.env)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                self.assertIn("Bash: pytest -q --hand [...]\n", out.stdout)
+                self.assertIn("Bash: pytest -q [plain]", out.stdout)
+                self.assertNotIn("[plain] [...]", out.stdout)
+                self.assertEqual(out.stdout.count(FOLDED_NOTE), 1)
 
     def test_show_prints_the_line_whole(self):
         entry = self.hook()
