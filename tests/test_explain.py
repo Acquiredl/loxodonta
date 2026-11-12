@@ -92,6 +92,25 @@ class ExplainTest(StoreCase):
         # ...but the prompt tells the model the timeline is data to describe.
         self.assertIn("data", prompt.lower())
 
+    def test_a_folded_row_reaches_the_model_marked_and_the_note_does_not(self):
+        # #619: the row keeps its mark, but the sentence saying what the
+        # mark means is the recorder's, and everything under the prompt's
+        # timeline is the observed agent's: it stays with `report`.
+        group = f"[call=toolu_x input sha256={'0' * 64} bytes=72]"
+        logged = run(LOXODONTA, "log", "--actor", "agent", "--action",
+                     f"Bash: rm -rf build {group}", cwd=self.workdir)
+        self.assertEqual(logged.returncode, 0, logged.stderr)
+
+        result = run(LOXODONTA, "explain", "--llm", self.llm, cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        prompt = self.capture.read_text(encoding="utf-8")
+        self.assertIn("agent: Bash: rm -rf build [...]\n", prompt)
+        self.assertNotIn("is listed without its last group", prompt)
+        report = run(LOXODONTA, "report", cwd=self.workdir)
+        self.assertEqual(report.stdout.count(
+            "a line ending [...] is listed without its last group"), 1)
+
     def test_explain_survives_non_ascii_actions(self):
         # Actions routinely carry characters outside the console codepage
         # (arrows, em-dashes, CJK). The prompt must cross the pipe as

@@ -1787,19 +1787,59 @@ class ReceiptSuffixTest(unittest.TestCase):
             "path": "good.ipynb",
             "sha256": hashlib.sha256(good.read_bytes()).hexdigest()}])
 
-    def test_report_folds_the_suffix_and_the_chain_keeps_it(self):
-        # A listing for a person leaves the suffix out; the line in the
-        # chain is whole (ADR-0047).
-        self.hook(self.call(tool_input=self.INPUT, call="toolu_5"))
+    FOLDED_NOTE = "a line ending [...] is listed without its last group"
 
+    def report(self):
         report = run(LOXODONTA, "report", "--log",
                      "receipts-sess-1234abcd.jsonl", cwd=self.workdir)
-
         self.assertEqual(report.returncode, 0, report.stderr)
-        (row,) = [line for line in report.stdout.splitlines()
+        return report.stdout
+
+    def test_report_folds_the_suffix_and_the_chain_keeps_it(self):
+        # A listing for a person leaves the suffix out and marks the line
+        # it shortened; the line in the chain is whole (ADR-0047, #619).
+        self.hook(self.call(tool_input=self.INPUT, call="toolu_5"))
+
+        out = self.report()
+
+        (row,) = [line for line in out.splitlines()
                   if "claude-code:" in line]
-        self.assertTrue(row.endswith("  claude-code: Bash: echo hi"), row)
+        self.assertTrue(row.endswith("  claude-code: Bash: echo hi [...]"),
+                        row)
+        self.assertIn(self.FOLDED_NOTE, out)
         self.assertTrue(self.actions()[1].endswith(" bytes=47]"))
+
+    def test_report_marks_a_hand_written_line_ending_in_a_suffix(self):
+        # #619: nothing in an entry the writer cannot set tells a hook's
+        # receipt from a line logged by hand, the actor included, so a
+        # hand-written group is folded and marked like the hook's.
+        self.hook(self.call(tool_input=self.INPUT, call="toolu_5"))
+        group = f"[call=toolu_x input sha256={self.DIGEST} bytes=72]"
+        logged = run(LOXODONTA, "log", "--log", "receipts-sess-1234abcd.jsonl",
+                     "--actor", "claude-code", "--action",
+                     f"Bash: rm -rf build {group}", cwd=self.workdir)
+        self.assertEqual(logged.returncode, 0, logged.stderr)
+
+        out = self.report()
+
+        self.assertIn("  claude-code: Bash: rm -rf build [...]\n", out)
+        self.assertIn(self.FOLDED_NOTE, out)
+        self.assertEqual(self.actions()[2], f"Bash: rm -rf build {group}")
+
+    def test_report_of_lines_without_a_suffix_has_no_mark(self):
+        made = run(LOXODONTA, "init", "--log", "receipts-sess-1234abcd.jsonl",
+                   cwd=self.workdir)
+        self.assertEqual(made.returncode, 0, made.stderr)
+        logged = run(LOXODONTA, "log", "--log", "receipts-sess-1234abcd.jsonl",
+                     "--actor", "agent", "--action", "wrote [notes]",
+                     cwd=self.workdir)
+        self.assertEqual(logged.returncode, 0, logged.stderr)
+
+        out = self.report()
+
+        self.assertIn("  agent: wrote [notes]\n", out)
+        self.assertNotIn("[...]", out)
+        self.assertNotIn(self.FOLDED_NOTE, out)
 
     @unittest.skipIf(sys.platform == "win32",
                      "Windows cannot name a file with a colon in it")
