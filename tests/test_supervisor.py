@@ -5723,6 +5723,21 @@ class UsageExitTest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
 
 
+def run_into_read_only(tool, sink, *args, env):
+    """`tool` run with its stdout `sink`, a file opened for reading only,
+    so a write the tool makes fails with EBADF: the tool's own failure,
+    and no reader gone, since no pipe is there to leave. A lever for the
+    crash exit that no fix to the tools' input checks takes away (#449).
+    Returns (exit, stderr as text)."""
+    sink.write_bytes(b"")
+    with open(sink, "rb") as read_only:
+        done = subprocess.run([sys.executable, str(tool), *args],
+                              stdout=read_only, stderr=subprocess.PIPE,
+                              env={**env, "PYTHONIOENCODING": "utf-8"},
+                              timeout=120)
+    return done.returncode, done.stderr.decode("utf-8", "replace")
+
+
 class CrashExitTest(unittest.TestCase):
     """The supervisor ends through the recorder's `run_main` (#449,
     ADR-0037): a crash is 70 with its traceback, never 1, which
@@ -5732,12 +5747,13 @@ class CrashExitTest(unittest.TestCase):
     def setUp(self):
         self.home = temp_folder(self)
 
-    def test_a_crash_exits_70_with_its_traceback(self):
+    def test_a_port_past_65535_exits_70_with_its_traceback(self):
         # No honest input makes the supervisor crash on purpose, and the
         # suite adds no hook to make it (ADR-0037). A port past 65535
-        # reaches the socket unchecked and raises OverflowError there:
-        # the lever until a usage rule refuses it first, when this test
-        # wants another.
+        # reaches the socket unchecked and raises OverflowError there,
+        # an exception of the verb's own and not a failed write. When a
+        # usage rule refuses such a port, this test goes; the read-only
+        # stdout above still holds the 70.
         result = run_supervisor(self.home, "serve", "--root",
                                 str(temp_folder(self)), "--port", "70000")
 
@@ -5745,9 +5761,10 @@ class CrashExitTest(unittest.TestCase):
         self.assertIn("Traceback (most recent call last)", result.stderr)
         self.assertIn("OverflowError", result.stderr)
 
-    def test_a_reader_that_hangs_up_gets_a_quiet_141(self):
-        # More hits than a pipe's buffer holds, so the search is still
-        # printing when the reader is gone, as under `| head`.
+    def many_hits(self):
+        """A repo whose chain holds more `search step` hits than a pipe's
+        buffer, or stdout's own, holds: the search is still printing
+        when its first write fails."""
         repo = temp_folder(self)
         log = repo / "receipts" / "receipts-hangup.jsonl"
         log.parent.mkdir()
@@ -5757,6 +5774,20 @@ class CrashExitTest(unittest.TestCase):
                         "action": f"Bash: step {n} " + "x" * 80,
                         "entry_hash": f"{n:064x}"}) + "\n"
             for n in range(1, 1500)), encoding="utf-8")
+        return repo
+
+    def test_a_failed_write_exits_70_with_its_traceback(self):
+        code, stderr = run_into_read_only(
+            SUPERVISOR, temp_folder(self) / "stdout", "search", "step",
+            "--limit", "5000", "--repo", str(self.many_hits()),
+            env=isolated_env(self.home))
+
+        self.assertEqual(code, 70, stderr)
+        self.assertIn("Traceback (most recent call last)", stderr)
+
+    def test_a_reader_that_hangs_up_gets_a_quiet_141(self):
+        # As under `| head`: the reader leaves while the search prints.
+        repo = self.many_hits()
         process = subprocess.Popen(
             [sys.executable, str(SUPERVISOR), "search", "step", "--limit",
              "5000", "--repo", str(repo)],

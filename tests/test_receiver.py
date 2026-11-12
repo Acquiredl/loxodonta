@@ -1340,7 +1340,9 @@ class ExitTest(ReceiverFixture):
         # suite adds no hook to make it (ADR-0037). A port past 65535
         # reaches the socket unchecked and raises OverflowError there:
         # the lever until a usage rule refuses it first, when this test
-        # wants another.
+        # wants another. A stdout opened read only is not one: serve's
+        # unwritten lines fail again at the interpreter's last flush,
+        # which turns the 70 into Python's 120.
         result = run(RECEIVER, "serve", "--data", str(self.data),
                      "--bind", "127.0.0.1", "--port", "70000", timeout=60)
 
