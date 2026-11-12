@@ -95,6 +95,47 @@ CALENDAR = "https://calendar.example/"
 # placeholder token, and the refused one a rejection with no token.
 SIDECAR_TS = "2026-09-23T12:05:00Z"
 
+# Each row's `since`: the amendment of the chain format, from SPEC's
+# version list, that was the latest when the row was written, so a
+# verifier written from the spec at that amendment or later can be held to
+# it. A row missing here stops the build: a new row names its revision.
+SINCE = {
+    "0.1.3": """genesis-only genesis-only-head valid-chain valid-chain-files
+        valid-chain-head expect-head-match expect-head-mismatch entry-edited
+        entry-deleted entries-swapped tail-truncated tail-truncated-expect-head
+        tail-torn tail-torn-head key-given-twice wrong-type-files wrong-type-n
+        non-ascii non-ascii-raw non-ascii-raw-head escapes
+        escapes-other-spelling escapes-hashed-wrong lone-surrogate-text
+        lone-surrogate-json transcript-commitment
+        transcript-commitment-transcript transcript-commitment-shrank
+        unsupported-version unsupported-version-expect-head
+        unsupported-version-new-fields unsupported-version-edited log-missing
+        log-empty log-empty-head""",
+    "0.1.4": """anchor-pending anchor-complete anchor-complete-checked
+        anchor-mismatch anchor-invalid-proof anchor-unreadable-line
+        anchor-attempt-only anchor-kindless anchor-kind-null
+        anchor-unknown-kind anchor-misplaced-chain anchor-key-twice anchor-nan
+        anchor-number-too-large anchor-trailing-bytes stamp-kindless
+        stamp-rejected stamp-trailing-bytes stamp-attempt-only
+        stamp-unknown-kind package-unsealed package-artifact-altered
+        package-named-twice package-seal-missing package-unknown-format
+        package-name-drive package-name-backslash package-name-trailing-dot
+        package-name-device package-name-refused-character package-name-short
+        package-name-case package-names-one-file package-entries-boolean
+        package-tool-nan package-anchored package-anchored-unchecked""",
+    "0.1.5": "files-unsorted",
+    "0.1.7": """tail-forked tail-forked-head entry-hash-not-hex
+        entry-hash-not-hex-head""",
+}
+SINCE = {name: revision for revision, names in SINCE.items()
+         for name in names.split()}
+
+
+def since(name):
+    if name not in SINCE:
+        sys.exit(f"error: the row {name} names no SPEC revision (SINCE)")
+    return SINCE[name]
+
 
 def der(tag, content):
     """One DER element with a short-form length, all these need."""
@@ -336,7 +377,7 @@ def build(workdir):
             log=None, **extra):
         entry = {"name": name, "about": about,
                  "args": [verb, *more, "--log", (log or name) + ".jsonl"],
-                 "exit": exit}
+                 "exit": exit, "since": since(name)}
         if prefix is None:
             entry["last_line"] = line
         else:
@@ -406,6 +447,27 @@ def build(workdir):
         "0..2 intact)")
     row("tail-torn-head", "head", "A torn tail has no head: nothing on "
         "stdout, the reason on stderr.", 1, "", log="tail-torn")
+
+    # A second writer that read the same tail: a well-formed entry whose
+    # n is not its line number, the forked tail of SPEC section 8.2.
+    chain("tail-forked", base[:3] + [stored(sealed(
+        {**e[2], "action": "a second writer's entry 2", "prev":
+         e[1]["entry_hash"]}))])
+    row("tail-forked", "verify", "Line 3 holds an entry claiming n 2 after "
+        "entry 2, as two writers that read one tail leave it.", 1,
+        "BROKEN at entry 3: prev does not match predecessor's entry_hash")
+    row("tail-forked-head", "head", "A forked tail has no head: the final "
+        "line's n is not its line number (SPEC section 6, v0.1.7).", 1, "",
+        log="tail-forked")
+
+    chain("entry-hash-not-hex", base[:3] + [stored(
+        {**e[3], "entry_hash": e[3]["entry_hash"].upper()})])
+    row("entry-hash-not-hex", "verify", "The final entry's entry_hash "
+        "written in uppercase hex, which no canonical form hashes to.", 1,
+        "BROKEN at entry 3: entry_hash does not match canonical form")
+    row("entry-hash-not-hex-head", "head", "No head: the final entry_hash is "
+        "not 64 lowercase hex (SPEC section 6, v0.1.7).", 1, "",
+        log="entry-hash-not-hex")
 
     # The last-wins reading of this line is entry 3 exactly, hash and
     # all; a first-wins reader sees an action that says the tests failed.
@@ -825,7 +887,7 @@ def build(workdir):
     def package_row(name, about, exit, line, target=None, more=()):
         rows.append({"name": name, "about": about,
                      "args": ["verify-package", target or name, *more],
-                     "exit": exit, "last_line": line})
+                     "exit": exit, "last_line": line, "since": since(name)})
 
     unsealed = package_files(base)
     package("package-unsealed", unsealed)

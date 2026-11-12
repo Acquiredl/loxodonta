@@ -7,11 +7,12 @@ frozen: its bytes are pinned below, and a change to it is a new
 clean-room round, never an edit (cleanroom/README.md).
 
 Each chain row of tests/vectors/vectors.json (the `verify` and `head`
-rows that judge no sidecar) runs against it, judged by the contract
-tests/vectors/README.md gives another implementation: the exit code,
-the verdict word that starts the last line, and for `head` the whole
-line. A chain vector added later runs here too, so a spec change the
-clean room's reading does not survive fails here first.
+rows that judge no sidecar) written against the spec it was built from
+runs against it, judged by the contract tests/vectors/README.md gives
+another implementation: the exit code, the verdict word that starts the
+last line, and for `head` the whole line. A chain vector added later
+under that revision runs here too, so a reading of that spec the clean
+room does not survive fails here first.
 """
 
 import hashlib
@@ -33,12 +34,23 @@ CLEANROOM = REPO_ROOT / "cleanroom" / "verify.py"
 # keeps cleanroom/ as committed, so this holds on every system.
 FROZEN_SHA256 = "7b49e72b66b914f076172aa96f998d14db980d57f64c81fd0c57fe795c7901cc"
 
+# The clean room is judged against the spec it was written from: SPEC as
+# amended through 0.1.5 on 2026-10-08. A row whose `since` is a later
+# revision states a rule that spec did not, and runs on loxodonta.py and
+# verifier.py alone (tests/test_vectors.py) (#587).
+FROZEN_AT = (0, 1, 5)
+
+
+def revision(since):
+    return tuple(int(part) for part in since.split("."))
+
 
 def chain_rows():
     rows = json.loads((VECTORS / "vectors.json").read_text(encoding="utf-8"))["vectors"]
     return [row for row in rows
             if row["args"][0] in ("verify", "head")
-            and "--anchors" not in row["args"] and "--stamps" not in row["args"]]
+            and "--anchors" not in row["args"] and "--stamps" not in row["args"]
+            and revision(row["since"]) <= FROZEN_AT]
 
 
 def last_line(stdout):

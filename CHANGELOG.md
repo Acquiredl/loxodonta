@@ -15,6 +15,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/CLAIMS.md` names a limit ADR-0047's measured run found: where a `PreToolUse` hook rewrites a call's input, the receipt holds the input as the model sent it, not what ran.
 - `docs/CLAIMS.md` names two more limits: a listing drops any group shaped like a receipt's suffix, hand-written or not, and pairing by call id does not compare the receipt's tool with the call's.
 - `docs/CLAIMS.md` says the holder of the receiver's URL can add receipts as well as events: a hand-written receipt carrying a missing call's id pays that call at the receiver.
+- `docs/SPEC.md` v0.1.7 states `head`'s rule: a final line whose `n` is not its line number, or whose `entry_hash` is not 64 lowercase hex, has no head. Two vectors pin it (#587).
+- Each vector names the SPEC revision it was written against, `since`; the frozen clean-room verifier runs only the rows of the spec it was written from (#587).
 
 ### Fixed
 
