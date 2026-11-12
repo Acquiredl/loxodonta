@@ -2082,11 +2082,82 @@ def ripe_head(entries, now, cadence):
     return entries[-1].get("entry_hash") or None
 
 
+# --- Which calendars an upgrade asks (#415) ----------------------------------
+# The recorder's rule, so the keeper can say on a chain's row that a
+# pending proof waits at a calendar its upgrade does not ask.
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+DEFAULT_CALENDARS = [
+    "https://a.pool.opentimestamps.org",
+    "https://b.pool.opentimestamps.org",
+    "https://a.pool.eternitywall.com",
+    "https://ots.btc.catallaxy.com",
+]
+DEFAULT_PORTS = {"http": 80, "https": 443}
+SHOWN_CALENDAR = 200   # characters of a row's address a skip line prints
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def calendar_key(url):
+    """What an upgrade compares to tell whether an address is a calendar
+    it was told to ask (#415): the scheme and the host in either case,
+    the port written or left to its default, the path with or without a
+    trailing slash, so `HTTPS://A.example:443/` is `https://a.example`.
+    Anything else that differs, a path included, is another calendar,
+    since the address is the door every request goes through. No name
+    is looked up. An address urllib cannot take apart is its own text."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return url
+    if port is None:
+        port = DEFAULT_PORTS.get(parts.scheme)
+    return (parts.scheme, parts.username, parts.password, parts.hostname,
+            port, parts.path.rstrip("/"), parts.query, parts.fragment)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def calendars_asked(calendars):
+    """The keys of the calendars an upgrade may ask: the defaults this
+    recorder submits to, and `calendars`, those the operator named on the
+    command line. A sidecar row is the writer's text, or the text of
+    whoever handed the sidecar over, so the address it names is asked
+    only when it is one of these (#415)."""
+    return {calendar_key(calendar)
+            for calendar in [*DEFAULT_CALENDARS, *(calendars or [])]}
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def unnamed_calendar(url, asked):
+    """True for an http or https address whose key is not in `asked`:
+    one an upgrade passes by and never asks (#415). Any other address
+    is left to `calendar_request`, which refuses it before it asks."""
+    try:
+        scheme = urllib.parse.urlsplit(url).scheme
+    except ValueError:
+        return False
+    return scheme in PUBLISH_SCHEMES and calendar_key(url) not in asked
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def shown_address(url):
+    """A row's address as a line prints it: escaped, and cut past
+    SHOWN_CALENDAR characters with the count of those cut, so a planted
+    address of a megabyte prints as some two hundred characters, more
+    only where escapes lengthen them."""
+    if len(url) <= SHOWN_CALENDAR:
+        return visible(url)
+    return (f"{visible(url[:SHOWN_CALENDAR])}… "
+            f"(+{len(url) - SHOWN_CALENDAR})")
+
+
 def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                  authority=None, chain_url=None):
     """One chain's turn with the keeper, at most once per throttle
     window: pending proofs are driven through `loxodonta anchor
-    --upgrade` (the record's own calendar; judgment stays with verify),
+    --upgrade` (the record's own calendar, when it is a default one or
+    one of `calendars`, #415; judgment stays with verify),
     and, only when the operator opted in with a cadence, a fresh head
     that has aged past it is anchored, and stamped by the authority the
     marker names, on this same turn (ADR-0032 ruling 3). Whether the
@@ -2105,10 +2176,15 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
     travel = ["--publish-chain", chain_url] if chain_url else []
+    # The upgrade asks only the default calendars and those it is told
+    # (#415): a proof the keeper's own --calendar took is completed too.
+    named = [flag for calendar in calendars
+             for flag in ("--calendar", calendar)]
     # A folder or a pipe where the sidecar belongs holds no proof to
     # upgrade (#364); the scan's verify names it.
     if os.path.isfile(sidecar):
-        finished = run_verb(["anchor", "--upgrade", f"--log={log}", *travel])
+        finished = run_verb(["anchor", "--upgrade", f"--log={log}", *named,
+                             *travel])
         attempted = True
         if finished is None:
             notes.append("upgrading did not finish in time; the proofs stay "
@@ -2128,10 +2204,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     if cadence is not None and entries:
         head = ripe_head(entries, now, cadence)
         if head:
-            command = ["anchor", f"--log={log}", *travel]
-            for calendar in calendars:
-                command += ["--calendar", calendar]
-            finished = run_verb(command)
+            finished = run_verb(["anchor", f"--log={log}", *travel, *named])
             attempted = True
             if finished is None:
                 failed = True
@@ -3683,30 +3756,39 @@ def failed_call_owes(record, block, name, epoch):
     return "may_owe"
 
 
-def transcript_records(transcript, closed):
+def transcript_records(transcript, closed, unread=None):
     """Each record of a session's transcript files (`witness_files`) as
     (the file, the record, its message's content blocks), in file order,
     the parent's first and then each subagent's. A line
     that is not a JSON object is passed over, and a file that cannot be
-    opened raises as `open_regular` does. The witness counts calls by
-    it, and `show` finds a call's input by it (ADR-0047)."""
+    opened raises as `open_regular` does. A file holding lines and not
+    one record goes on `unread`, when given, as (file, lines), once its
+    last line is read; a blank line is no line. The witness counts calls
+    by it, and `show` finds a call's input by it (ADR-0047)."""
     for path in witness_files(transcript, closed):
+        read = records = 0
         # A transcript is in the writer's reach, so a pipe at its name is
         # refused rather than waited on (#386).
         with io.TextIOWrapper(open_regular(path), encoding="utf-8",
                               errors="replace") as lines:
             for line in lines:
+                if not line.strip():
+                    continue
+                read += 1
                 try:
                     record = json.loads(line)
                 except (ValueError, RecursionError):
                     continue  # the transcript is writer-reachable (#331)
                 if not isinstance(record, dict):
                     continue
+                records += 1
                 message = record.get("message")
                 blocks = (message.get("content")
                           if isinstance(message, dict) else None)
                 yield (path, record,
                        blocks if isinstance(blocks, list) else [])
+        if unread is not None and read and not records:
+            unread.append((path, read))
 
 
 def witness_transcripts(witness, closed):
@@ -3742,7 +3824,8 @@ def read_witness(transcript, calibration):
     opened them (#379); both are counted for the canary in
     watch_completeness(), and neither moves
     the reading. `closed` holds each subagents folder it could not list
-    (`witness_files`)."""
+    (`witness_files`), and `unread` each file not one line of which could
+    be read (`transcript_records`)."""
     names = {}
     owed = []
     may_owe = {}
@@ -3750,8 +3833,8 @@ def read_witness(transcript, calibration):
     latest = None
     first = None
     worded = unworded = 0
-    closed = []
-    for _, record, blocks in transcript_records(transcript, closed):
+    closed, unread = [], []
+    for _, record, blocks in transcript_records(transcript, closed, unread):
         stamped = parse_when(record.get("timestamp"))
         if stamped is not None:
             if stamped.tzinfo is None:
@@ -3807,7 +3890,8 @@ def read_witness(transcript, calibration):
     owed.sort(key=lambda call: call[0] or "")
     return {"owed": owed, "may_owe": may_owe, "witnessed": witnessed,
             "latest": latest, "first": first,
-            "worded": worded, "unworded": unworded, "closed": closed}
+            "worded": worded, "unworded": unworded, "closed": closed,
+            "unread": unread}
 
 
 def reconcile(owed, may_owe, receipts, witnessed):
@@ -3893,14 +3977,17 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
     the witness saw, the state says the coverage behind that number is
     unknown, and no deficit and no may_owe count are named for it.
     Returns a dict: state, tools, deficit, may_owe, the worded and
-    unworded counts the canary in watch_completeness() reads, and the
-    subagents folders it could not list (`closed`)."""
+    unworded counts the canary in watch_completeness() reads, the
+    subagents folders it could not list (`closed`), and the files it
+    could not read a line of beside a deficit that stands (`unread`).
+    Raises OSError for a file that cannot be opened, and for one it
+    could not read a line of where no deficit stands."""
     seen = read_witness(transcript, calibration)
     tools = len(seen["owed"])
     if before_memory(calibration, seen["first"]):
         return {"state": "BEFORE-MEMORY", "tools": tools, "deficit": 0,
                 "may_owe": 0, "worded": 0, "unworded": 0,
-                "closed": seen["closed"]}
+                "closed": seen["closed"], "unread": []}
     latest = seen["latest"]
     # The idle clock reads the newest timestamped record, not file
     # mtime: the harness touches ended transcripts with timestamp-less
@@ -3917,6 +4004,17 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
     ended = idle = quiet_for >= IDLE_END_SECONDS
     deficit, surplus, unpaid = reconcile(seen["owed"], seen["may_owe"],
                                          receipts, seen["witnessed"])
+    if seen["unread"] and not deficit:
+        # A file not one line of which can be read hides its calls and
+        # pays none, so a deficit the rest shows stands. Where none does,
+        # the session reads as one whose transcript cannot be opened,
+        # never as one whose calls were none (#473). The row's note names
+        # the first file; every other one follows it in the same words.
+        (path, lines), *rest = seen["unread"]
+        why = "; ".join([no_line_read(lines)]
+                        + [cannot_read(other, no_line_read(count))
+                           for other, count in rest])
+        raise OSError(errno.EINVAL, why, str(path))
     deficit_since = parse_when(unpaid) if unpaid else None
     deficit_age = ((now - deficit_since).total_seconds()
                    if deficit_since else None)
@@ -3928,7 +4026,7 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
             "tools": tools, "deficit": deficit,
             "may_owe": sum(len(calls) for calls in seen["may_owe"].values()),
             "worded": seen["worded"], "unworded": seen["unworded"],
-            "closed": seen["closed"]}
+            "closed": seen["closed"], "unread": seen["unread"]}
 
 
 def keep_tails(sessions):
@@ -4228,10 +4326,37 @@ def unreadable_row(repo, session, receipts, transcript, error, drawers=()):
     # The words travel in a package and the note does not, so each must
     # be true alone; the path stays local (#410).
     row["words"] = UNREADABLE_TRANSCRIPT_WORDS
-    row["note"] = (f"{Path(error.filename or transcript).as_posix()}"
-                   " cannot be read as a transcript: "
-                   f"{error.strerror or error}")
+    row["note"] = cannot_read(error.filename or transcript,
+                              error.strerror or error)
     return row
+
+
+def cannot_read(path, why):
+    """A session row's note for one of its transcript files that cannot
+    be read as one, and why."""
+    return f"{Path(path).as_posix()} cannot be read as a transcript: {why}"
+
+
+def no_line_read(lines):
+    """Why a transcript file of `lines` lines cannot be read as one, when
+    not one of them is a record (#473)."""
+    if lines == 1:
+        return "its one line is not a JSON object"
+    return f"not one of its {lines} lines is a JSON object"
+
+
+def reading_note(reading):
+    """A judged session's note, or None: each subagents folder it could
+    not list, and each file it could not read a line of beside a deficit
+    that stands (`watch_session`)."""
+    said = []
+    if reading["closed"]:
+        said.append(sidechains_unlisted(reading["closed"]))
+    for path, lines in reading["unread"]:
+        said.append(f"{cannot_read(path, no_line_read(lines))} — the calls "
+                    "it holds are not counted, so the deficit shown is the "
+                    "least of it")
+    return "; ".join(said) or None
 
 
 def merge_families(families):
@@ -4315,8 +4440,9 @@ def watch_chained(groups, transcripts, ever_wired, calibration, sessionend,
                                transcript=transcript,
                                deficit=reading["deficit"],
                                may_owe=reading["may_owe"])
-        if reading["closed"]:
-            row["note"] = sidechains_unlisted(reading["closed"])
+        note = reading_note(reading)
+        if note:
+            row["note"] = note
         # The lifecycle facts (ADR-0018), quiet fields on the row.
         tier = lifecycle_tier(group.get("last_grew"), now)
         if tier:
@@ -4377,8 +4503,9 @@ def watch_chainless(root, transcripts, everywhere, closed, ever_wired,
                                reading["tools"], 0, transcript=transcript,
                                deficit=reading["deficit"],
                                may_owe=reading["may_owe"])
-        if reading["closed"]:
-            row["note"] = sidechains_unlisted(reading["closed"])
+        note = reading_note(reading)
+        if note:
+            row["note"] = note
         rows.append(row)
     return rows, readings, elsewhere
 
@@ -5535,6 +5662,9 @@ def keepers_turn(look, place, entries, memory, now, stamp):
     moved, said = {}, {"anchors": {}, "left": {}}
     if not look.keeping(memory["blind"]):
         return moved, said
+    # The calendars the anchor keeper's upgrade asks, for `chain_row`
+    # to set against the proofs verify calls pending (#415).
+    said["asked"] = calendars_asked(look.calendars)
     keeper = memory["keeper"]
     # A chain the last look stood down has a torn tail (ADR-0004), and the
     # recorder refuses its head on every turn (#533), so the head steps
@@ -5616,7 +5746,39 @@ def chain_row(look, log, entries, said):
         row["left"]["as_written"] = True
     row["anchors"].update(said["anchors"])
     row["left"].update(said["left"])
+    unasked = unasked_note(anchors["pending"], said.get("asked"))
+    if unasked:
+        row["anchors"]["note"] = "; ".join(
+            filter(None, (row["anchors"].get("note"), unasked)))
     return row, verdict, stood_down
+
+
+def unasked_note(pending, asked):
+    """The keeper's note for the pending proofs whose calendar its
+    upgrade does not ask (#415), or None: each address once, escaped and
+    cut, named as data and never set into a flag, since the row wrote
+    it. `pending` is verify's pending lines as `assess_anchors` read
+    them, so a settled head is none of them; `asked` is the keys the
+    keeper's upgrade asks, None when no keeper took a turn. Testimony,
+    never the exit: the proof stays pending until the calendar is
+    given."""
+    if asked is None:
+        return None
+    shown = {}
+    for proof in pending:
+        calendar = proof.get("calendar")
+        if calendar is not None and unnamed_calendar(calendar, asked):
+            shown.setdefault(calendar_key(calendar), shown_address(calendar))
+    if not shown:
+        return None
+    where = ", ".join(shown.values())
+    if len(shown) == 1:
+        return (f"a proof is pending at {where}, a calendar this keeper "
+                "was not given, so its upgrade does not ask it; give it "
+                "with --calendar on scan or serve to ask it")
+    return (f"proofs are pending at {where}, calendars this keeper was "
+            "not given, so its upgrade does not ask them; give them with "
+            "--calendar on scan or serve to ask them")
 
 
 def baseline_row(memory, relpath, entries, verdict, stood_down, now, stamp):
@@ -9814,8 +9976,12 @@ def cmd_package(args):
         where = out if args.folder else Path("<the unpacked zip>")
         print("anchored: the manifest's sha256 went to the calendars; the "
               "proof is pending until Bitcoin has it, a few hours")
+        # The upgrade asks only the default calendars and those it is
+        # told (#415), so the line names the ones this package went to.
+        named = "".join(f' --calendar="{visible(calendar)}"'
+                        for calendar in calendars)
         print(f'upgrade: python "{LOXODONTA.as_posix()}" anchor --upgrade '
-              f'--manifest="{(where / "manifest.json").as_posix()}"')
+              f'--manifest="{(where / "manifest.json").as_posix()}"{named}')
     if args.stamp:
         # The token is the authority's word about a moment, and the
         # recipient can only judge it with that authority's certificate
@@ -13589,8 +13755,10 @@ def main(argv=None):
                                "unless given")
     watching.add_argument("--calendar", action="append", default=None,
                           metavar="URL",
-                          help="calendar for auto-anchoring (repeatable; "
-                               "default: receipts' public pools)")
+                          help="calendar for auto-anchoring, and one the "
+                               "keeper's upgrade of pending proofs may ask "
+                               "beside the public pools (repeatable; "
+                               "default: receipts' public pools; #415)")
     watching.add_argument("--publish-every", type=parse_cadence,
                           default=None, metavar="AGE",
                           help="publish a head once it is this old and "

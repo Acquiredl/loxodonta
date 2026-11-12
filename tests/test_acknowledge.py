@@ -75,9 +75,11 @@ class LegacyRoot(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         return result
 
-    def look(self, expect):
-        """One `scan --root --json`, its exit held to `expect`."""
-        result = self.supervisor("scan", "--root", str(self.root), "--json")
+    def look(self, expect, *extra):
+        """One `scan --root --json`, `extra` beside it, its exit held to
+        `expect`."""
+        result = self.supervisor("scan", "--root", str(self.root), "--json",
+                                 *extra)
         self.assertEqual(result.returncode, expect,
                          result.stdout + result.stderr)
         return json.loads(result.stdout)
@@ -811,18 +813,20 @@ class BlindBaselineTest(LegacyRoot):
         write_pending_anchor(side, last["entry_hash"],
                              submitted=ago(100000), calendar=calendar.url)
         self.env["SUPERVISOR_UPGRADE_EVERY_SECONDS"] = "0"
-        self.look(0)
+        # The row's calendar named, so the upgrade asks it (#415).
+        named = ("--calendar", calendar.url)
+        self.look(0, *named)
         asked = len(calendar.polled)
         self.assertGreater(asked, 0, "the keeper never asked at all")
         self.baseline.write_text("{not json", encoding="utf-8")
 
-        report = self.look(5)
+        report = self.look(5, *named)
 
         self.assertEqual(len(calendar.polled), asked,
                          "a keeper ran on a blind look")
         self.assertIn("keepers wait", report["baseline"]["note"])
         self.acknowledge("--baseline")
-        self.look(0)
+        self.look(0, *named)
         self.assertGreater(len(calendar.polled), asked,
                            "the keepers came back with the memory")
 

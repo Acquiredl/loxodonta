@@ -23,8 +23,8 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_anchor`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import (LOXODONTA, StoreCase, isolated_env, run,  # noqa: E402
-                     temp_folder)
+from support import (LOXODONTA, StoreCase, clean_env,  # noqa: E402
+                     isolated_env, run, temp_folder)
 
 
 
@@ -519,6 +519,30 @@ class SessionEndAnchorTest(unittest.TestCase):
                     if r.get("kind") == "anchor" and r["head"] == pending["head"]]
         self.assertEqual(len(upgraded), 1, self.records())
 
+    def test_the_session_end_upgrade_asks_no_calendar_it_was_not_given(self):
+        # #415: a pending row naming an address neither the defaults nor
+        # the hook's --calendar name is passed by, quietly, and the row
+        # naming the hook's own calendar is still completed.
+        elsewhere, seen = start_recorder(self)
+        self.tool_call()
+        self.session_end("--anchor", "--calendar", self.server.url)
+        (pending,) = self.proofs()
+        rows = self.sidecar.read_text("utf-8")
+        self.sidecar.write_text(
+            json.dumps(dict(pending, calendar=elsewhere)) + "\n" + rows,
+            encoding="utf-8")
+        self.server.mode = "complete"
+        self.tool_call()
+
+        result = self.session_end("--anchor", "--calendar", self.server.url)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, "")
+        self.assertEqual(seen, [])
+        commitment = hashlib.sha256(bytes.fromhex(pending["head"])
+                                    + self.server.nonce).hexdigest()
+        self.assertIn(commitment, self.server.polled)
+
     def test_a_later_session_end_upgrades_the_pending_proof(self):
         self.tool_call()
         self.session_end("--anchor", "--calendar", self.server.url)
@@ -650,7 +674,8 @@ class AnchorTest(StoreCase):
         self.repoint(self.server.url + "/a b")
         self.server.mode = "complete"
 
-        upgrade = self.anchor("--upgrade")
+        upgrade = self.anchor("--upgrade", "--calendar",
+                              self.server.url + "/a b")
 
         self.assertEqual(upgrade.returncode, 0, upgrade.stderr)
         self.assertNotIn("Traceback", upgrade.stderr)
@@ -664,7 +689,7 @@ class AnchorTest(StoreCase):
         self.repoint(garbage)
         self.server.mode = "complete"
 
-        upgrade = self.anchor("--upgrade")
+        upgrade = self.anchor("--upgrade", "--calendar", garbage)
 
         self.assertEqual(upgrade.returncode, 69, upgrade.stderr)
         self.assertNotIn("Traceback", upgrade.stderr)
@@ -697,7 +722,7 @@ class AnchorTest(StoreCase):
                 self.repoint(astray)
                 self.server.mode = "complete"
 
-                upgrade = self.anchor("--upgrade")
+                upgrade = self.anchor("--upgrade", "--calendar", astray)
 
                 self.assertEqual(upgrade.returncode, 69, upgrade.stderr)
                 self.assertNotIn("Traceback", upgrade.stderr)
@@ -936,7 +961,8 @@ class BlockHeaderTest(StoreCase):
                                  cwd=self.workdir)
         self.assertEqual(submitted.returncode, 0, submitted.stderr)
         self.server.mode = "complete"
-        upgraded = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
+        upgraded = run(LOXODONTA, "anchor", "--upgrade",
+            "--calendar", self.server.url, cwd=self.workdir)
         self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
         self.root = replayed_root(self.head, self.server.nonce,
                                   self.server.prefix, self.server.suffix)
@@ -1094,7 +1120,9 @@ class CalendarsDisagreeTest(StoreCase):
         # One of the two gets its Bitcoin attestation; the other keeps
         # answering 404, as the opentimestamps.org pools did for 27 days.
         self.settles.mode = "complete"
-        upgraded = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
+        upgraded = run(LOXODONTA, "anchor", "--upgrade",
+            "--calendar", self.settles.url, "--calendar", self.lags.url,
+            cwd=self.workdir)
         self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
 
     def verify(self):
@@ -1121,7 +1149,9 @@ class CalendarsDisagreeTest(StoreCase):
     def test_upgrade_stops_re_asking_for_a_head_another_calendar_settled(self):
         self.lags.polled.clear()
 
-        result = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
+        result = run(LOXODONTA, "anchor", "--upgrade",
+            "--calendar", self.settles.url, "--calendar", self.lags.url,
+            cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.lags.polled, [],
@@ -1220,7 +1250,8 @@ class AnchorRowKindTest(StoreCase):
                                  cwd=self.workdir)
         self.assertEqual(submitted.returncode, 0, submitted.stderr)
         self.server.mode = "complete"
-        upgraded = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
+        upgraded = run(LOXODONTA, "anchor", "--upgrade",
+            "--calendar", self.server.url, cwd=self.workdir)
         self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
 
         lines = self.sidecar.read_text("utf-8").splitlines()
@@ -1372,7 +1403,8 @@ class AnchorRowKindTest(StoreCase):
         foreign = self.pending_row(kind="witness-note", calendar=other.url)
         self.write_sidecar(foreign)
 
-        result = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
+        result = run(LOXODONTA, "anchor", "--upgrade",
+            "--calendar", other.url, cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(other.polled, [])
@@ -1476,7 +1508,8 @@ class MalformedAnchorRowTest(StoreCase):
         malformed.append(self.row({"calendar": DROP}))
         self.write_sidecar(*malformed, self.row())
 
-        result = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
+        result = run(LOXODONTA, "anchor", "--upgrade",
+            "--calendar", self.server.url, cwd=self.workdir)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -1506,7 +1539,8 @@ class MalformedAnchorRowTest(StoreCase):
                 bad = self.row({"calendar": calendar})
                 self.write_sidecar(bad, good)
 
-                result = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
+                result = run(LOXODONTA, "anchor", "--upgrade",
+                    "--calendar", other.url, cwd=self.workdir)
 
                 self.assertEqual(result.returncode, 0,
                                  result.stdout + result.stderr)
@@ -1573,7 +1607,8 @@ class AnchorDedupeTest(StoreCase):
     def test_a_completed_proof_is_already_anchored_too(self):
         self.anchor()
         self.server.mode = "complete"
-        upgraded = run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
+        upgraded = run(LOXODONTA, "anchor", "--upgrade",
+            "--calendar", self.server.url, cwd=self.workdir)
         self.assertEqual(upgraded.returncode, 0, upgraded.stderr)
         self.sidecar.write_text(json.dumps(self.anchor_rows()[-1]) + "\n",
                                 encoding="utf-8")
@@ -1719,7 +1754,8 @@ class AnchorDedupeTest(StoreCase):
         # from and never the copy, which alone is HEADER-UNMATCHED.
         self.anchor()
         self.server.mode = "complete"
-        run(LOXODONTA, "anchor", "--upgrade", cwd=self.workdir)
+        run(LOXODONTA, "anchor", "--upgrade",
+            "--calendar", self.server.url, cwd=self.workdir)
         completed = self.anchor_rows()[-1]
         header = block_header(replayed_root(
             completed["head"], self.server.nonce, self.server.prefix,
@@ -1858,6 +1894,250 @@ class AnchorFieldEscapeTest(StoreCase):
         assert_printed_escaped(self, result.stdout + result.stderr, SHOWN)
         self.assertIn(f"at {SHOWN}: another calendar already settled",
                       result.stdout)
+
+
+def start_recorder(case):
+    """A listener that writes down the first line of every request it is
+    sent, a CONNECT a proxy is asked for included, and refuses each with
+    a 403, and its address and that list: what a test reads to say which
+    addresses an upgrade asked. Each line is written down before the
+    reply goes, so it is there once the command that asked has ended."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(5)
+    seen = []
+
+    def answer():
+        while True:
+            try:
+                connection, _ = listener.accept()
+            except OSError:
+                return  # closed: the test is over
+            with connection:
+                connection.settimeout(10)
+                request = b""
+                try:
+                    while b"\r\n\r\n" not in request:
+                        more = connection.recv(65536)
+                        if not more:
+                            break
+                        request += more
+                finally:
+                    seen.append(request.split(b"\r\n", 1)[0]
+                                .decode("latin-1"))
+                try:
+                    connection.sendall(b"HTTP/1.1 403 Forbidden\r\n"
+                                       b"Content-Length: 0\r\n"
+                                       b"Connection: close\r\n\r\n")
+                except OSError:
+                    pass  # the client left first
+
+    threading.Thread(target=answer, daemon=True).start()
+    case.addCleanup(listener.close)
+    return f"http://127.0.0.1:{listener.getsockname()[1]}", seen
+
+
+def told_to_skip(address):
+    """The line an upgrade says once for each address it was not told to
+    ask (#415), up to the address it names."""
+    return f"warning: skipped calendar {address}: "
+
+
+class UpgradeAsksNamedCalendarsTest(StoreCase):
+    """#415: an upgrade asks only the calendars the operator named, the
+    default calendars the recorder submits to and each `--calendar` on
+    the command line. A row naming any other address is named once,
+    skipped, and never asked, on a chain's sidecar and on a manifest's
+    (`--manifest`) alike, so a recipient who upgrades a sidecar they
+    were handed sends no request to an address the issuer chose. A
+    default calendar is reached through a proxy that is the test's own
+    listener, so the request is seen and the network never is."""
+
+    TARGETS = ("chain", "manifest")
+
+    def setUp(self):
+        super().setUp()
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
+            cwd=self.workdir)
+        self.server = start_calendar(self, b"fake-nonce")
+        self.manifest = self.workdir / "manifest.json"
+        self.manifest.write_text('{"format": "loxodonta-package/1"}\n',
+                                 encoding="utf-8")
+
+    def flags(self, target):
+        return ([] if target == "chain"
+                else ["--manifest", str(self.manifest)])
+
+    def anchored(self, target, *calendars):
+        """`target` anchored afresh at the fake calendar, which then
+        holds the completion, its sidecar rewritten so its one pending
+        row is one row per address in `calendars` (the fake's own when
+        none is given), and the sidecar's path."""
+        sidecar = (self.workdir / "receipts.jsonl.anchors.jsonl"
+                   if target == "chain"
+                   else Path(str(self.manifest) + ".anchors.jsonl"))
+        if sidecar.exists():
+            sidecar.unlink()
+        self.server.mode = "pending"
+        done = run(LOXODONTA, "anchor", "--calendar", self.server.url,
+                   *self.flags(target), cwd=self.workdir)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (row,) = rows_of(sidecar)
+        sidecar.write_bytes("".join(
+            json.dumps(dict(row, calendar=calendar)) + "\n"
+            for calendar in (calendars or [self.server.url])).encode("utf-8"))
+        self.server.mode = "complete"
+        return sidecar
+
+    def upgrade(self, target, *extra, env=None):
+        return run(LOXODONTA, "anchor", "--upgrade", *self.flags(target),
+                   *extra, cwd=self.workdir, env=env)
+
+    def test_the_pending_line_names_the_calendars_the_head_went_to(self):
+        for target, flags in (("chain", "--upgrade"),
+                              ("manifest",
+                               f"--upgrade --manifest={self.manifest}")):
+            with self.subTest(target=target):
+                done = run(LOXODONTA, "anchor", "--calendar", self.server.url,
+                           *self.flags(target), cwd=self.workdir)
+
+                self.assertEqual(done.returncode, 0,
+                                 done.stdout + done.stderr)
+                self.assertIn(f"run `loxodonta anchor {flags} --calendar "
+                              f"{self.server.url}` after", done.stdout)
+
+    def test_a_calendar_given_on_the_line_is_asked(self):
+        for target in self.TARGETS:
+            with self.subTest(target=target):
+                sidecar = self.anchored(target)
+                before = len(self.server.polled)
+
+                done = self.upgrade(target, "--calendar", self.server.url)
+
+                self.assertEqual(done.returncode, 0,
+                                 done.stdout + done.stderr)
+                self.assertEqual(len(self.server.polled), before + 1)
+                self.assertIn("upgraded: ", done.stdout)
+                self.assertEqual(len(rows_of(sidecar)), 2)
+                self.assertNotIn("skipped calendar", done.stderr)
+
+    def test_a_calendar_not_given_is_named_skipped_and_never_asked(self):
+        for target in self.TARGETS:
+            with self.subTest(target=target):
+                sidecar = self.anchored(target)
+                held = sidecar.read_bytes()
+                before = len(self.server.polled)
+
+                done = self.upgrade(target)
+
+                # Not a verdict and not an error: an upgrade that
+                # completed nothing exits as it always has.
+                self.assertEqual(done.returncode, 0,
+                                 done.stdout + done.stderr)
+                self.assertEqual(len(self.server.polled), before)
+                self.assertIn(told_to_skip(self.server.url), done.stderr)
+                self.assertIn("add it with --calendar to ask it",
+                              done.stderr)
+                self.assertNotIn("upgraded: ", done.stdout)
+                self.assertEqual(sidecar.read_bytes(), held)
+
+    def test_a_default_calendar_is_asked_with_no_flag(self):
+        # Spelled as the recorder writes it, and in another case with its
+        # default port and a trailing slash: the same calendar.
+        proxy, seen = start_recorder(self)
+        env = clean_env(HTTPS_PROXY=proxy, https_proxy=proxy)
+        for target in self.TARGETS:
+            with self.subTest(target=target):
+                seen.clear()
+                self.anchored(target, "https://a.pool.opentimestamps.org",
+                              "HTTPS://A.Pool.OpenTimestamps.org:443/")
+
+                done = self.upgrade(target, env=env)
+
+                # The proxy refused the tunnel: a calendar that did not
+                # answer, as one unreachable always was.
+                self.assertEqual(done.returncode, 69,
+                                 done.stdout + done.stderr)
+                # The method and its target; the HTTP version on the line
+                # is the Python's own (1.0 on 3.9).
+                self.assertEqual(
+                    [line.lower().split()[:2] for line in seen],
+                    [["connect", "a.pool.opentimestamps.org:443"]] * 2)
+                self.assertNotIn("skipped calendar", done.stderr)
+
+    def test_a_local_address_not_given_is_never_asked(self):
+        elsewhere, seen = start_recorder(self)
+        for target in self.TARGETS:
+            with self.subTest(target=target):
+                seen.clear()
+                sidecar = self.anchored(target, elsewhere, elsewhere,
+                                        self.server.url)
+
+                done = self.upgrade(target, "--calendar", self.server.url)
+
+                self.assertEqual(done.returncode, 0,
+                                 done.stdout + done.stderr)
+                self.assertEqual(seen, [])
+                # One line for the address, not one for each row.
+                self.assertEqual(done.stderr.count(told_to_skip(elsewhere)),
+                                 1, done.stderr)
+                self.assertIn("upgraded: ", done.stdout)
+                self.assertEqual(len(rows_of(sidecar)), 4)
+
+    def test_a_trailing_slash_is_the_same_calendar_and_a_path_is_another(self):
+        calendar, seen = start_recorder(self)
+        for given, row, asked in ((calendar + "/", calendar, True),
+                                  (calendar, calendar + "/", True),
+                                  (calendar, calendar + "/sub", False),
+                                  (calendar + "/sub/", calendar + "/sub",
+                                   True)):
+            with self.subTest(given=given, row=row):
+                seen.clear()
+                self.anchored("chain", row)
+
+                done = self.upgrade("chain", "--calendar", given)
+
+                self.assertEqual(len(seen), 1 if asked else 0, done.stderr)
+                self.assertEqual("skipped calendar" in done.stderr,
+                                 not asked, done.stderr)
+
+    def test_a_skipped_address_is_printed_escaped_and_clipped(self):
+        elsewhere, seen = start_recorder(self)
+        hostile = f"{elsewhere}/{HOSTILE}" + "x" * 5000
+        self.anchored("chain", hostile)
+
+        done = self.upgrade("chain", "--calendar", self.server.url)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(seen, [])
+        assert_printed_escaped(self, done.stderr, f"{elsewhere}/{SHOWN}")
+        (line,) = [line for line in done.stderr.splitlines()
+                   if "skipped calendar" in line]
+        self.assertLess(len(line), 500, line)
+
+    def test_the_skip_line_offers_no_command_built_from_the_address(self):
+        # The address is the row's, chosen by the writer or by whoever
+        # handed the sidecar over: named once, as data, and never set
+        # into a flag a reader might paste into a shell.
+        elsewhere, seen = start_recorder(self)
+        planted = f"{elsewhere}/$(id)"
+        self.anchored("chain", planted)
+
+        done = self.upgrade("chain", "--calendar", self.server.url)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(seen, [])
+        (line,) = [line for line in done.stderr.splitlines()
+                   if "skipped calendar" in line]
+        self.assertEqual(line.count(planted), 1, line)
+        self.assertNotIn(f"--calendar {planted}", line)
+        self.assertTrue(line.endswith("add it with --calendar to ask it"),
+                        line)
+
+
+def rows_of(sidecar):
+    return [json.loads(line) for line in
+            sidecar.read_text(encoding="utf-8").splitlines()]
 
 
 if __name__ == "__main__":
