@@ -5499,13 +5499,92 @@ class UsageExitTest(unittest.TestCase):
 
     def test_a_number_setting_it_can_use_is_taken(self):
         for name, value in (("SUPERVISOR_SETTLE_SECONDS", "0"),
-                            ("SUPERVISOR_KEEPER_TICK_SECONDS", "0.5")):
+                            ("SUPERVISOR_KEEPER_TICK_SECONDS", "0.5"),
+                            # Never waited on, so no wait's bound is its.
+                            ("SUPERVISOR_SCAN_TTL_SECONDS", "1e10")):
             with self.subTest(name=name):
                 result = self.version_with(name, value)
 
                 self.assertEqual(result.returncode, 0,
                                  result.stdout + result.stderr)
                 self.assertIn("supervisor", result.stdout)
+
+    def test_a_wait_longer_than_a_wait_can_take_exits_64_naming_it(self):
+        # #589 item 17: the keeper's tick is waited on, and a wait past
+        # threading.TIMEOUT_MAX raised OverflowError on the keeper's
+        # first turn, long after the start said nothing was wrong. 1e10
+        # seconds is past the bound on every platform.
+        result = self.version_with("SUPERVISOR_KEEPER_TICK_SECONDS", "1e10")
+
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        self.assertRegex(result.stderr,
+                         r"\Aerror: SUPERVISOR_KEEPER_TICK_SECONDS='1e10' is "
+                         r"more seconds than a wait can take \(at most "
+                         r"\d+ here\)\n\Z")
+        self.assertEqual(result.stdout, "")
+
+
+class CrashExitTest(unittest.TestCase):
+    """The supervisor ends through the recorder's `run_main` (#449,
+    ADR-0037): a crash is 70 with its traceback, never 1, which
+    `supervisor verify` and the scan's ladder say for BROKEN, and a
+    reader that hangs up is a quiet 141."""
+
+    def setUp(self):
+        self.home = temp_folder(self)
+
+    def test_a_crash_exits_70_with_its_traceback(self):
+        # No honest input makes the supervisor crash on purpose, and the
+        # suite adds no hook to make it (ADR-0037). A port past 65535
+        # reaches the socket unchecked and raises OverflowError there:
+        # the lever until a usage rule refuses it first, when this test
+        # wants another.
+        result = run_supervisor(self.home, "serve", "--root",
+                                str(temp_folder(self)), "--port", "70000")
+
+        self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
+        self.assertIn("Traceback (most recent call last)", result.stderr)
+        self.assertIn("OverflowError", result.stderr)
+
+    def test_a_reader_that_hangs_up_gets_a_quiet_141(self):
+        # More hits than a pipe's buffer holds, so the search is still
+        # printing when the reader is gone, as under `| head`.
+        repo = temp_folder(self)
+        log = repo / "receipts" / "receipts-hangup.jsonl"
+        log.parent.mkdir()
+        log.write_text("".join(
+            json.dumps({"n": n, "ts": "2026-11-12T10:00:00Z",
+                        "actor": "claude-code",
+                        "action": f"Bash: step {n} " + "x" * 80,
+                        "entry_hash": f"{n:064x}"}) + "\n"
+            for n in range(1, 1500)), encoding="utf-8")
+        process = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "search", "step", "--limit",
+             "5000", "--repo", str(repo)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding="utf-8", env=isolated_env(self.home))
+        process.stdout.close()
+        # stderr read on a thread of its own: communicate() would start a
+        # reader on the stdout just closed, which dies with its own
+        # traceback on Windows, and a plain read would hang the suite on
+        # a child that never ends.
+        said = []
+        reader = threading.Thread(
+            target=lambda: said.append(process.stderr.read()), daemon=True)
+        reader.start()
+        try:
+            process.wait(timeout=60)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=30)
+            reader.join(30)
+            process.stderr.close()
+        stderr = said[0] if said else ""
+
+        self.assertNotIn("Traceback", stderr)
+        # 128 + SIGPIPE: never 0, VALID, and never 1, BROKEN (ADR-0037).
+        self.assertEqual(process.returncode, 141, stderr)
 
 
 # Straight to 127.0.0.1, never through a proxy someone's shell configured.
