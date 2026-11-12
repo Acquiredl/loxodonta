@@ -7242,6 +7242,8 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(row["state"], "SECOND-RECORD-ABSENT")
         self.assertTrue(row["raises"])
         self.assertIn("none names a completed call", row["note"])
+        self.assertIn("no harness events ever did, or none naming a "
+                      "completed call", row["words"])
 
     def test_a_copy_carrying_the_cut_note_is_never_before_memory(self):
         # #486 item 11: a run with the telemetry cut and its timestamps

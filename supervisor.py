@@ -2536,8 +2536,9 @@ WATCH_WORDS = {
                "its counts and never an alarm until nothing of it has "
                "arrived for SUPERVISOR_SETTLE_SECONDS (ADR-0041).",
     "SECOND-RECORD-ABSENT": "receipts reached the receiver for this "
-                            "session and no harness events ever did — its "
-                            "second record never arrived. A run launched "
+                            "session and no harness events ever did, or "
+                            "none naming a completed call — its second "
+                            "record never arrived. A run launched "
                             "with the telemetry cut reads this way, and so "
                             "does a machine whose events go nowhere; never "
                             "read as clean, and the chain's own note says "
@@ -4550,27 +4551,27 @@ def pair_calls(results, calls, witnessed, late=()):
     receipts at the receiver, as a dict: `rule`, `owed`, `deficit`,
     `surplus`, `missing`, `mismatched`, `repeated`, `late` and `matched`.
     `results` are the calls as (time, tool, call id or None, arrival),
-    `calls` the receipts as (tool, call id or None). Where both records
-    name calls, they are joined on the id (ADR-0046 ruling 3): a call
-    reported twice under one id is one call, and a receipt pays only the
-    call its id names, and
-    only when it names the tool the event names for that id (#620); one
-    that names another tool pays nothing and is listed in `mismatched`
-    as (id, the receipt's tool, the event's tool). At most one receipt
-    of an id pays (#476: one harness version fired two hooks for a
-    failed call): a further receipt of an id already paid is neither
-    surplus nor deficit, and `repeated` counts it. Under the count by
-    tool too, a receipt repeating an id an earlier one carries pays no
-    second call. A receipt of an id in `late`, first seen too long after
-    a look named its call missing (#620), pays nothing either, and
-    `late` counts it; `matched` holds every id a receipt of its tool
-    carries, paid or late, so the memory can say when it was first seen.
-    `missing` names each call with no receipt, in time order. A call or
-    a receipt naming none is paired by count within its tool, among its
-    own kind only, so a receipt with no id
-    never pays a call the harness named. Where either record names none,
-    the count by tool stands (ADR-0034). `owed` is the calls counted, as
-    [(time, tool)]."""
+    `calls` the receipts as (tool, call id or None).
+
+    Where both records name calls, they are joined on the id (ADR-0046
+    ruling 3). A call reported twice under one id is one call. A receipt
+    pays only the call its id names, and only when it names the tool the
+    event names for that id (#620); one that names another tool pays
+    nothing and is listed in `mismatched` as (id, the receipt's tool,
+    the event's tool). At most one receipt of an id pays (#476: one
+    harness version fired two hooks for a failed call); a further one is
+    neither surplus nor deficit, and `repeated` counts it. A receipt of
+    an id in `late`, first seen too long after a look named its call
+    missing (#620), pays nothing either, and `late` counts it. `matched`
+    holds every id a receipt of its tool carries, paid or late, so the
+    memory can say when it was first seen. `missing` names each call
+    with no receipt, in time order. A call or a receipt naming none is
+    paired by count within its tool, among its own kind only, so a
+    receipt with no id never pays a call the harness named.
+
+    Where either record names none, the count by tool stands (ADR-0034),
+    and a receipt repeating an id an earlier one carries pays no second
+    call. `owed` is the calls counted, as [(time, tool)]."""
     paying = [call for _, call in calls if call]
     named = [call for _, _, call, _ in results if call]
     if not paying or not named:
@@ -4623,17 +4624,27 @@ def pair_calls(results, calls, witnessed, late=()):
             "repeated": repeated, "late": refused, "matched": matched}
 
 
+def safe_name(text):
+    """A tool's name as a row's note says it: ASCII letters, digits and
+    `_.-` only, anything else `?`, at most 40 of them. The receipt's
+    line and the URL holder's events choose it, and the page draws the
+    note (#620)."""
+    return "".join(char if char.isascii() and (char.isalnum()
+                                               or char in "_.-") else "?"
+                   for char in str(text))[:40]
+
+
 def pairing_words(pairing):
     """What a row's note says of receipts the pairing set aside, or None:
     each receipt carrying a call's id under another tool's name (#620),
     how many repeat an id already paid (#476), and how many arrived too
-    long after their call was named missing (#620). The receipts' tools
-    are the writer's text, so each is clipped."""
+    long after their call was named missing (#620). The tools are the
+    writer's and the URL holder's text, so each is said by safe_name."""
     said = []
     if pairing["mismatched"]:
         named = "; ".join(
-            f"{call} names {clip(tool, 40)} where the harness's event "
-            f"names {clip(event, 40)}"
+            f"{call} names {safe_name(tool)} where the harness's event "
+            f"names {safe_name(event)}"
             for call, tool, event in pairing["mismatched"][:GAP_NAMED])
         more = len(pairing["mismatched"]) - GAP_NAMED
         said.append(f"{len(pairing['mismatched'])} receipt(s) carry the id "
@@ -4674,7 +4685,7 @@ def overdue(seen, calls, now, late=()):
     pairing = pair_calls(old, calls, seen["witnessed"], late)
     rule, deficit, missing = (pairing["rule"], pairing["deficit"],
                               pairing["missing"])
-    aged =[number for number, when in seen["arrived"].items()
+    aged = [number for number, when in seen["arrived"].items()
             if when < cutoff]
     count, numbers = missing_numbers(
         {number for number in seen["sequences"] if number <= max(aged)}
@@ -11442,6 +11453,16 @@ const CHIP = {
   superseded: () => "BROKEN · superseded",
 };
 
+// A receiver row's note: why receipts paid nothing, and what was read
+// past (#620). Its call ids and tool names come from the chain and the
+// events, so a control or format character in it (a bidi override) is
+// drawn as ?. Only the receiver's rows: the agent's machine draws its
+// own words.
+function rowNote(s) {
+  if (!s.by_tool || !s.note) return "";
+  return String(s.note).replace(/\\p{C}/gu, "?");
+}
+
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -12270,6 +12291,7 @@ function render(report) {
       (s.missing_calls.count > s.missing_calls.calls.length ? ", …" : "")));
     if (s.paired_by) row.appendChild(el("p", "claim",
       "paired by " + s.paired_by));
+    if (rowNote(s)) row.appendChild(el("p", "claim", rowNote(s)));
     if (s.acknowledged) row.appendChild(el("p", "claim",
       "acknowledged " + (s.acknowledged.ts || "") + " as " +
       s.acknowledged.state + ": " + s.acknowledged.words));
