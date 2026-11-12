@@ -196,11 +196,13 @@ points on a decision sheet the same day; this records them as built.
    tool its action line names is the one the harness's event names for
    that id. One naming another tool pays nothing, the call stays
    unpaid, and the row names the id and both tools. An event naming no
-   tool pairs on the id alone. The build found one place the two names
-   differ for an honest call: the harness's events name every call to
-   a server the user configured `mcp_tool`, where the hook writes
-   `mcp__<server>__<tool>`, so an event naming `mcp_tool` is met by any
-   receipt of an MCP tool.
+   tool pairs on the id alone. The harness's documentation says its
+   `tool_decision` events name every call to a server the user
+   configured `mcp_tool`, where the hook writes
+   `mcp__<server>__<tool>`; its `tool_result` events, which the pairing
+   reads, are not measured for it. So an event naming `mcp_tool` is met
+   by any receipt of an MCP tool, until one measured MCP `tool_result`
+   settles whether that is needed.
 2. **At most one receipt per call id pays** (#476, the reader's half).
    A further receipt of an id already paid is neither surplus nor
    deficit; the row counts it, and the chain keeps it. Under the count
@@ -215,8 +217,12 @@ points on a decision sheet the same day; this records them as built.
    `SUPERVISOR_LATE_RECEIPT_SECONDS` after the naming look (one hour;
    0, 1 hour and 6 hours the panel) pays nothing, and the session keeps
    its finding until acknowledged. Inside it, an honest tail re-sent
-   after a failed send still clears. A memory that cannot be read
-   reads as before and says so.
+   after a failed send still clears. Only a settled look names a call
+   missing: a receipt posted before one has, inside the settle window
+   after the session's last arrival or while events keep the session
+   arriving (a `PENDING-OVERDUE` look records nothing), pays its call,
+   and nothing is recorded. A memory that cannot be read reads as
+   before and says so, beside its exit 5.
 4. **A copy carrying the `second-record-cut:` note is never before
    memory** (#486 item 11). Its dates are the writer's, and the note
    exists only since the pin did.
@@ -227,5 +233,6 @@ points on a decision sheet the same day; this records them as built.
    `SECOND-RECORD-ABSENT`.
 
 What it still does not claim: a receipt posted through the URL inside
-the grace period pays the call it names, and a receipt naming any MCP
-tool pays a call the events name `mcp_tool`.
+the grace period, or before any settled look has named its call
+missing, pays the call it names, and a receipt naming any MCP tool pays
+a call the events name `mcp_tool`.
