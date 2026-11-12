@@ -3778,6 +3778,59 @@ DEFAULT_CALENDARS = [
     "https://a.pool.eternitywall.com",
     "https://ots.btc.catallaxy.com",
 ]
+DEFAULT_PORTS = {"http": 80, "https": 443}
+SHOWN_CALENDAR = 200   # characters of a row's address a skip line prints
+
+
+def calendar_key(url):
+    """What an upgrade compares to tell whether an address is a calendar
+    it was told to ask (#415): the scheme and the host in either case,
+    the port written or left to its default, the path with or without a
+    trailing slash, so `HTTPS://A.example:443/` is `https://a.example`.
+    Anything else that differs, a path included, is another calendar,
+    since the address is the door every request goes through. No name
+    is looked up. An address urllib cannot take apart is its own text."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return url
+    if port is None:
+        port = DEFAULT_PORTS.get(parts.scheme)
+    return (parts.scheme, parts.username, parts.password, parts.hostname,
+            port, parts.path.rstrip("/"), parts.query, parts.fragment)
+
+
+def calendars_asked(calendars):
+    """The keys of the calendars an upgrade may ask: the defaults this
+    recorder submits to, and `calendars`, those the operator named on the
+    command line. A sidecar row is the writer's text, or the text of
+    whoever handed the sidecar over, so the address it names is asked
+    only when it is one of these (#415)."""
+    return {calendar_key(calendar)
+            for calendar in [*DEFAULT_CALENDARS, *(calendars or [])]}
+
+
+def unnamed_calendar(url, asked):
+    """True for an http or https address whose key is not in `asked`:
+    one an upgrade passes by and never asks (#415). Any other address
+    is left to `calendar_request`, which refuses it before it asks."""
+    try:
+        scheme = urllib.parse.urlsplit(url).scheme
+    except ValueError:
+        return False
+    return scheme in PUBLISH_SCHEMES and calendar_key(url) not in asked
+
+
+def shown_address(url):
+    """A row's address as a line prints it: escaped, and cut past
+    SHOWN_CALENDAR characters with the count of those cut, so a planted
+    address of a megabyte prints as some two hundred characters, more
+    only where escapes lengthen them."""
+    if len(url) <= SHOWN_CALENDAR:
+        return visible(url)
+    return (f"{visible(url[:SHOWN_CALENDAR])}… "
+            f"(+{len(url) - SHOWN_CALENDAR})")
 
 
 def write_varint(n):
@@ -4118,14 +4171,15 @@ def anchor_and_upgrade(log, calendars, budget):
         if submitted:
             changed.append(log)
     upgrade_pending_proofs(os.path.dirname(os.path.abspath(log)), remaining,
-                           deadline, changed)
+                           deadline, changed, calendars_asked(calendars))
     return changed
 
 
-def upgrade_pending_proofs(folder, remaining, deadline, changed):
+def upgrade_pending_proofs(folder, remaining, deadline, changed, asked):
     """Every pending proof in the folder's sidecars, oldest first, one
-    request each, until the deadline. A settled head is skipped. Each
-    chain whose sidecar gains a row is added to `changed`, once."""
+    request each, until the deadline. A settled head is skipped, and so
+    is a row naming a calendar not in `asked` (#415). Each chain whose
+    sidecar gains a row is added to `changed`, once."""
     for name in sorted(os.listdir(folder)):
         if not name.endswith(".anchors.jsonl"):
             continue
@@ -4138,6 +4192,8 @@ def upgrade_pending_proofs(folder, remaining, deadline, changed):
             if record["head"] in settled:
                 continue
             url = record["calendar"].rstrip("/")
+            if unnamed_calendar(url, asked):
+                continue
             try:
                 continuation = calendar_request(
                     f"{url}/timestamp/{commitment_hex}", timeout=remaining())
@@ -5785,7 +5841,11 @@ def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
         print("error: no calendar accepted the digest — not anchored",
               file=sys.stderr)
         return EX_UNAVAILABLE
-    print(f"proof is pending — run `loxodonta anchor {upgrade_flags}` "
+    # The upgrade asks only the calendars it is told to (#415), so the
+    # command names the ones given here.
+    named = "".join(f" --calendar {visible(calendar)}"
+                    for calendar in calendars or [])
+    print(f"proof is pending — run `loxodonta anchor {upgrade_flags}{named}` "
           "after a few hours to complete it")
     return 0
 
@@ -5806,6 +5866,8 @@ def upgrade_anchors(args):
         return EX_NOINPUT
     # verify --anchors reports the rows this leaves out; upgrade skips them.
     pending, completed, settled_heads = pending_upgrades(records)
+    asked = calendars_asked(args.calendar)
+    passed_by = set()   # one line per address, however many rows name it
     failures = 0
     for record, commitment_hex in pending:
         key = (record["head"], record["calendar"])
@@ -5819,6 +5881,21 @@ def upgrade_anchors(args):
         if record["head"] in settled_heads:
             print(f"skipped {label} at {shown}: another calendar already "
                   "settled this head")
+            continue
+        if unnamed_calendar(url, asked):
+            # Asked, it would be a request to an address the row chose,
+            # from the network of whoever upgrades: a recipient's, for a
+            # sidecar handed over with a package (#415).
+            if calendar_key(url) not in passed_by:
+                passed_by.add(calendar_key(url))
+                cut = shown_address(url)
+                # Named once, as data: the address is the row's, and a
+                # flag built from it would hand a reader the row's words
+                # to paste into a shell.
+                print(f"warning: skipped calendar {cut}: it is not one "
+                      "this upgrade was told to ask (the default calendars "
+                      "and each --calendar given); add it with --calendar "
+                      "to ask it", file=sys.stderr)
             continue
         try:
             continuation = calendar_request(f"{url}/timestamp/{commitment_hex}")
@@ -8951,7 +9028,10 @@ def main(argv=None):
     anchor_parser.add_argument("--calendar", action="append", default=[],
                                metavar="URL",
                                help="calendar server (repeatable; default: "
-                                    "public OpenTimestamps pools)")
+                                    "public OpenTimestamps pools); with "
+                                    "--upgrade, a calendar a pending row "
+                                    "may name and be asked, beside those "
+                                    "pools, which are always asked (#415)")
     anchor_parser.add_argument("--upgrade", action="store_true",
                                help="complete pending proofs once Bitcoin has them")
     anchor_parser.add_argument("--manifest", default=None, metavar="PATH",
