@@ -27,6 +27,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The recorder notice reads the checkout's commits as made, never through `git replace`: a replaced HEAD whose tree holds an edited recorder no longer reads as clean (#621).
 - A listing marks `[...]` each line it shows without its receipt suffix and says once what that means: a hand-written line ending in a group of that shape lost it silently, and no entry tells it from a hook's receipt (#619).
 - The dashboard no longer says "every receipt accounted for" while a session is short of receipts: the quiet strip names findings accepted at the receiver, deficits kept as evidence and sessions behind inside the grace window, with their counts (#613).
+- At the receiver, a receipt pays a call only when it names the tool the harness's event names for that id: one naming another tool pays nothing, and the row says which id and which two tools (#620).
 
 ## [0.20.0] - 2026-11-12
 

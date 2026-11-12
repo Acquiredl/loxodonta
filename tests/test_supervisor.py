@@ -6725,6 +6725,65 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertNotIn("missing_calls", row)
         self.assertNotIn("raises", row)
 
+    def test_a_receipt_naming_another_tool_pays_nothing_and_is_named(self):
+        # #620: the second call's id in a receipt whose action line names
+        # Read, where the harness's event names Bash for that id. The
+        # call stays unpaid, and the row says which id and which tools.
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Read: notes.md [call={FIXTURE_CALLS[1]} input=unhashed]"))
+
+        report = self.report(expect=6)
+
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["paired_by"], "call id")
+        self.assertEqual(row["missing_calls"],
+                         {"count": 1, "calls": [FIXTURE_CALLS[1]]})
+        self.assertTrue(row["raises"])
+        self.assertIn(f"{FIXTURE_CALLS[1]} names Read where the harness's "
+                      "event names Bash", row["note"])
+        self.assertIn("1 receipt(s) carry the id of a call", row["note"])
+
+    def test_an_event_naming_no_tool_pairs_on_the_id_alone(self):
+        # #487 item 7: a tool_result with no tool_name. There is no tool
+        # to compare, so the id pays as it did.
+        data = receiver_folder(self.base / "own", events=False)
+        chain_copy(data, "toolless-session-0001", actions=(
+            "Read: notes.md [call=toolu_toolless_1 input=unhashed]",))
+        post_event(data, 0, "tool_result", received_ago(7200),
+                   call="toolu_toolless_1", session="toolless-session-0001")
+
+        row = self.rows(self.report(data=data))["toolless-session-0001"]
+
+        self.assertEqual((row["state"], row["paired_by"]),
+                         ("ENDED-CLEAN", "call id"))
+        self.assertNotIn("note", row)
+
+    def test_a_tool_the_harness_names_mcp_tool_is_paid_by_an_mcp_receipt(self):
+        # The harness's events name a call to a user's MCP server by the
+        # literal `mcp_tool`; the hook's receipt names the server's tool,
+        # `mcp__<server>__<tool>`. Honest, so no mismatch; a receipt of
+        # a tool outside MCP is one.
+        data = receiver_folder(self.base / "own", events=False)
+        chain_copy(data, "mcp-session-0001", actions=(
+            "mcp__notes__search: albatross [call=toolu_mcp_1 input=unhashed]",
+            "Bash: true [call=toolu_mcp_2 input=unhashed]"))
+        post_event(data, 0, "tool_result", received_ago(7200),
+                   tool="mcp_tool", call="toolu_mcp_1",
+                   session="mcp-session-0001")
+        post_event(data, 1, "tool_result", received_ago(7200),
+                   tool="mcp_tool", call="toolu_mcp_2",
+                   session="mcp-session-0001")
+
+        row = self.rows(self.report(expect=6, data=data))["mcp-session-0001"]
+
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["missing_calls"],
+                         {"count": 1, "calls": ["toolu_mcp_2"]})
+        self.assertIn("toolu_mcp_2 names Bash where the harness's event "
+                      "names mcp_tool", row["note"])
+
     def test_the_default_settle_window_is_one_hour(self):
         # ADR-0046 ruling 4: half an hour after the copy last grew the
         # session is still PENDING; two hours after, it is judged. Its

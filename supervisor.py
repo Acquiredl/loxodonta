@@ -4463,20 +4463,42 @@ def missing_numbers(sequences):
     return high - low + 1 - len(seen), named
 
 
+# The tool name the harness's events give every call to a server the
+# user configured; the hook's receipt names the server's tool as
+# `mcp__<server>__<tool>` (the harness's monitoring docs, read 2026-11-12).
+EVENT_MCP_TOOL = "mcp_tool"
+RECEIPT_MCP_PREFIX = "mcp__"
+
+
+def same_tool(receipt, event):
+    """Whether a receipt's tool is the tool the harness's event names for
+    the call whose id it carries (#620). An event naming no tool (#487
+    item 7) has nothing to compare, and pairs on the id alone; an event
+    naming `mcp_tool` is met by any receipt of an MCP server's tool."""
+    if event is None:
+        return True
+    if event == EVENT_MCP_TOOL:
+        return receipt.startswith(RECEIPT_MCP_PREFIX)
+    return receipt == event
+
+
 def pair_calls(results, calls, witnessed):
-    """A settled session's calls, as the harness reported them, against
-    its receipts at the receiver, as (rule, owed, deficit, surplus,
-    missing). `results` are the calls as (time, tool, call id or None,
-    arrival),
-    `calls` the receipts as (tool, call id or None). Where both records
-    name calls, they are joined on the id (ADR-0046 ruling 3): a call
-    reported twice under one id is one call, a receipt pays only the
-    call its id names and a second receipt of that id pays nothing, and
-    `missing` names each call with no receipt, in time order. A call or
-    a receipt naming none is paired by count within its tool, among its
-    own kind only, so a receipt with no id never pays a call the harness
-    named. Where either record names none, the count by tool stands
-    (ADR-0034). `owed` is the calls counted, as [(time, tool)]."""
+    """A session's calls, as the harness reported them, against its
+    receipts at the receiver, as a dict: `rule`, `owed`, `deficit`,
+    `surplus`, `missing`, and `mismatched`. `results` are the calls as
+    (time, tool, call id or None, arrival), `calls` the receipts as
+    (tool, call id or None). Where both records name calls, they are
+    joined on the id (ADR-0046 ruling 3): a call reported twice under one
+    id is one call, and a receipt pays only the call its id names, and
+    only when it names the tool the event names for that id (#620); one
+    that names another tool pays nothing and is listed in `mismatched`
+    as (id, the receipt's tool, the event's tool). A second receipt of
+    an id pays nothing. `missing` names each call with no receipt, in
+    time order. A call or a receipt naming none is paired by count
+    within its tool, among its own kind only, so a receipt with no id
+    never pays a call the harness named. Where either record names none,
+    the count by tool stands (ADR-0034). `owed` is the calls counted, as
+    [(time, tool)]."""
     paying = [call for _, call in calls if call]
     named = [call for _, _, call, _ in results if call]
     if not paying or not named:
@@ -4485,26 +4507,54 @@ def pair_calls(results, calls, witnessed):
             receipts[tool] = receipts.get(tool, 0) + 1
         owed = [(when, tool) for when, tool, _, _ in results]
         deficit, surplus, _ = reconcile(owed, {}, receipts, witnessed)
-        return "count by tool", owed, deficit, surplus, []
-    paid = set(paying)
-    owed, unnamed, missing, met = [], [], [], set()
+        return {"rule": "count by tool", "owed": owed, "deficit": deficit,
+                "surplus": surplus, "missing": [], "mismatched": []}
+    owed, unnamed, order, reported = [], [], [], {}
     for when, tool, call, _ in results:
-        if call in met:
+        if call in reported:
             continue
         if call is None:
             unnamed.append((when, tool))
         else:
-            met.add(call)
-            if call not in paid:
-                missing.append(call)
+            reported[call] = tool
+            order.append(call)
         owed.append((when, tool))
-    loose = {}
+    paid, mismatched, loose, unpaying = set(), [], {}, 0
     for tool, call in calls:
         if not call:
             loose[tool] = loose.get(tool, 0) + 1
+        elif call not in reported:
+            unpaying += 1
+        elif not same_tool(tool, reported[call]):
+            mismatched.append((call, tool, reported[call]))
+            unpaying += 1
+        elif call in paid:
+            unpaying += 1
+        else:
+            paid.add(call)
+    missing = [call for call in order if call not in paid]
     deficit, surplus, _ = reconcile(unnamed, {}, loose, witnessed)
-    surplus += len(paying) - len(met & paid)
-    return "call id", owed, deficit + len(missing), surplus, missing
+    return {"rule": "call id", "owed": owed,
+            "deficit": deficit + len(missing), "surplus": surplus + unpaying,
+            "missing": missing, "mismatched": mismatched}
+
+
+def pairing_words(pairing):
+    """What a row's note says of receipts the pairing set aside, or None:
+    each receipt carrying a call's id under another tool's name (#620).
+    The receipts' tools are the writer's text, so each is clipped."""
+    said = []
+    if pairing["mismatched"]:
+        named = "; ".join(
+            f"{call} names {clip(tool, 40)} where the harness's event "
+            f"names {clip(event, 40)}"
+            for call, tool, event in pairing["mismatched"][:GAP_NAMED])
+        more = len(pairing["mismatched"]) - GAP_NAMED
+        said.append(f"{len(pairing['mismatched'])} receipt(s) carry the id "
+                    "of a call whose event names another tool, and pay "
+                    f"nothing: {named}" + (f"; and {more} more" if more > 0
+                                           else "") + " (#620)")
+    return "; ".join(said) or None
 
 
 def overdue(seen, calls, now):
@@ -4523,8 +4573,10 @@ def overdue(seen, calls, now):
     cutoff = now - timedelta(seconds=SETTLE_SECONDS)
     old = [call for call in seen["results"]
            if call[3] is not None and call[3] < cutoff]
-    rule, _, deficit, _, missing = pair_calls(old, calls, seen["witnessed"])
-    aged = [number for number, when in seen["arrived"].items()
+    pairing = pair_calls(old, calls, seen["witnessed"])
+    rule, deficit, missing = (pairing["rule"], pairing["deficit"],
+                              pairing["missing"])
+    aged =[number for number, when in seen["arrived"].items()
             if when < cutoff]
     count, numbers = missing_numbers(
         {number for number in seen["sequences"] if number <= max(aged)}
@@ -4674,9 +4726,11 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
         by_tool = {}
         for _, tool in family.get("moments", ()):
             by_tool[tool] = by_tool.get(tool, 0) + 1
-        rule, owed, deficit, surplus, missing = pair_calls(
+        pairing = pair_calls(
             seen["results"] if seen else [], family.get("calls", []),
             seen["witnessed"] if seen else set())
+        owed, deficit, missing = (pairing["owed"], pairing["deficit"],
+                                  pairing["missing"])
         counts = {}
         for _, tool in owed:
             counts.setdefault(tool, {"owed": 0, "receipts": 0})["owed"] += 1
@@ -4733,10 +4787,10 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
                 # a file went unread (#559 ruling 3).
                 row["note"] = unread
         else:
-            state = classify(len(owed), deficit, surplus, True, True,
-                             None, False)
+            state = classify(len(owed), deficit, pairing["surplus"], True,
+                             True, None, False)
             row["deficit"] = deficit
-            row["paired_by"] = rule
+            row["paired_by"] = pairing["rule"]
             if missing:
                 row["missing_calls"] = {"count": len(missing),
                                         "calls": missing[:GAP_NAMED]}
@@ -4748,6 +4802,9 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
                 if state != "ENDED-DEFICIT":
                     state = "SECOND-RECORD-GAP"
         row["state"] = state
+        set_aside = pairing_words(pairing)
+        if set_aside:
+            row["note"] = "; ".join(filter(None, (row.get("note"), set_aside)))
         if late:
             row["words"] = overdue_words(late)
             # Never quieted by an acknowledgement: its counts move with
