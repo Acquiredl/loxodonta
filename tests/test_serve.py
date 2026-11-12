@@ -30,10 +30,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
                      temp_folder)
 
-from test_supervisor import (FIXTURE_RECEIPTS, FIXTURE_SESSION,
+from test_supervisor import (FIXTURE_RECEIPTS, FIXTURE_SESSION, ago,
                              assert_replaced_whole, chain_copy, hold,
-                             lay_events, read_line_within, receiver_folder,
-                             unreadable_depth)
+                             install_witness_hook, lay_events, prime_memory,
+                             read_line_within, receiver_folder,
+                             unreadable_depth, write_transcript)
 
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
@@ -1890,3 +1891,38 @@ class ReceiverServeTest(ServerFixture):
                       "2 event number(s) missing", strip["why"])
         self.assertIn("cut-sess SECOND-RECORD-ABSENT, 4 received, no harness "
                       "events", strip["why"])
+
+
+class QuietStripTest(ServerFixture):
+    """The strip's quiet words over a look that raises nothing: true of
+    every row in the report, never "every receipt accounted for" while a
+    row is short of receipts (#613)."""
+
+    def test_an_ended_session_short_of_receipts_never_reads_accounted_for(self):
+        # On the agent's machine an ended deficit is evidence and exit 0
+        # (ADR-0046 ruling 1), so the strip stays quiet; its words say a
+        # session ended short, with its counts.
+        witness = temp_folder(self) / "witness"
+        install_witness_hook(witness)
+        prime_memory(self.root)
+        log = make_chain(self.root / "alpha" / "receipts", "sess-lost",
+                         entries=0)
+        log_entry(log, "Bash: ls")
+        write_transcript(witness, self.root / "alpha", "sess-lost",
+                         event_times=[ago(7200), ago(7100), ago(7000)],
+                         idle=6900)
+        self.serve(extra_args=("--witness", str(witness)))
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 0)
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["deficit"]), ("ENDED-DEFICIT", 2))
+        strip = strip_drawn(self, page, served)
+        self.assertEqual((strip["colour"], strip["state"]),
+                         ("quiet", "all quiet"))
+        self.assertEqual(strip["why"], (
+            "1 chain(s), 1 session(s) short of receipts, kept as evidence: "
+            "sess-los ENDED-DEFICIT, 3 owed, 1 received, 2 missing"))
