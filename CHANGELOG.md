@@ -32,6 +32,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A number of seconds the supervisor or the receiver waits on, such as `SUPERVISOR_KEEPER_TICK_SECONDS=1e10`, is refused by name with 64 when no wait can take it: the keeper's first turn raised `OverflowError` (#589).
 - `supervisor serve` says nothing on its log when a client leaves before its reply is read: the request's thread printed a traceback there (#589).
 - The scan no longer says the remote "has never taken" a send it took: where the memo shows earlier sends taken and the newest failed, the publishing note says the remote missed the newest (#614).
+- A reading over a receiver's folder no longer labels its memory, day book, saved views or acknowledged changes writer-reachable: they are kept at the receiver, out of the writer's reach. The agent's machine keeps its labels (#615).
 
 ## [0.20.0] - 2026-11-12
 

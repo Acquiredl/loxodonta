@@ -610,11 +610,35 @@ def memory_unread(path, what, why):
 
 BASELINE_NAME = ".supervisor-baseline.json"
 
-INVESTIGATE = ("investigate — this memory is writer-reachable and decides "
+# Whose reach the supervisor's own files are in, said wherever they are
+# labelled (#615). On the agent's machine they sit in the account the
+# writer runs as (ADR-0002). Over a receiver's folder they sit on a
+# machine the writer cannot reach (ADR-0046), though whoever holds the
+# receiver's URL can add to the copies and events read there
+# (docs/CLAIMS.md): never more than that is claimed.
+WRITER_REACH = "writer-reachable, trusted for nothing"
+RECEIVER_REACH = "kept at the receiver, out of the writer's reach"
+
+
+def memory_reach(receiver):
+    """The words for whose reach the memory files are in."""
+    return RECEIVER_REACH if receiver else WRITER_REACH
+
+
+BASELINE_PURPOSE = "the supervisor's memory between looks — {}"
+
+
+# `{memory}` is said by `alarm_event`, by the reading's universe.
+INVESTIGATE = ("investigate — this memory is {memory} and decides "
                "nothing; run loxodonta verify and check your anchors. It "
                "stands on every look until the chain holds the remembered "
                "head again or `supervisor acknowledge` accepts what is "
                "there")
+INVESTIGATE_MEMORY = {
+    False: "writer-reachable",
+    True: (RECEIVER_REACH + " (whoever holds the receiver's URL can add "
+           "to the copies it reads)"),
+}
 
 CHANGE_WORDS = {
     "rewritten": "the head the baseline remembers is no longer in this "
@@ -838,16 +862,18 @@ def standing(known, change, stamp):
     return row, alarm.get("change") != change
 
 
-def alarm_event(repo, session, relpath, row, found):
+def alarm_event(repo, session, relpath, row, found, receiver=False):
     """One standing alarm as the report says it: since when it has stood,
     what the baseline remembers and what this look found, None for a
     chain that is not there, so the operator has the head `acknowledge`
-    accepts."""
+    accepts. `receiver` for a look over a receiver's folder."""
     change = row["alarm"]["change"]
     return {"repo": repo, "session": session, "log": relpath,
             "change": change, "since": row["alarm"]["since"],
             "remembered": {"n": row["n"], "head": row["head"]},
-            "found": found, "investigate": CHANGE_WORDS[change]}
+            "found": found,
+            "investigate": CHANGE_WORDS[change].format(
+                memory=INVESTIGATE_MEMORY[receiver])}
 
 
 def remembered_names(root, found, remembered):
@@ -912,8 +938,7 @@ DAYBOOK_NAME = ".supervisor-daybook.json"
 DAYBOOK_SEASON = 90  # how many days the book keeps
 FORTNIGHT = 14  # how many the band shows
 
-DAYBOOK_PURPOSE = ("the supervisor's day-by-day memory of its own looks — "
-                   "writer-reachable, trusted for nothing")
+DAYBOOK_PURPOSE = "the supervisor's day-by-day memory of its own looks — {}"
 
 
 def daybook_rows(path):
@@ -969,10 +994,11 @@ def rows_skipped(path, skipped):
             "nobody watched, and left out of the next write")
 
 
-def write_daybook(path, days, now):
+def write_daybook(path, days, now, receiver=False):
     """Keep a season, forget the rest, and never let a write failure
     take the tick down with it — the book is a convenience, and the
-    verdicts do not live here.
+    verdicts do not live here. `receiver` for a receiver's folder,
+    whose book is out of the writer's reach (#615).
 
     Pruned by date, not by row count: a book that went unwritten for a
     year should forget that year, not keep it because it is short."""
@@ -980,13 +1006,14 @@ def write_daybook(path, days, now):
     kept = {day: row for day, row in sorted(days.items()) if day >= oldest}
     try:
         write_whole(path, json.dumps(
-            {"purpose": DAYBOOK_PURPOSE, "days": kept}, indent=2) + "\n")
+            {"purpose": DAYBOOK_PURPOSE.format(memory_reach(receiver)),
+             "days": kept}, indent=2) + "\n")
     except OSError:
         pass
     return kept
 
 
-def remember_day(path, now, claims, days):
+def remember_day(path, now, claims, days, receiver=False):
     """Fold one look's claims into today's row of `days`, the book as
     the look read it (`daybook_rows`), and write the book.
 
@@ -1004,10 +1031,10 @@ def remember_day(path, now, claims, days):
     row["looks"] = row.get("looks", 0)
     row["last"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     days[today] = row
-    return write_daybook(path, days, now)
+    return write_daybook(path, days, now, receiver)
 
 
-def remember_look(path, now):
+def remember_look(path, now, receiver=False):
     """Someone opened the front page. Counted separately from scans,
     which the poll drives on its own."""
     days = read_daybook(path)
@@ -1015,7 +1042,7 @@ def remember_look(path, now):
     row = dict(days.get(today) or {})
     row["looks"] = row.get("looks", 0) + 1
     days[today] = row
-    write_daybook(path, days, now)
+    write_daybook(path, days, now, receiver)
 
 
 # --- Named views --------------------------------------------------------------
@@ -1029,9 +1056,8 @@ def remember_look(path, now):
 # status strip or the attention queue.
 
 VIEWS_NAME = ".supervisor-views.json"
-VIEWS_PURPOSE = ("the operator's saved worktable filters — "
-                 "writer-reachable, trusted for nothing, and unable to "
-                 "reach the alarm")
+VIEWS_PURPOSE = ("the operator's saved worktable filters — {}, and "
+                 "unable to reach the alarm")
 VIEW_FIELDS = ("name", "repo", "from", "to", "path", "tab")
 VIEW_LIMIT = 40  # how many a book keeps; a filter set is not a corpus
 VIEW_TEXT = 200  # longest a single field may be
@@ -1081,36 +1107,39 @@ def read_views(path):
     return [view for view in kept if view][:VIEW_LIMIT]
 
 
-def write_views(path, views):
+def write_views(path, views, receiver=False):
     """Never let a write failure take the request down with it: the
-    views are a convenience, and no verdict lives here."""
+    views are a convenience, and no verdict lives here. `receiver` for
+    a receiver's folder, out of the writer's reach (#615)."""
     kept = views[:VIEW_LIMIT]
     try:
         write_whole(path, json.dumps(
-            {"purpose": VIEWS_PURPOSE, "views": kept}, indent=2) + "\n")
+            {"purpose": VIEWS_PURPOSE.format(memory_reach(receiver)),
+             "views": kept}, indent=2) + "\n")
     except OSError:
         pass
     return kept
 
 
-def save_view(path, raw):
+def save_view(path, raw, receiver=False):
     """Save one view, replacing any of the same name. None when the
     view is not one this format can hold."""
     view = clean_view(raw)
     if view is None:
         return None
     kept = [row for row in read_views(path) if row["name"] != view["name"]]
-    return write_views(path, kept + [view])
+    return write_views(path, kept + [view], receiver)
 
 
-def forget_view(path, name):
+def forget_view(path, name, receiver=False):
     """Drop one view by name. Forgetting something that was never
     there is not an error — the file ends up the way the caller
     asked."""
     if not isinstance(name, str):
         return read_views(path)
     return write_views(
-        path, [row for row in read_views(path) if row["name"] != name])
+        path, [row for row in read_views(path) if row["name"] != name],
+        receiver)
 
 
 # What a day contributes to the band, as against what the book keeps
@@ -5287,7 +5316,8 @@ def read_chain(look, place, memory, now, stamp):
         newest = newest_head(entries)
         alarm = alarm_event(repo, session, relpath, remembered,
                             {"n": newest[0], "head": newest[1]} if newest
-                            else {"n": None, "head": None})
+                            else {"n": None, "head": None},
+                            receiver=bool(look.receiver))
     if woke:
         awakened = {"repo": repo, "session": session, "log": relpath,
                     "still_seconds": woke,
@@ -5590,7 +5620,8 @@ def absent_rows(look, remembered, met, closed, stamp):
         row, new = standing(known, "vanished", stamp)
         rows[relpath] = row
         fresh += new
-        alarms.append(alarm_event(repo, session, relpath, row, None))
+        alarms.append(alarm_event(repo, session, relpath, row, None,
+                                  receiver=bool(look.receiver)))
     return rows, uncounted, alarms, fresh
 
 
@@ -5610,8 +5641,7 @@ def write_memory(look, memory, to_remember, stamp):
                 "standing, and the next look reads it"), None
     try:
         write_whole(path, json.dumps({
-            "purpose": "the supervisor's memory between looks — "
-                       "writer-reachable, trusted for nothing",
+            "purpose": BASELINE_PURPOSE.format(memory_reach(look.receiver)),
             "scanned": stamp,
             "chains": to_remember,
             "keeper": memory["keeper"],
@@ -5747,7 +5777,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "closed": len(closed_rows),
     }, fresh, awakened)
 
-    baseline = {"file": look.baseline_path.as_posix(), "events": events,
+    baseline = {"file": look.baseline_path.as_posix(),
+                # Whose reach the file is in, for the page's line under
+                # each acknowledgement (#615).
+                "kept": (RECEIVER_REACH if look.receiver
+                         else "kept in a writer-reachable file"),
+                "events": events,
                 # Testimony: never raises the exit, never moves an event.
                 "acknowledged": memory["acknowledged"]}
     if uncounted:
@@ -5814,7 +5849,8 @@ def fold_day(look, now, claims, fresh, awakened):
     unshown = any(claims[kept] > newest.get(kept, 0)
                   for kept in ("blind", "closed"))
     if look.remember or fresh or awakened or unshown:
-        days = remember_day(look.daybook, now, claims, days)
+        days = remember_day(look.daybook, now, claims, days,
+                            bool(look.receiver))
     return days, skipped
 
 
@@ -6440,8 +6476,7 @@ def acknowledge_baseline(root, store, path, daybook, receiver=False):
     change = memory["blind"]
     try:
         write_whole(path, json.dumps({
-            "purpose": "the supervisor's memory between looks — "
-                       "writer-reachable, trusted for nothing",
+            "purpose": BASELINE_PURPOSE.format(memory_reach(receiver)),
             "scanned": stamp, "chains": heads, "keeper": {},
             "calibration": [], "sessionend": {},
             "acknowledged": [{"ts": stamp, "baseline": path.name,
@@ -10073,7 +10108,8 @@ class Watchtower(ThreadingHTTPServer):
         book is one file and the tick rewrites it wholesale."""
         book = memory_paths(self.root, self.store, self.receiver)[1]
         with self.scan_lock:
-            remember_look(book, datetime.now(timezone.utc))
+            remember_look(book, datetime.now(timezone.utc),
+                          bool(self.receiver))
 
     def views_path(self):
         """Beside the day book, wherever that is — the two share a
@@ -10255,7 +10291,8 @@ class Face(BaseHTTPRequestHandler):
             return None
 
     def reply_views(self, views):
-        body = {"purpose": VIEWS_PURPOSE, "views": views}
+        body = {"purpose": VIEWS_PURPOSE.format(
+                    memory_reach(self.server.receiver)), "views": views}
         book = self.server.views_path()
         shelf = not_a_file(book)
         if shelf:
@@ -10276,9 +10313,11 @@ class Face(BaseHTTPRequestHandler):
             with self.server.views_lock:
                 book = self.server.views_path()
                 if "forget" in asked:
-                    self.reply_views(forget_view(book, asked["forget"]))
+                    self.reply_views(forget_view(book, asked["forget"],
+                                                 self.server.receiver))
                     return
-                views = save_view(book, asked.get("save"))
+                views = save_view(book, asked.get("save"),
+                                  self.server.receiver)
             if views is None:
                 self.send_error(400)
                 return
@@ -12056,9 +12095,11 @@ function render(report) {
         seen(record.remembered) + " · accepted " + seen(record.accepted)
       : "the baseline itself · " + record.change + " · " +
         (record.stood || "") + " · started afresh";
+    // Whose reach the file is in is the server's to say (#615): at a
+    // receiver it is out of the writer's.
     tripwire.appendChild(el("p", "claim", "acknowledged " +
       (record.ts || "") + " · " + what +
-      " (an operator's word, kept in a writer-reachable file)"));
+      " (an operator's word, " + report.baseline.kept + ")"));
   }
 
   // The completeness watch: only sessions worth a second look get a

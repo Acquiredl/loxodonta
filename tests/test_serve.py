@@ -1961,6 +1961,36 @@ class ReceiverServeTest(ServerFixture):
             "keeper: none over a receiver's folder; nothing is anchored, "
             "sent or appended from the far end (ADR-0041)"))
 
+    def test_the_views_and_the_acknowledged_lines_say_whose_reach(self):
+        # #615: the saved views sit in the receiver's folder, out of the
+        # writer's reach, and so does the record of what an operator
+        # accepted there. The page draws an acknowledged change with the
+        # words the server gives for where its memory is kept, and no
+        # longer calls every such record writer-reachable itself.
+        self.assertIsNotNone(self.serve_receiver())
+        self.get("/api/status")   # the first look makes the memory's folder
+        request = urllib.request.Request(
+            self.url + "/api/views",
+            data=json.dumps({"save": {"name": "lately"}}).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with OPENER.open(request, timeout=30) as response:
+            saved = json.loads(response.read().decode("utf-8"))
+
+        _, _, listed = self.get("/api/views")
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        for reply in (saved, json.loads(listed)):
+            self.assertIn("out of the writer's reach", reply["purpose"])
+            self.assertNotIn("writer-reachable", reply["purpose"])
+        kept = (self.data / "supervisor" / "views.json").read_text(
+            encoding="utf-8")
+        self.assertNotIn("writer-reachable", kept)
+        self.assertEqual(json.loads(body)["baseline"]["kept"],
+                         "kept at the receiver, out of the writer's reach")
+        self.assertIn("report.baseline.kept", page)
+        self.assertNotIn("kept in a writer-reachable file", page)
+
     def test_the_recall_routes_read_the_receivers_copies(self):
         # #487 item 10: the census counts the copies, and so must the
         # routes that read them; empty beside a census of one reads as
