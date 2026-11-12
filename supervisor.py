@@ -3242,14 +3242,17 @@ def git_say(home, *question, refused=None):
     GIT_TIMEOUT. Never fetches, never writes. The folder is named by the
     harness settings, so its git config and hooks are the writer's to
     plant (#572): fsmonitor is turned off, and no optional lock is taken,
-    so `status` writes no index and starts no post-index-change hook. A
-    clean filter its attributes name still runs on `status`; the timeout
-    bounds it."""
+    so `status` writes no index and starts no post-index-change hook.
+    Replace refs are the writer's too, and would let HEAD name the real
+    commit while its tree is theirs (#621): the commits are read as
+    made. A clean filter its attributes name still runs on `status`;
+    the timeout bounds it."""
     try:
         answered = subprocess.run(
             # Empty, not false: before git 2.36 the value was a command,
             # and `false` names one.
-            [helper_path("git"), "--no-optional-locks", "-c",
+            [helper_path("git"), "--no-optional-locks",
+             "--no-replace-objects", "-c",
              "core.fsmonitor=",
              "-C", str(home), *question],
             # Never a pipe on stderr: a program git starts inherits it,
@@ -3288,7 +3291,7 @@ def recorder_drift(witness):
     # not answer leaves the checkout read as outside git, never as clean
     # or level (#572); each is asked only once the one before it
     # answered. No upstream is an answer: "".
-    head = changed = upstream = counts = None
+    head = changed = held = upstream = counts = None
     branch = git_say(home, "rev-parse", "--abbrev-ref", "HEAD")
     if branch is not None:
         head = git_say(home, "rev-parse", "--short", "HEAD")
@@ -3297,6 +3300,13 @@ def recorder_drift(witness):
         # same checkout is not drift in the recorder.
         changed = git_say(home, "status", "--porcelain", "--", script.name)
     if changed is not None:
+        # `status` says nothing of a file marked assume-unchanged or
+        # skip-worktree, or ignored and never committed (#621), so the
+        # file is also compared with the committed blob, and the worse
+        # of the two wins. No committed blob is "".
+        held = git_say(home, "rev-parse", "--verify", "--quiet",
+                       f"HEAD:./{script.name}", refused="")
+    if held is not None:
         upstream = git_say(home, "rev-parse", "--abbrev-ref",
                            "--symbolic-full-name", "@{u}", refused="")
     if upstream:
@@ -3306,8 +3316,10 @@ def recorder_drift(witness):
     counted = len(level) == 2 and all(n.isdigit() for n in level)
     if not (upstream == "" or counted):
         return recorder_versioned(script, notice)
+    same, problem = recorder_committed(script, held)
     notice.update({"state": "tracked", "branch": branch, "head": head,
-                   "dirty": bool(changed), "upstream": upstream or None})
+                   "dirty": bool(changed) or not same,
+                   "upstream": upstream or None})
     if upstream:
         notice["behind"], notice["ahead"] = (int(n) for n in level)
         git_dir = git_say(home, "rev-parse", "--git-dir")
@@ -3319,8 +3331,55 @@ def recorder_drift(witness):
                 ).strftime("%Y-%m-%dT%H:%M:%SZ")
             except OSError:
                 pass  # never fetched here; the counts say so themselves
-    notice["note"] = recorder_words(notice)
+    notice["note"] = recorder_words(
+        notice, problem, hidden=not (changed or same or problem))
     return notice
+
+
+def blob_id(body, length):
+    """The id git gives a blob holding `body`, in the hash its ids of
+    `length` characters are made with; None for any other length."""
+    made = {40: hashlib.sha1, 64: hashlib.sha256}.get(length)
+    if made is None:
+        return None
+    return made(b"blob %d\0" % len(body) + body).hexdigest()
+
+
+def recorder_committed(script, held):
+    """Whether the recorder is the committed blob `held` (#621), as
+    (same, problem). The bytes are hashed here, never by `git
+    hash-object`, which waits on a pipe and converts CRLF without
+    reading the index, so a blob committed with CRLF read as changed.
+    The same: the blob of the bytes as they are, or with every CRLF
+    made LF, as autocrlf writes them; for a link, the blob of its text.
+    `problem` says why it cannot be read as a file, in the words of
+    recorder_versioned, and is never the same. A recorder behind a
+    clean filter (ident, lfs, working-tree-encoding) reads as changed:
+    the loud side (#621)."""
+    if os.path.islink(script):
+        try:
+            if blob_id(os.fsencode(os.readlink(script)), len(held)) == held:
+                return True, None
+        except OSError:
+            pass  # read below, where the reason is named
+    larger = (f"at more than {RECORDER_READ_LIMIT} bytes it is larger "
+              "than any recorder, so it was not read")
+    # Asked before any read, so a huge file costs nothing.
+    try:
+        if os.stat(script).st_size > RECORDER_READ_LIMIT:
+            return False, larger
+        with open_regular(script) as f:
+            body = f.read(RECORDER_READ_LIMIT + 1)
+    except OSError as error:
+        return False, error.strerror or str(error)
+    if len(body) > RECORDER_READ_LIMIT:
+        return False, larger
+    if blob_id(body, len(held)) == held:
+        return True, None
+    # A CRLF left after one pass was CR CR LF, which no checkout writes
+    # and which would otherwise fold back to a CRLF the blob holds.
+    lf = body.replace(b"\r\n", b"\n")
+    return b"\r\n" not in lf and blob_id(lf, len(held)) == held, None
 
 
 def recorder_versioned(script, notice):
@@ -3384,14 +3443,20 @@ def recorder_notice(witness):
     return notice
 
 
-def recorder_words(notice):
+def recorder_words(notice, problem=None, hidden=False):
     """The notice in one sentence, worst thing first. Behind-counts are
     only as fresh as the last fetch and say so, because a stale count
-    that reads as reassurance is worse than no count."""
+    that reads as reassurance is worse than no count. `problem` when the
+    recorder cannot be read as a file; `hidden` when `git status` showed
+    nothing of a change the bytes show (#621)."""
     said = []
-    if notice["dirty"]:
+    if problem:
+        said.append("the recorder cannot be compared with the committed "
+                    f"file: {problem}")
+    elif notice["dirty"]:
         said.append("the recorder has uncommitted changes — the file "
-                    "being executed is not the file that was reviewed")
+                    "being executed is not the file that was reviewed"
+                    + (", though `git status` shows none" if hidden else ""))
     if notice["behind"]:
         said.append(f"the checkout is {notice['behind']} commit(s) behind "
                     f"{notice['upstream']} as of the last fetch"
