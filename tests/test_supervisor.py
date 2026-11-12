@@ -3989,7 +3989,8 @@ class AnchorKeeperTest(unittest.TestCase):
             check=True, env=self.env)
         calendar.mode = "complete"
 
-        result = run_scan(self.root, env=self.env)
+        # The keeper's own --calendar, as `serve --calendar` hands it on.
+        result = run_scan(self.root, "--calendar", calendar.url, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         chain = self.chain_report(result, "alpha", "sess-aaaa")
@@ -4000,16 +4001,34 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertTrue(chain["claimed"])
         self.assertEqual(len(calendar.polled), 1)
 
+    def test_the_keeper_asks_no_calendar_it_was_not_given(self):
+        # #415: the upgrade asks the default calendars and the keeper's
+        # own --calendar; a row naming any other address stays pending,
+        # and its calendar is never asked.
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run(LOXODONTA, "anchor", "--log", str(log), "--calendar", calendar.url,
+            check=True, env=self.env)
+        calendar.mode = "complete"
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-aaaa")
+        self.assertEqual(len(chain["anchors"]["pending"]), 1)
+        self.assertEqual(calendar.polled, [])
+
     def test_upgrade_attempts_are_polite_between_ticks(self):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run(LOXODONTA, "anchor", "--log", str(log), "--calendar", calendar.url,
             check=True, env=self.env)
 
-        first = run_scan(self.root, env=self.env)   # polls: pending
+        named = ("--calendar", calendar.url)
+        first = run_scan(self.root, *named, env=self.env)   # polls: pending
         calendar.mode = "complete"
-        throttled = run_scan(self.root, env=self.env)
-        eager = run_scan(self.root, env={
+        throttled = run_scan(self.root, *named, env=self.env)
+        eager = run_scan(self.root, *named, env={
             **self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"})
 
         self.assertEqual(len(calendar.polled), 2,
@@ -4348,11 +4367,11 @@ class AnchorKeeperTest(unittest.TestCase):
             f.write('{"n":3,"half-written')
         make_chain(self.root / "alpha" / "receipts", "sess-tore-002")
         env = {**self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"}
-        first = run_scan(self.root, env=env)
+        first = run_scan(self.root, "--calendar", calendar.url, env=env)
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         calendar.mode = "complete"
 
-        second = run_scan(self.root, env=env)
+        second = run_scan(self.root, "--calendar", calendar.url, env=env)
 
         tore, _ = chains_by_session(json.loads(second.stdout))[
             ("alpha", "sess-tore")]

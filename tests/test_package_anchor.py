@@ -164,6 +164,12 @@ class SealedPackageTest(AnchoredStoreCase):
         self.assertEqual(self.server.submitted, [bytes.fromhex(digest)])
         self.assertIn("anchored", result.stdout)
         self.assertIn("--upgrade --manifest", result.stdout)
+        # The upgrade asks only the calendars it is told (#415), so the
+        # line it prints names the one this package went to.
+        (upgrade,) = [line for line in result.stdout.splitlines()
+                      if line.startswith("upgrade: ")]
+        self.assertTrue(upgrade.endswith(f'--calendar="{self.server.url}"'),
+                        upgrade)
 
     CHAIN_DETAIL = ("ANCHOR-CLAIMED: entries 0..2: the attestation claims "
                     "Bitcoin block 850000, and the block was not checked")
@@ -211,7 +217,8 @@ class SealedPackageTest(AnchoredStoreCase):
         self.server.mode = "complete"
 
         upgrade = run(LOXODONTA, "anchor", "--upgrade", "--manifest",
-                      str(folder / "manifest.json"), env=self.env)
+                      str(folder / "manifest.json"), "--calendar",
+                      self.server.url, env=self.env)
 
         self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
         commitment = hashlib.sha256(bytes.fromhex(digest)
@@ -268,7 +275,8 @@ class SealedPackageTest(AnchoredStoreCase):
         folder = self.anchored_folder()
         self.server.mode = "complete"
         upgrade = run(LOXODONTA, "anchor", "--upgrade", "--manifest",
-                      str(folder / "manifest.json"), env=self.env)
+                      str(folder / "manifest.json"), "--calendar",
+                      self.server.url, env=self.env)
         self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
         root = replayed_root(self.manifest_digest(folder), self.server.nonce,
                              self.server.prefix, self.server.suffix)
@@ -394,7 +402,8 @@ class SealedPackageTest(AnchoredStoreCase):
         self.server.mode = "complete"
 
         upgrade = run(LOXODONTA, "anchor", "--upgrade", "--manifest",
-                      str(folder / "manifest.json"), env=self.env)
+                      str(folder / "manifest.json"), "--calendar",
+                      self.server.url, env=self.env)
 
         self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
         self.assertEqual(lags.polled, [], "the lagging calendar was re-asked")
@@ -986,7 +995,8 @@ class ReleasedVerifierTest(AnchoredStoreCase):
         folder = self.anchored_folder()
         self.server.mode = "complete"
         upgrade = run(LOXODONTA, "anchor", "--upgrade", "--manifest",
-                      str(folder / "manifest.json"), env=self.env)
+                      str(folder / "manifest.json"), "--calendar",
+                      self.server.url, env=self.env)
         self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
         kinds = [r.get("kind") for r in self.sidecar_records(folder)]
         self.assertEqual(kinds, ["anchor", "anchor"])

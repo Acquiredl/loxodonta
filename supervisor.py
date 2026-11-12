@@ -2000,7 +2000,8 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                  authority=None, chain_url=None):
     """One chain's turn with the keeper, at most once per throttle
     window: pending proofs are driven through `loxodonta anchor
-    --upgrade` (the record's own calendar; judgment stays with verify),
+    --upgrade` (the record's own calendar, when it is a default one or
+    one of `calendars`, #415; judgment stays with verify),
     and, only when the operator opted in with a cadence, a fresh head
     that has aged past it is anchored, and stamped by the authority the
     marker names, on this same turn (ADR-0032 ruling 3). Whether the
@@ -2019,10 +2020,15 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
     travel = ["--publish-chain", chain_url] if chain_url else []
+    # The upgrade asks only the default calendars and those it is told
+    # (#415): a proof the keeper's own --calendar took is completed too.
+    named = [flag for calendar in calendars
+             for flag in ("--calendar", calendar)]
     # A folder or a pipe where the sidecar belongs holds no proof to
     # upgrade (#364); the scan's verify names it.
     if os.path.isfile(sidecar):
-        finished = run_verb(["anchor", "--upgrade", f"--log={log}", *travel])
+        finished = run_verb(["anchor", "--upgrade", f"--log={log}", *named,
+                             *travel])
         attempted = True
         if finished is None:
             notes.append("upgrading did not finish in time; the proofs stay "
@@ -2042,10 +2048,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     if cadence is not None and entries:
         head = ripe_head(entries, now, cadence)
         if head:
-            command = ["anchor", f"--log={log}", *travel]
-            for calendar in calendars:
-                command += ["--calendar", calendar]
-            finished = run_verb(command)
+            finished = run_verb(["anchor", f"--log={log}", *travel, *named])
             attempted = True
             if finished is None:
                 failed = True
@@ -9476,8 +9479,12 @@ def cmd_package(args):
         where = out if args.folder else Path("<the unpacked zip>")
         print("anchored: the manifest's sha256 went to the calendars; the "
               "proof is pending until Bitcoin has it, a few hours")
+        # The upgrade asks only the default calendars and those it is
+        # told (#415), so the line names the ones this package went to.
+        named = "".join(f' --calendar="{visible(calendar)}"'
+                        for calendar in calendars)
         print(f'upgrade: python "{LOXODONTA.as_posix()}" anchor --upgrade '
-              f'--manifest="{(where / "manifest.json").as_posix()}"')
+              f'--manifest="{(where / "manifest.json").as_posix()}"{named}')
     if args.stamp:
         # The token is the authority's word about a moment, and the
         # recipient can only judge it with that authority's certificate

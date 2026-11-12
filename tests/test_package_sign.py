@@ -172,7 +172,8 @@ class SignedPackageTest(AnchoredStoreCase):
                                     self.server.url)
         self.server.mode = "complete"
         upgrade = run(LOXODONTA, "anchor", "--upgrade", "--manifest",
-                      str(folder / "manifest.json"), env=self.env)
+                      str(folder / "manifest.json"), "--calendar",
+                      self.server.url, env=self.env)
         self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
         fingerprint = fingerprint_of(self.keyfile)
 
@@ -274,7 +275,8 @@ class SignedPackageTest(AnchoredStoreCase):
                                     self.server.url)
         self.server.mode = "complete"
         upgrade = run(LOXODONTA, "anchor", "--upgrade", "--manifest",
-                      str(folder / "manifest.json"), env=self.env)
+                      str(folder / "manifest.json"), "--calendar",
+                      self.server.url, env=self.env)
         self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
 
         header = manifest_header(self, folder)

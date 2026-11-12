@@ -15,6 +15,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `docs/CLAIMS.md` names a limit ADR-0047's measured run found: where a `PreToolUse` hook rewrites a call's input, the receipt holds the input as the model sent it, not what ran.
 - `docs/CLAIMS.md` names two more limits: a listing drops any group shaped like a receipt's suffix, hand-written or not, and pairing by call id does not compare the receipt's tool with the call's.
 - `docs/CLAIMS.md` says the holder of the receiver's URL can add receipts as well as events: a hand-written receipt carrying a missing call's id pays that call at the receiver.
+- `anchor --upgrade` asks only the default calendars and each `--calendar` given; a row naming another address is named, skipped and never asked, so upgrading a handed sidecar sends nothing where its issuer chose. The keeper passes its `--calendar` (#415).
 
 ### Fixed
 
