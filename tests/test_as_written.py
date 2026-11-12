@@ -41,7 +41,8 @@ from test_receiver import (NDJSON, ReceiverFixture, free_port,  # noqa: E402
 from test_stamp import start_authority  # noqa: E402
 from test_supervisor import ago  # noqa: E402
 from test_supervisor import make_chain as make_store_chain  # noqa: E402
-from test_supervisor import run_scan, write_attempt_row  # noqa: E402
+from test_supervisor import (install_witness_hook, run_scan,  # noqa: E402
+                             run_store_scan, write_attempt_row)
 
 PUBLISH_TO = re.compile(r"^publish to (https?://\S+)$", re.M)
 SIDECAR = "application/x-loxodonta-sidecar"
@@ -1389,6 +1390,62 @@ class AsWrittenReadingTest(unittest.TestCase):
         chains, _ = self.scan()
 
         self.assertEqual(chains[codex.name]["left"], {"ts": None, "via": None})
+
+
+class TookEarlierReadingTest(AsWrittenBase):
+    """#614: the per-entry send writes no chain row, so a remote that took
+    a chain's earlier entries and missed its newest leaves only attempt
+    rows behind. The scan's wired-in-name-only sentence says that, from
+    the memo's record of sends, and keeps saying a remote that never took
+    one has never taken one."""
+
+    def published(self, url):
+        witness = self.root / "witness"
+        install_witness_hook(
+            witness, sessionend=True,
+            command=f'python loxodonta.py hook --publish-chain "{url}"')
+        done = run_store_scan(self.store, witness)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn(url, done.stdout)
+        return json.loads(done.stdout)["published"]
+
+    def test_a_remote_that_took_earlier_sends_and_missed_the_newest(self):
+        # As at `full`: the entry leaves as it is written, the session
+        # end finds the remote holding the end and writes its `sent`
+        # attempt row and no chain row, and the next entry's send fails.
+        receiver = start_receiver(self, self.data)
+        for send in (self.call, self.session_end):
+            taken = send("--publish-chain", receiver.url)
+            self.assertEqual(taken.returncode, 0, taken.stderr)
+        log = self.chain()
+        self.assertHeld(log)
+        receiver.stop()
+        missed = self.call("--publish-chain", receiver.url, command="pwd")
+        self.assertEqual(missed.returncode, 0, missed.stderr)
+        rows = memo_rows(log)
+        self.assertEqual([row["kind"] for row in rows], ["attempt"] * 2, rows)
+        self.assertEqual(rows[0]["outcome"], "sent")
+        self.assertNotEqual(rows[1]["outcome"], "sent")
+
+        note = self.published(receiver.url)["note"]
+
+        self.assertIn("(--publish-chain)", note)
+        self.assertNotIn("never taken", note)
+        self.assertIn("the remote took earlier sends and missed the newest",
+                      note)
+
+    def test_a_remote_that_never_took_one_reads_as_before(self):
+        url = f"http://127.0.0.1:{free_port()}/token"
+        missed = self.call("--publish-chain", url)
+        self.assertEqual(missed.returncode, 0, missed.stderr)
+        (row,) = entry_attempts(self.chain())
+        self.assertNotEqual(row["outcome"], "sent")
+
+        note = self.published(url)["note"]
+
+        self.assertIn("either no session has ended since the wiring, or the "
+                      "remote has never taken one", note)
+        self.assertNotIn("took earlier", note)
 
 
 # --- The proofs travel ------------------------------------------------------------
