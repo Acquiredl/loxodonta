@@ -4531,9 +4531,10 @@ def pair_calls(results, calls, witnessed, late=()):
     receipts at the receiver, as a dict: `rule`, `owed`, `deficit`,
     `surplus`, `missing`, `mismatched`, `repeated`, `late` and `matched`.
     `results` are the calls as (time, tool, call id or None, arrival),
-    `calls` the receipts as (tool, call id or None). Where both records name calls, they are
-    joined on the id (ADR-0046 ruling 3): a call reported twice under one
-    id is one call, and a receipt pays only the call its id names, and
+    `calls` the receipts as (tool, call id or None). Where both records
+    name calls, they are joined on the id (ADR-0046 ruling 3): a call
+    reported twice under one id is one call, and a receipt pays only the
+    call its id names, and
     only when it names the tool the event names for that id (#620); one
     that names another tool pays nothing and is listed in `mismatched`
     as (id, the receipt's tool, the event's tool). At most one receipt
@@ -4545,8 +4546,9 @@ def pair_calls(results, calls, witnessed, late=()):
     a look named its call missing (#620), pays nothing either, and
     `late` counts it; `matched` holds every id a receipt of its tool
     carries, paid or late, so the memory can say when it was first seen.
-    `missing` names each call with no receipt, in time order. A call or a receipt naming none is paired by count
-    within its tool, among its own kind only, so a receipt with no id
+    `missing` names each call with no receipt, in time order. A call or
+    a receipt naming none is paired by count within its tool, among its
+    own kind only, so a receipt with no id
     never pays a call the harness named. Where either record names none,
     the count by tool stands (ADR-0034). `owed` is the calls counted, as
     [(time, tool)]."""
