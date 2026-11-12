@@ -3288,7 +3288,7 @@ def recorder_drift(witness):
     # not answer leaves the checkout read as outside git, never as clean
     # or level (#572); each is asked only once the one before it
     # answered. No upstream is an answer: "".
-    head = changed = upstream = counts = None
+    head = changed = held = on_disk = upstream = counts = None
     branch = git_say(home, "rev-parse", "--abbrev-ref", "HEAD")
     if branch is not None:
         head = git_say(home, "rev-parse", "--short", "HEAD")
@@ -3297,6 +3297,20 @@ def recorder_drift(witness):
         # same checkout is not drift in the recorder.
         changed = git_say(home, "status", "--porcelain", "--", script.name)
     if changed is not None:
+        # `status` says nothing of a file marked assume-unchanged or
+        # skip-worktree, or ignored and never committed (#621), so the
+        # file is also hashed against the committed blob, the worse of
+        # the two winning. hash-object applies the checkout's own
+        # conversions: a CRLF file written by autocrlf hashes to its LF
+        # blob. No committed blob is "".
+        held = git_say(home, "rev-parse", "--verify", "--quiet",
+                       f"HEAD:./{script.name}", refused="")
+    # Only a regular file is handed to git to hash: it would wait on a
+    # pipe until the timeout, and status passes one by in silence, so
+    # anything else is read below, where it is named.
+    if held is not None and file_problem(script) is None:
+        on_disk = git_say(home, "hash-object", "--", script.name)
+    if on_disk is not None:
         upstream = git_say(home, "rev-parse", "--abbrev-ref",
                            "--symbolic-full-name", "@{u}", refused="")
     if upstream:
@@ -3307,7 +3321,8 @@ def recorder_drift(witness):
     if not (upstream == "" or counted):
         return recorder_versioned(script, notice)
     notice.update({"state": "tracked", "branch": branch, "head": head,
-                   "dirty": bool(changed), "upstream": upstream or None})
+                   "dirty": bool(changed) or on_disk != held,
+                   "upstream": upstream or None})
     if upstream:
         notice["behind"], notice["ahead"] = (int(n) for n in level)
         git_dir = git_say(home, "rev-parse", "--git-dir")
@@ -3319,7 +3334,7 @@ def recorder_drift(witness):
                 ).strftime("%Y-%m-%dT%H:%M:%SZ")
             except OSError:
                 pass  # never fetched here; the counts say so themselves
-    notice["note"] = recorder_words(notice)
+    notice["note"] = recorder_words(notice, hidden=not changed)
     return notice
 
 
@@ -3384,14 +3399,17 @@ def recorder_notice(witness):
     return notice
 
 
-def recorder_words(notice):
+def recorder_words(notice, hidden=False):
     """The notice in one sentence, worst thing first. Behind-counts are
     only as fresh as the last fetch and say so, because a stale count
-    that reads as reassurance is worse than no count."""
+    that reads as reassurance is worse than no count. `hidden` when
+    `git status` showed nothing of a change the bytes show (#621)."""
     said = []
     if notice["dirty"]:
         said.append("the recorder has uncommitted changes — the file "
-                    "being executed is not the file that was reviewed")
+                    "being executed is not the file that was reviewed"
+                    + (", and git has been told not to show them"
+                       if hidden else ""))
     if notice["behind"]:
         said.append(f"the checkout is {notice['behind']} commit(s) behind "
                     f"{notice['upstream']} as of the last fetch"

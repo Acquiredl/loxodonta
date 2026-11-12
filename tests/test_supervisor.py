@@ -4894,6 +4894,21 @@ class RecorderDriftTest(unittest.TestCase):
         self.assertTrue(recorder["dirty"])
         self.assertIn("git has been told not to show them", recorder["note"])
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a named pipe")
+    def test_a_pipe_in_the_recorders_place_is_named_never_hashed(self):
+        # #621: the bytes are hashed only of a regular file; git would
+        # wait on a pipe until its bound, and the read names it instead.
+        _, script = self.make_checkout()
+        script.unlink()
+        os.mkfifo(script)
+        started = time.monotonic()
+
+        recorder = self.notice()
+
+        self.assertLess(time.monotonic() - started, 9, "git waited on it")
+        self.assertIn("not a regular file", recorder["note"])
+        self.assertNotIn("clean", recorder["note"])
+
     def test_line_endings_converted_on_checkout_are_not_drift(self):
         # #621: with autocrlf the file on disk ends its lines in CRLF and
         # the blob in LF; the comparison goes through git's own clean
