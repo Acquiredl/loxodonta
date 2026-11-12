@@ -2906,6 +2906,28 @@ def leaves_as_written(log, entries, sending):
     return newest is None or newest.get("outcome") in SENT_OUTCOMES
 
 
+def missed_the_newest(log, step, remote):
+    """Whether the memo beside `log` records that the remote took an
+    earlier attempt of `step` and failed the newest (#614): a `sent`
+    attempt row, then a newest one that is not. A send that found the
+    remote holding the chain's end writes such a row and no chain row,
+    as the per-entry send writes none (ADR-0045), so without this a
+    remote that took every earlier entry reads as one that never took
+    any. With `remote`, only rows naming its fingerprint count (#263);
+    the head's rows name none, and count wherever they went. Testimony,
+    like the memo."""
+    mine = remote_id(remote) if remote is not None else None
+    took, newest = False, None
+    for record in sidecar_records(Path(str(log) + ".published.jsonl")):
+        if row_kind("memo", record) != ATTEMPT_KIND \
+                or record.get("step") != step \
+                or (mine is not None and record.get("remote_id") != mine):
+            continue
+        newest = record.get("outcome")
+        took = took or newest in SENT_OUTCOMES
+    return took and newest not in SENT_OUTCOMES
+
+
 def published_reading(witness, logs, written=()):
     """#240 part 3: whether the wired SessionEnd command publishes,
     whether any chain here holds a row saying something was sent, and
@@ -2934,10 +2956,26 @@ def published_reading(witness, logs, written=()):
                             for route in silent)
         flags = " and ".join("--publish" if route == "head"
                              else "--publish-chain" for route in silent)
+        # #614: which of the two it is comes from the memo's record of
+        # sends, per route, never from a guess.
+        took = {route: any(missed_the_newest(
+                               log, f"publish-{route}",
+                               remote if route == "chain" else None)
+                           for log in logs)
+                for route in silent}
+        reasons = {True: "the remote took earlier sends and missed the "
+                         "newest",
+                   False: "either no session has ended since the wiring, or "
+                          "the remote has never taken one"}
+        if len(set(took.values())) == 1:
+            why = reasons[took[silent[0]]]
+        else:
+            why = "; ".join(f"for the {route}, {reasons[took[route]]}"
+                            for route in silent)
+        says = "why" if all(took.values()) else "which"
         note = (f"publishing is wired on the SessionEnd command ({flags}) "
-                f"and no chain here holds {what}: either no session has "
-                "ended since the wiring, or the remote has never taken "
-                "one — each chain's last failed attempt says which")
+                f"and no chain here holds {what}: {why} — each chain's last "
+                f"failed attempt says {says}")
     return {"wired": wired, "sent": sent, "note": note}
 
 

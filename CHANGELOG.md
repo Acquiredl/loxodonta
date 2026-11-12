@@ -31,6 +31,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The receiver refuses a `RECEIVER_DEADLINE_SECONDS` or `RECEIVER_TIMEOUT_SECONDS` it cannot use by name, exit 64, before it starts: it died at import with a traceback. A crash in it exits 70, never 1 (#589).
 - A number of seconds the supervisor or the receiver waits on, such as `SUPERVISOR_KEEPER_TICK_SECONDS=1e10`, is refused by name with 64 when no wait can take it: the keeper's first turn raised `OverflowError` (#589).
 - `supervisor serve` says nothing on its log when a client leaves before its reply is read: the request's thread printed a traceback there (#589).
+- The scan no longer says the remote "has never taken" a send it took: where the memo shows earlier sends taken and the newest failed, the publishing note says the remote missed the newest (#614).
 
 ## [0.20.0] - 2026-11-12
 
