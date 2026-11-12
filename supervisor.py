@@ -9614,8 +9614,9 @@ def metrics_text(report, age_seconds):
     # the writer-reachable baseline: a count a scrape keeps off the
     # machine, so a list that shrinks is seen to.
     gauge("loxodonta_baseline_acknowledgements",
-          "Acknowledgements on record in the baseline: changes an operator "
-          "accepted with supervisor acknowledge", "testimony",
+          "Acknowledgements on record in the baseline: changes, and at a "
+          "receiver settled sessions, an operator accepted with supervisor "
+          "acknowledge", "testimony",
           [((), len((report.get("baseline") or {}).get("acknowledged")
                     or []))])
 
@@ -11101,6 +11102,10 @@ function renderStrip(report) {
     r.sessions.flatMap(s => s.chains));
   const live = report.completeness.sessions.filter(s =>
     ["ALARM-SILENT", "ALARM-DEFICIT"].includes(s.state));
+  // At a receiver: settled sessions whose receipts and harness events
+  // disagree, raising the exit until acknowledged there (ADR-0046).
+  // Not live, so not the strip's "stopped arriving" words.
+  const unaccepted = report.completeness.sessions.filter(s => s.raises);
   const regenerated = chains.filter(c => !c.superseded && c.exit === 3);
   const broken = chains.filter(c => !c.superseded &&
                                     c.verdict === "BROKEN");
@@ -11121,7 +11126,8 @@ function renderStrip(report) {
     state.textContent = "RECEIPTS STOPPED ARRIVING";
     why.textContent = live.length + " session(s) visibly active while " +
       "the chain goes quiet — investigate while it is live";
-  } else if (broken.length || changes || report.exit !== 0) {
+  } else if (broken.length || changes || blind || shut ||
+             (report.exit !== 0 && !unaccepted.length)) {
     colour = "damage";
     state.textContent = broken.length ? "HISTORY WAS ALTERED"
                       : changes ? "CHANGED SINCE LAST LOOK"
@@ -11139,6 +11145,14 @@ function renderStrip(report) {
         "unknown, never read as empty"
       : "details in the band below") +
       " (scan exit " + report.exit + ")";
+  } else if (unaccepted.length) {
+    colour = "grave";
+    state.textContent = "A FINDING NO ONE HAS ACCEPTED";
+    why.textContent = unaccepted.length + " settled session(s) whose " +
+      "receipts and harness events disagree at the receiver, named in " +
+      "the completeness watch below; each raises the exit until " +
+      "acknowledged here with supervisor acknowledge --receiver DIR " +
+      "--session (scan exit " + report.exit + ")";
   } else {
     colour = "quiet";
     state.textContent = "all quiet";
@@ -13012,7 +13026,7 @@ def main(argv):
         help="accept the state a scan reported for one chain, or at a "
              "receiver for one session, or start a baseline that cannot "
              "be read afresh (ADR-0039, ADR-0046): one record every later "
-             "report shows; it moves no verdict")
+             "report shows; it moves no verdict of verify's")
     acknowledge.add_argument(
         "log", nargs="?", default=None, metavar="LOG",
         help="the chain, as the scan's event prints its `log`")

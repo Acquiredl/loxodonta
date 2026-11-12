@@ -6317,6 +6317,32 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(row["paired_by"], "call id")
         self.assertEqual(row["missing_calls"]["calls"], [FIXTURE_CALLS[1]])
 
+    def test_events_naming_no_call_are_counted_by_tool_beside_ids(self):
+        # Ruling 3: the receipts name their calls and the events do not,
+        # so one side carries none, and the count by tool judges it.
+        path = self.data / f"events-{FIXTURE_DAY}.jsonl"
+        lines = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            arrival = json.loads(line)
+            for resource in arrival["logs"]["resourceLogs"]:
+                for scope in resource["scopeLogs"]:
+                    for record in scope["logRecords"]:
+                        record["attributes"] = [
+                            pair for pair in record["attributes"]
+                            if pair["key"] != "tool_use_id"]
+            lines.append(json.dumps(arrival))
+        path.write_text("".join(line + "\n" for line in lines),
+                        encoding="utf-8")
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]"))
+
+        row = self.rows(self.report())[FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "ENDED-CLEAN")
+        self.assertEqual(row["paired_by"], "count by tool")
+        self.assertNotIn("missing_calls", row)
+
     def test_two_receipts_of_one_call_pay_it_once_and_read_as_surplus(self):
         # The fixture's session as a recorder with the suffix writes it:
         # two receipts for the failed call and one for the refused call

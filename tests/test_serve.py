@@ -30,9 +30,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
                      temp_folder)
 
-from test_supervisor import (FIXTURE_SESSION, assert_replaced_whole,
-                             chain_copy, hold, read_line_within,
-                             receiver_folder, unreadable_depth)
+from test_supervisor import (FIXTURE_RECEIPTS, FIXTURE_SESSION,
+                             assert_replaced_whole, chain_copy, hold,
+                             read_line_within, receiver_folder,
+                             unreadable_depth)
 
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
@@ -1721,6 +1722,29 @@ class ReceiverServeTest(ServerFixture):
         self.assertTrue(os.path.isfile(shelf / "daybook.json"))
         self.assertTrue(os.path.isfile(shelf / "baseline.json"))
         self.assertFalse(os.path.exists(self.root / ".supervisor-daybook.json"))
+
+    def test_a_finding_no_one_has_accepted_has_its_own_strip_words(self):
+        # ADR-0046 ruling 2: a settled deficit at the receiver raises the
+        # exit, and the strip says what it is, not a change the baseline
+        # saw nor a live session gone quiet. The strip is drawn by the
+        # page's script, so what is pinned is the field it reads in the
+        # status and the branch in the page that reads it.
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 6)
+        self.assertEqual(served["baseline"]["events"], [])
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["raises"]),
+                         ("ENDED-DEFICIT", True))
+        self.assertIn("sessions.filter(s => s.raises)", page)
+        self.assertIn("A FINDING NO ONE HAS ACCEPTED", page)
+        self.assertIn("acknowledged here with supervisor acknowledge "
+                      "--receiver DIR", page)
 
     def test_the_startup_line_says_no_keeper_runs_at_the_far_end(self):
         # #487 item 12.

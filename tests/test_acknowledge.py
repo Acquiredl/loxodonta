@@ -28,13 +28,13 @@ from pathlib import Path
 # when the module runs alone (`python -m unittest tests.test_acknowledge`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
-                     temp_folder)
+from support import (LOXODONTA, SUPERVISOR, clean_env,  # noqa: E402
+                     isolated_env, run, temp_folder)
 
 from test_anchor import FakeCalendar
 from test_supervisor import (BASELINE_NAME, FIXTURE_DAY, FIXTURE_RECEIPTS,
                              FIXTURE_SESSION, FakeCalendarHandler, ago,
-                             chain_copy, receiver_folder,
+                             chain_copy, lay_events, receiver_folder,
                              write_pending_anchor)
 
 
@@ -1267,10 +1267,51 @@ class ReceiverAcknowledgeTest(unittest.TestCase):
                                    str(self.data), "--session", session,
                                    state)
 
-    def session_row(self, report):
+    def session_row(self, report, session=FIXTURE_SESSION):
         (row,) = [row for row in report["completeness"]["sessions"]
-                  if row["session"] == FIXTURE_SESSION]
+                  if row["session"] == session]
         return row
+
+    def one_more_receipt(self, session):
+        """One more receipt on a session's chain, appended where
+        `chain_copy` wrote it and copied over the receiver's copy, as a
+        later send would deliver it: the copy grows by an append, so the
+        baseline sees no change, and only the session's counts move."""
+        log = self.data.parent / "store" / f"receipts-{session}.jsonl"
+        run(LOXODONTA, "log", "--log", str(log), "--actor", "claude-code",
+            "--action", "Bash: ls", check=True, timeout=BOUND,
+            env=clean_env())
+        (self.data / log.name).write_bytes(log.read_bytes())
+
+    def raises_until_accepted_then_again(self, session, state):
+        """Raise, acknowledge, change the counts, raise again: ruling 2
+        for one state of the three."""
+        row = self.session_row(self.look(6), session)
+        self.assertEqual((row["state"], row["raises"]), (state, True))
+        accepted = self.accept(state, session=session)
+        self.assertEqual(accepted.returncode, 0,
+                         accepted.stdout + accepted.stderr)
+        row = self.session_row(self.look(0), session)
+        self.assertNotIn("raises", row)
+        self.assertTrue(row["acknowledged"]["holds"])
+
+        self.one_more_receipt(session)
+
+        row = self.session_row(self.look(6), session)
+        self.assertEqual(row["state"], state)
+        self.assertTrue(row["raises"])
+        self.assertFalse(row["acknowledged"]["holds"])
+
+    def test_an_absent_second_record_is_accepted_and_raises_again(self):
+        # A session with receipts and no events (ADR-0046 ruling 2).
+        chain_copy(self.data, "cut-session-1111")
+        self.raises_until_accepted_then_again("cut-session-1111",
+                                              "SECOND-RECORD-ABSENT")
+
+    def test_a_gap_in_the_second_record_is_accepted_and_raises_again(self):
+        lay_events(self.data, drop=(29, 30))
+        self.raises_until_accepted_then_again(FIXTURE_SESSION,
+                                              "SECOND-RECORD-GAP")
 
     def report_one_more_call(self):
         """One more call of the fixture's session, as the harness would
