@@ -3108,10 +3108,13 @@ def reader_gone(error):
     report | head`). POSIX raises BrokenPipeError (EPIPE); Windows
     reports a plain EINVAL from the closed handle instead, so match on
     both or the quiet death is a traceback on half the platforms. EINVAL
-    means nothing about pipes off Windows."""
+    means nothing about pipes off Windows, and on Windows it counts only
+    when it names no file: a write to stdout never does, and a file
+    refused for not being a regular one always does, so that refusal is
+    never taken for a reader that left."""
     return isinstance(error, BrokenPipeError) or (
         os.name == "nt" and isinstance(error, OSError)
-        and error.errno == errno.EINVAL)
+        and error.errno == errno.EINVAL and error.filename is None)
 
 
 def run_main(main):

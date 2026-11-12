@@ -3101,10 +3101,13 @@ def reader_gone(error):
     report | head`). POSIX raises BrokenPipeError (EPIPE); Windows
     reports a plain EINVAL from the closed handle instead, so match on
     both or the quiet death is a traceback on half the platforms. EINVAL
-    means nothing about pipes off Windows."""
+    means nothing about pipes off Windows, and on Windows it counts only
+    when it names no file: a write to stdout never does, and a file
+    refused for not being a regular one always does, so that refusal is
+    never taken for a reader that left."""
     return isinstance(error, BrokenPipeError) or (
         os.name == "nt" and isinstance(error, OSError)
-        and error.errno == errno.EINVAL)
+        and error.errno == errno.EINVAL and error.filename is None)
 
 
 def run_main(main):
@@ -3190,10 +3193,8 @@ def environment(name, default=None):
     return os.environ.get(name, default)
 
 
-# The supervisor and the receiver read every number from their
-# environment by this rule. The recorder's own two knobs, the lock's
-# timeout and the batch cap, are read when used and fall back to their
-# defaults instead (#589); the original lives here as every twin's does.
+# Never called here: held so the supervisor and the receiver read their
+# numbers by one rule; the recorder's own knobs fall back quietly (#449).
 def number_setting(name, raw, kind=int, waited=False):
     """The number the text `raw` of environment variable `name` says,
     read as `kind` (int or float). A value that is not such a number,
