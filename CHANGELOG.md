@@ -17,6 +17,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Fixed
 
 - At the receiver, an acknowledged session whose events hold a call naming no tool stays acknowledged: its counts were compared before the memory's JSON had turned the missing name into `"null"`, so they never matched (ADR-0046).
+- The help of `install-hook --publish-chain` and of the supervisor's `--publish-chain` says what ADR-0045 built: each entry leaves as it is written, and a send carries what the remote does not hold.
 
 ## [0.20.0] - 2026-11-12
 

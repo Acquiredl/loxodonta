@@ -6495,8 +6495,9 @@ def cmd_hook(args):
             publish_head(log, args.publish, session, timeout=bound,
                          window=window)
         if args.publish_chain:
-            # The entries after the cursor (ADR-0031 ruling 3); what
-            # does not fit the window is the keeper's.
+            # From the chain's last entry, and on from the remote's
+            # answer (ADR-0045 ruling 4); what does not fit the window
+            # is the keeper's.
             session_end_publish_chain(log, args.publish_chain, session,
                                       timeout=bound, window=window)
         if args.stamp:
@@ -9042,10 +9043,11 @@ def main(argv=None):
              "name, or action line leaves")
     install_parser.add_argument(
         "--publish-chain", default=None, metavar="URL", type=publish_url,
-        help="opt in: every session end POSTs the chain's entries since "
-             "the last acknowledged one to this URL, after the head and "
-             "before the stamp and the anchor, quietly and best-effort "
-             "(ADR-0031). Pick a remote that can only add, never delete, "
+        help="opt in: each entry is POSTed to this URL as it is written, "
+             "within a second, and every session end sends what the "
+             "remote does not hold, after the head and before the stamp "
+             "and the anchor, quietly and best-effort (ADR-0031, "
+             "ADR-0045). Pick a remote that can only add, never delete, "
              "such as the receiver (docs/RECEIVER.md). Every entry "
              "leaves: action lines are command lines, and the installer "
              "says so")

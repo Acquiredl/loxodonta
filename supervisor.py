@@ -2220,7 +2220,8 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
 
 def publish_through_recorder(log, url, what):
     """One `loxodonta publish` as a subprocess: the head when `what` is
-    "head", the chain's entries after the cursor when it is "chain".
+    "head", the chain's entries the remote does not hold when it is
+    "chain".
     Returns the note for the panel when it did not land, else None. The
     recorder's stderr names the failure and never the URL, but it is
     not repeated here: the note is the panel's, and one sentence the
@@ -13063,10 +13064,11 @@ def main(argv):
     watching.add_argument("--publish-chain", type=publish_url, default=None,
                           metavar="URL",
                           help="opt in: on --publish-every's cadence, also "
-                               "send the chain's entries since the last "
-                               "acknowledged one to this URL, after the "
-                               "head, through `loxodonta publish --chain` "
-                               "(ADR-0031). Every entry leaves; pick a "
+                               "send the chain's entries the remote does "
+                               "not hold to this URL, after the head, "
+                               "through `loxodonta publish --chain` "
+                               "(ADR-0031, ADR-0045). Every entry leaves; "
+                               "pick a "
                                "remote that can only add, never delete, "
                                "such as the receiver")
     scan = sub.add_parser(
