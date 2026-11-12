@@ -1224,6 +1224,29 @@ class ConnectsToGenesisTest(AsWrittenBase):
         self.assertEqual(remote.received, ["6-6", "2-2", "1-6"])
         self.assertEqual(entry_attempts(log), [])
 
+    def test_a_post_the_second_cuts_after_an_answer_is_time_run_out(self):
+        # The remote answers the entry in hand at once, a hole, and is
+        # slow on the fill: the second ran out on a remote that answers,
+        # and the row never says it gave no answer.
+        flags, log = self.drawer_chain(6)
+
+        def script(server, ns):
+            if server.held is None:
+                server.held = 0
+                return 409, {"held_n": 0, "connects": False,
+                             "refused": f"entry {ns[0]} leaves a hole"}
+            time.sleep(2)
+            return 200, {"appended": len(ns), "dropped": 0,
+                         "held_n": ns[-1], "connects": True}
+
+        remote = serve_scripted(self, script)
+
+        done = self.call(*flags, "--publish-chain", remote.url)
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        (row,) = entry_attempts(log)
+        self.assertEqual(row["outcome"], TIME_RAN_OUT)
+
     def test_one_entry_past_the_cap_still_goes_alone(self):
         # The cap bounds how many entries share a batch: a cap smaller
         # than any entry sends each alone, and none is refused.
