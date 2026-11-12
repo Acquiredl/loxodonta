@@ -5660,6 +5660,7 @@ class UsageExitTest(unittest.TestCase):
                        "SUPERVISOR_WANING_SECONDS": True,
                        "SUPERVISOR_DORMANT_SECONDS": True,
                        "SUPERVISOR_SETTLE_SECONDS": True,
+                       "SUPERVISOR_LATE_RECEIPT_SECONDS": True,
                        "SUPERVISOR_HOT_TIMES": True,
                        "SUPERVISOR_HOT_FLOOR": True,
                        "SUPERVISOR_SCAN_TTL_SECONDS": False,
@@ -6818,8 +6819,10 @@ class ReceiverReadingTest(unittest.TestCase):
     def test_two_receipts_of_one_call_pay_it_once_and_read_as_surplus(self):
         # The fixture's session as a recorder with the suffix writes it:
         # two receipts for the failed call and one for the refused call
-        # (#476). Joined on the id, every call is paid, and the extra
-        # receipts are the surplus #476 makes, no alarm.
+        # (#476). Joined on the id, every call is paid. The failed call's
+        # second receipt is neither surplus nor deficit, and the row
+        # counts it; the refused call's receipt is still the surplus
+        # #476 makes, no alarm.
         chain_copy(self.data, FIXTURE_SESSION, actions=(
             f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
             f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]",
@@ -6834,6 +6837,241 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual((row["deficit"], row["tools"]), (0, 2))
         self.assertNotIn("missing_calls", row)
         self.assertNotIn("raises", row)
+        self.assertIn("1 receipt(s) repeat a call id already paid",
+                      row["note"])
+
+    def test_a_failed_call_s_second_receipt_alone_reads_clean(self):
+        # #476, the reader's half: a failed call fired two hooks, so two
+        # receipts carry its id. At most one pays; the other is no
+        # surplus, so the session reads clean, and the row says why.
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]",
+            f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]"))
+
+        row = self.rows(self.report())[FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "ENDED-CLEAN")
+        self.assertEqual(row["receipts"], 3)
+        self.assertIn("1 receipt(s) repeat a call id already paid",
+                      row["note"])
+
+    def test_a_repeated_id_pays_once_where_the_count_by_tool_stands(self):
+        # The events name no call, so the count by tool judges: a receipt
+        # repeating an id another receipt carries pays no second call.
+        path = self.data / f"events-{FIXTURE_DAY}.jsonl"
+        lines = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            arrival = json.loads(line)
+            for resource in arrival["logs"]["resourceLogs"]:
+                for scope in resource["scopeLogs"]:
+                    for record in scope["logRecords"]:
+                        record["attributes"] = [
+                            pair for pair in record["attributes"]
+                            if pair["key"] != "tool_use_id"]
+            lines.append(json.dumps(arrival))
+        path.write_text("".join(line + "\n" for line in lines),
+                        encoding="utf-8")
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]"))
+
+        row = self.rows(self.report(expect=6))[FIXTURE_SESSION]
+
+        self.assertEqual((row["state"], row["paired_by"], row["deficit"]),
+                         ("ENDED-DEFICIT", "count by tool", 1))
+        self.assertIn("1 receipt(s) repeat a call id already paid",
+                      row["note"])
+
+    def test_a_receipt_naming_another_tool_pays_nothing_and_is_named(self):
+        # #620: the second call's id in a receipt whose action line names
+        # Read, where the harness's event names Bash for that id. The
+        # call stays unpaid, and the row says which id and which tools.
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Read: notes.md [call={FIXTURE_CALLS[1]} input=unhashed]"))
+
+        report = self.report(expect=6)
+
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["paired_by"], "call id")
+        self.assertEqual(row["missing_calls"],
+                         {"count": 1, "calls": [FIXTURE_CALLS[1]]})
+        self.assertTrue(row["raises"])
+        self.assertIn(f"{FIXTURE_CALLS[1]} names Read where the harness's "
+                      "event names Bash", row["note"])
+        self.assertIn("1 receipt(s) carry the id of a call", row["note"])
+
+    def test_an_event_naming_no_tool_pairs_on_the_id_alone(self):
+        # #487 item 7: a tool_result with no tool_name. There is no tool
+        # to compare, so the id pays as it did.
+        data = receiver_folder(self.base / "own", events=False)
+        chain_copy(data, "toolless-session-0001", actions=(
+            "Read: notes.md [call=toolu_toolless_1 input=unhashed]",))
+        post_event(data, 0, "tool_result", received_ago(7200),
+                   call="toolu_toolless_1", session="toolless-session-0001")
+
+        row = self.rows(self.report(data=data))["toolless-session-0001"]
+
+        self.assertEqual((row["state"], row["paired_by"]),
+                         ("ENDED-CLEAN", "call id"))
+        self.assertNotIn("note", row)
+
+    def test_a_tool_the_harness_names_mcp_tool_is_paid_by_an_mcp_receipt(self):
+        # The harness's events name a call to a user's MCP server by the
+        # literal `mcp_tool`; the hook's receipt names the server's tool,
+        # `mcp__<server>__<tool>`. Honest, so no mismatch; a receipt of
+        # a tool outside MCP is one.
+        data = receiver_folder(self.base / "own", events=False)
+        chain_copy(data, "mcp-session-0001", actions=(
+            "mcp__notes__search: albatross [call=toolu_mcp_1 input=unhashed]",
+            "Bash: true [call=toolu_mcp_2 input=unhashed]"))
+        post_event(data, 0, "tool_result", received_ago(7200),
+                   tool="mcp_tool", call="toolu_mcp_1",
+                   session="mcp-session-0001")
+        post_event(data, 1, "tool_result", received_ago(7200),
+                   tool="mcp_tool", call="toolu_mcp_2",
+                   session="mcp-session-0001")
+
+        row = self.rows(self.report(expect=6, data=data))["mcp-session-0001"]
+
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["missing_calls"],
+                         {"count": 1, "calls": ["toolu_mcp_2"]})
+        self.assertIn("toolu_mcp_2 names Bash where the harness's event "
+                      "names mcp_tool", row["note"])
+
+    # #620's second case, the issue comment's four steps: two calls
+    # reported, one receipt; a settled look names the second missing;
+    # a sibling chain then brings a hand-written receipt carrying its id.
+    LATE_SESSION = "late-session-0001"
+
+    def named_missing(self, data):
+        """Steps 1 and 2 in a folder of their own: the look that names
+        `toolu_b` missing, exit 6."""
+        for sequence, call in enumerate(("toolu_a", "toolu_b")):
+            post_event(data, sequence, "tool_result", received_ago(7200),
+                       tool="Bash", call=call, session=self.LATE_SESSION)
+        chain_copy(data, self.LATE_SESSION, actions=(
+            "Bash: echo one [call=toolu_a input=unhashed]",))
+        row = self.rows(self.report(expect=6, data=data))[self.LATE_SESSION]
+        self.assertEqual((row["state"], row["missing_calls"]["calls"]),
+                         ("ENDED-DEFICIT", ["toolu_b"]))
+
+    def late_receipt(self, data):
+        """Step 3: the sibling chain holding the hand-written receipt."""
+        chain_copy(data, self.LATE_SESSION + "-002", actions=(
+            "Bash: echo harmless [call=toolu_b input=unhashed]",))
+
+    def remembered(self, data):
+        return json.loads((data / "supervisor" / "baseline.json")
+                          .read_text(encoding="utf-8"))
+
+    def move_memory_back(self, data, seconds, keys=("named",)):
+        """The look's clock moved: what the memory says a look named (and
+        first saw) dated `seconds` earlier, as if that look ran then."""
+        memory = self.remembered(data)
+        for calls in memory["named_missing"].values():
+            for record in calls.values():
+                for key in keys:
+                    if key in record:
+                        when = datetime.datetime.strptime(
+                            record[key], "%Y-%m-%dT%H:%M:%SZ")
+                        record[key] = (when - datetime.timedelta(
+                            seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (data / "supervisor" / "baseline.json").write_text(
+            json.dumps(memory), encoding="utf-8")
+
+    def test_a_receipt_arriving_after_its_call_was_named_missing_pays_nothing(self):
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        self.move_memory_back(data, 7200)
+        self.late_receipt(data)
+
+        report = self.report(expect=6, data=data)
+        again = self.report(expect=6, data=data)
+
+        for look in (report, again):
+            row = self.rows(look)[self.LATE_SESSION]
+            self.assertEqual(row["state"], "ENDED-DEFICIT")
+            self.assertEqual(row["missing_calls"]["calls"], ["toolu_b"])
+            self.assertTrue(row["raises"])
+            self.assertIn("1 receipt(s) arrived after their call was named "
+                          "missing", row["note"])
+        self.assertEqual(
+            [chain["verdict"] for chain in
+             chains_by_session(report)[("receiver", self.LATE_SESSION)]],
+            ["VALID", "VALID"])
+        # It keeps its finding until accepted here (ADR-0046 ruling 2).
+        accepted = run(SUPERVISOR, "acknowledge", "--receiver", str(data),
+                       "--session", self.LATE_SESSION, "ENDED-DEFICIT",
+                       timeout=180, env={**self.env,
+                                         "SUPERVISOR_SETTLE_SECONDS": "0"})
+        self.assertEqual(accepted.returncode, 0,
+                         accepted.stdout + accepted.stderr)
+        self.report(data=data)
+
+    def test_a_receipt_arriving_inside_the_grace_pays_its_call(self):
+        # An honest tail re-sent after a failed send still clears; the
+        # memory keeps when it was first seen, so it stays paid after.
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        self.late_receipt(data)
+
+        paid = self.report(data=data)
+        self.move_memory_back(data, 7200, keys=("named", "seen"))
+        later = self.report(data=data)
+
+        for look in (paid, later):
+            row = self.rows(look)[self.LATE_SESSION]
+            self.assertEqual(row["state"], "ENDED-CLEAN")
+            self.assertNotIn("note", row)
+
+    def test_an_unreadable_memory_reads_as_before_and_says_so(self):
+        # Never a crash, never quieter than before the memory was kept:
+        # the receipt pays, and the baseline's own alarm stands (exit 5).
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        (data / "supervisor" / "baseline.json").write_text(
+            "{not json", encoding="utf-8")
+        self.late_receipt(data)
+
+        report = self.report(expect=5, data=data)
+
+        self.assertEqual(self.rows(report)[self.LATE_SESSION]["state"],
+                         "ENDED-CLEAN")
+        self.assertIn("no call an earlier look named missing is remembered",
+                      report["completeness"]["note"])
+
+    def test_a_memory_written_before_it_kept_named_calls_says_so(self):
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        memory = self.remembered(data)
+        del memory["named_missing"]
+        (data / "supervisor" / "baseline.json").write_text(
+            json.dumps(memory), encoding="utf-8")
+        self.late_receipt(data)
+
+        report = self.report(data=data)
+
+        self.assertEqual(self.rows(report)[self.LATE_SESSION]["state"],
+                         "ENDED-CLEAN")
+        self.assertIn("no call an earlier look named missing is remembered",
+                      report["completeness"]["note"])
+        self.assertIn("named_missing", self.remembered(data))
+
+    def test_a_named_call_of_the_wrong_shape_makes_the_memory_unreadable(self):
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        memory = self.remembered(data)
+        memory["named_missing"][self.LATE_SESSION]["toolu_b"] = "yesterday"
+        (data / "supervisor" / "baseline.json").write_text(
+            json.dumps(memory), encoding="utf-8")
+
+        report = self.report(expect=6, data=data)
+
+        self.assertIn("named_missing", report["baseline"]["note"])
 
     def test_the_default_settle_window_is_one_hour(self):
         # ADR-0046 ruling 4: half an hour after the copy last grew the
@@ -6985,6 +7223,45 @@ class ReceiverReadingTest(unittest.TestCase):
                          ["old-session-0000"])
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
+
+    def test_one_posted_event_naming_no_completed_call_ends_no_finding(self):
+        # The holder of the URL posts one tool_decision naming a session
+        # that has receipts and no events. Its receipts are read against
+        # no completed call: the second record is still absent for them.
+        data = receiver_folder(self.base / "decided", events=False)
+        chain_copy(data, "decided-session-0001")
+        absent = self.rows(self.report(expect=6, data=data))[
+            "decided-session-0001"]
+        post_event(data, 0, "tool_decision", received_ago(7200),
+                   tool="Bash", session="decided-session-0001")
+
+        row = self.rows(self.report(expect=6, data=data))[
+            "decided-session-0001"]
+
+        self.assertEqual(absent["state"], "SECOND-RECORD-ABSENT")
+        self.assertEqual(row["state"], "SECOND-RECORD-ABSENT")
+        self.assertTrue(row["raises"])
+        self.assertIn("none names a completed call", row["note"])
+        self.assertIn("no harness events ever did, or none naming a "
+                      "completed call", row["words"])
+
+    def test_a_copy_carrying_the_cut_note_is_never_before_memory(self):
+        # #486 item 11: a run with the telemetry cut and its timestamps
+        # pinned to 1970 dates its chain before the oldest events file.
+        # The note exists only after the pin did, so the copy is read as
+        # any session after the edge: absent, and raising.
+        chain_copy(self.data, "cut-epoch-session-0001", epoch=0, notes=(
+            "second-record-cut: reason=telemetry-off",))
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        report = self.report(expect=6)
+
+        row = self.rows(report)["cut-epoch-session-0001"]
+        self.assertEqual(row["state"], "SECOND-RECORD-ABSENT")
+        self.assertTrue(row["raises"])
+        self.assertEqual(row["second_record_cut"],
+                         "second-record-cut: reason=telemetry-off")
+        self.assertNotIn("before_memory", report["completeness"])
 
     def test_last_heard_is_in_the_report_per_address_and_per_session(self):
         chain_copy(self.data, FIXTURE_SESSION)

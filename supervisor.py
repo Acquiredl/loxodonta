@@ -693,6 +693,10 @@ def baseline_problem(text, memory):
     if not (isinstance(acknowledged, list)
             and all(isinstance(record, dict) for record in acknowledged)):
         return "`acknowledged` is not a list of records"
+    named = data.get("named_missing")
+    problem = named_problem(named) if named is not None else None
+    if problem:
+        return problem
     keeper = data.get("keeper") if isinstance(data.get("keeper"), dict) else {}
     # An attempt time with no zone cannot be set against now: skipped,
     # it reads as no memory, so the keeper takes its turn, the next
@@ -709,7 +713,37 @@ def baseline_problem(text, memory):
                          calibration, list) else [])
                      if isinstance(epoch, dict)
                      and isinstance(epoch.get("matchers"), list)],
-        sessionend=sessionend if isinstance(sessionend, dict) else {})
+        sessionend=sessionend if isinstance(sessionend, dict) else {},
+        named_missing=named)
+    return None
+
+
+def zoned(when):
+    """Whether `when` is a time with a zone, as this reader writes one."""
+    return isinstance(when, str) \
+        and getattr(parse_when(when), "tzinfo", None) is not None
+
+
+def named_problem(named):
+    """None when `named_missing`, the reading at the receiver's memory of
+    the calls a settled look named missing (#620), is in the shape it
+    writes: per session, per call id, when the look that named it ran
+    and, once a receipt paying it was seen, when that look ran. Else in
+    words what is wrong, which makes the whole baseline unreadable, as
+    any row of the wrong shape does (#403)."""
+    if not isinstance(named, dict):
+        return "`named_missing` is not an object"
+    for session, calls in named.items():
+        if not isinstance(calls, dict):
+            return (f"`named_missing` holds no calls for "
+                    f"{clip(session, 80)}")
+        for call, record in calls.items():
+            if not (is_call_id(call) and isinstance(record, dict)
+                    and zoned(record.get("named"))
+                    and ("seen" not in record or zoned(record["seen"]))):
+                return (f"`named_missing` does not remember {clip(call, 80)} "
+                        f"of {clip(session, 80)} with the time it was "
+                        "named missing")
     return None
 
 
@@ -745,7 +779,8 @@ def read_baseline(path, daybook=None):
     (#386). No file and no such day book is a first look. A keeper
     attempt time with no zone is dropped and `skipped` names it (#430)."""
     memory = {"chains": {}, "keeper": {}, "calibration": [],
-              "sessionend": {}, "acknowledged": [], "blind": None,
+              "sessionend": {}, "acknowledged": [], "named_missing": {},
+              "blind": None,
               "note": None, "stood": None, "seen": None, "unzoned": [],
               "skipped": None}
 
@@ -2439,6 +2474,15 @@ TAIL_KEEPER = environment("SUPERVISOR_TAIL_KEEPER", "1") != "0"
 # ruling's panel: 5 minutes is tight, 1 hour the default, 7 hours, the
 # keeper's cadence plus one, generous.
 SETTLE_SECONDS = env_number("SUPERVISOR_SETTLE_SECONDS", 3600)
+# How long after a settled look named a call missing a receipt carrying
+# its id may first be seen and still pay it (#620): inside it an honest
+# tail re-sent after a failed send clears; after it, the receipt pays
+# nothing and the session keeps its finding until acknowledged. Not the
+# settle window: that one says when a session is judged, this one how
+# late a judged call may still be paid. The ruling's panel: 0 pays
+# nothing named missing, 1 hour the default, 6 hours the keeper's
+# cadence.
+LATE_RECEIPT_SECONDS = env_number("SUPERVISOR_LATE_RECEIPT_SECONDS", 3600)
 
 WITNESS_ROOT = Path.home() / ".claude" / "projects"
 # What the recorder writes down about the coverage it wired (ADR-0030).
@@ -2494,8 +2538,9 @@ WATCH_WORDS = {
                "its counts and never an alarm until nothing of it has "
                "arrived for SUPERVISOR_SETTLE_SECONDS (ADR-0041).",
     "SECOND-RECORD-ABSENT": "receipts reached the receiver for this "
-                            "session and no harness events ever did — its "
-                            "second record never arrived. A run launched "
+                            "session and no harness events ever did, or "
+                            "none naming a completed call — its second "
+                            "record never arrived. A run launched "
                             "with the telemetry cut reads this way, and so "
                             "does a machine whose events go nowhere; never "
                             "read as clean, and the chain's own note says "
@@ -4484,51 +4529,145 @@ def missing_numbers(sequences):
     return high - low + 1 - len(seen), named
 
 
-def pair_calls(results, calls, witnessed):
-    """A settled session's calls, as the harness reported them, against
-    its receipts at the receiver, as (rule, owed, deficit, surplus,
-    missing). `results` are the calls as (time, tool, call id or None,
-    arrival),
-    `calls` the receipts as (tool, call id or None). Where both records
-    name calls, they are joined on the id (ADR-0046 ruling 3): a call
-    reported twice under one id is one call, a receipt pays only the
-    call its id names and a second receipt of that id pays nothing, and
-    `missing` names each call with no receipt, in time order. A call or
-    a receipt naming none is paired by count within its tool, among its
-    own kind only, so a receipt with no id never pays a call the harness
-    named. Where either record names none, the count by tool stands
-    (ADR-0034). `owed` is the calls counted, as [(time, tool)]."""
+# The tool name the harness's events give every call to a server the
+# user configured; the hook's receipt names the server's tool as
+# `mcp__<server>__<tool>` (the harness's monitoring docs, read 2026-11-12).
+EVENT_MCP_TOOL = "mcp_tool"
+RECEIPT_MCP_PREFIX = "mcp__"
+
+
+def same_tool(receipt, event):
+    """Whether a receipt's tool is the tool the harness's event names for
+    the call whose id it carries (#620). An event naming no tool (#487
+    item 7) has nothing to compare, and pairs on the id alone; an event
+    naming `mcp_tool` is met by any receipt of an MCP server's tool."""
+    if event is None:
+        return True
+    if event == EVENT_MCP_TOOL:
+        return receipt.startswith(RECEIPT_MCP_PREFIX)
+    return receipt == event
+
+
+def pair_calls(results, calls, witnessed, late=()):
+    """A session's calls, as the harness reported them, against its
+    receipts at the receiver, as a dict: `rule`, `owed`, `deficit`,
+    `surplus`, `missing`, `mismatched`, `repeated`, `late` and `matched`.
+    `results` are the calls as (time, tool, call id or None, arrival),
+    `calls` the receipts as (tool, call id or None).
+
+    Where both records name calls, they are joined on the id (ADR-0046
+    ruling 3). A call reported twice under one id is one call. A receipt
+    pays only the call its id names, and only when it names the tool the
+    event names for that id (#620); one that names another tool pays
+    nothing and is listed in `mismatched` as (id, the receipt's tool,
+    the event's tool). At most one receipt of an id pays (#476: one
+    harness version fired two hooks for a failed call); a further one is
+    neither surplus nor deficit, and `repeated` counts it. A receipt of
+    an id in `late`, first seen too long after a look named its call
+    missing (#620), pays nothing either, and `late` counts it. `matched`
+    holds every id a receipt of its tool carries, paid or late, so the
+    memory can say when it was first seen. `missing` names each call
+    with no receipt, in time order. A call or a receipt naming none is
+    paired by count within its tool, among its own kind only, so a
+    receipt with no id never pays a call the harness named.
+
+    Where either record names none, the count by tool stands (ADR-0034),
+    and a receipt repeating an id an earlier one carries pays no second
+    call. `owed` is the calls counted, as [(time, tool)]."""
     paying = [call for _, call in calls if call]
     named = [call for _, _, call, _ in results if call]
     if not paying or not named:
-        receipts = {}
-        for tool, _ in calls:
+        receipts, carried, repeated = {}, set(), 0
+        for tool, call in calls:
+            if call in carried:
+                repeated += 1
+                continue
+            if call:
+                carried.add(call)
             receipts[tool] = receipts.get(tool, 0) + 1
         owed = [(when, tool) for when, tool, _, _ in results]
         deficit, surplus, _ = reconcile(owed, {}, receipts, witnessed)
-        return "count by tool", owed, deficit, surplus, []
-    paid = set(paying)
-    owed, unnamed, missing, met = [], [], [], set()
+        return {"rule": "count by tool", "owed": owed, "deficit": deficit,
+                "surplus": surplus, "missing": [], "mismatched": [],
+                "repeated": repeated, "late": 0, "matched": set()}
+    owed, unnamed, order, reported = [], [], [], {}
     for when, tool, call, _ in results:
-        if call in met:
+        if call in reported:
             continue
         if call is None:
             unnamed.append((when, tool))
         else:
-            met.add(call)
-            if call not in paid:
-                missing.append(call)
+            reported[call] = tool
+            order.append(call)
         owed.append((when, tool))
-    loose = {}
+    paid, mismatched, loose, unpaying, repeated = set(), [], {}, 0, 0
+    matched, refused = set(), 0
     for tool, call in calls:
         if not call:
             loose[tool] = loose.get(tool, 0) + 1
+        elif call not in reported:
+            unpaying += 1
+        elif not same_tool(tool, reported[call]):
+            mismatched.append((call, tool, reported[call]))
+            unpaying += 1
+        elif call in late:
+            matched.add(call)
+            refused += 1
+        elif call in paid:
+            repeated += 1
+        else:
+            matched.add(call)
+            paid.add(call)
+    missing = [call for call in order if call not in paid]
     deficit, surplus, _ = reconcile(unnamed, {}, loose, witnessed)
-    surplus += len(paying) - len(met & paid)
-    return "call id", owed, deficit + len(missing), surplus, missing
+    return {"rule": "call id", "owed": owed,
+            "deficit": deficit + len(missing), "surplus": surplus + unpaying,
+            "missing": missing, "mismatched": mismatched,
+            "repeated": repeated, "late": refused, "matched": matched}
 
 
-def overdue(seen, calls, now):
+def safe_name(text):
+    """A tool's name as a row's note says it: ASCII letters, digits and
+    `_.-` only, anything else `?`, at most 40 of them. The receipt's
+    line and the URL holder's events choose it, and the page draws the
+    note (#620)."""
+    return "".join(char if char.isascii() and (char.isalnum()
+                                               or char in "_.-") else "?"
+                   for char in str(text))[:40]
+
+
+def pairing_words(pairing):
+    """What a row's note says of receipts the pairing set aside, or None:
+    each receipt carrying a call's id under another tool's name (#620),
+    how many repeat an id already paid (#476), and how many arrived too
+    long after their call was named missing (#620). The tools are the
+    writer's and the URL holder's text, so each is said by safe_name."""
+    said = []
+    if pairing["mismatched"]:
+        named = "; ".join(
+            f"{call} names {safe_name(tool)} where the harness's event "
+            f"names {safe_name(event)}"
+            for call, tool, event in pairing["mismatched"][:GAP_NAMED])
+        more = len(pairing["mismatched"]) - GAP_NAMED
+        said.append(f"{len(pairing['mismatched'])} receipt(s) carry the id "
+                    "of a call whose event names another tool, and pay "
+                    f"nothing: {named}" + (f"; and {more} more" if more > 0
+                                           else "") + " (#620)")
+    if pairing["repeated"]:
+        said.append(f"{pairing['repeated']} receipt(s) repeat a call id "
+                    "already paid, and count as neither surplus nor deficit; "
+                    "the chain keeps them (#476)")
+    if pairing["late"]:
+        said.append(f"{pairing['late']} receipt(s) arrived after their call "
+                    "was named missing, first seen more than "
+                    f"SUPERVISOR_LATE_RECEIPT_SECONDS ({LATE_RECEIPT_SECONDS}"
+                    " s) after the look that named it, and pay nothing: the "
+                    "session keeps its finding until it is acknowledged here "
+                    "(#620)")
+    return "; ".join(said) or None
+
+
+def overdue(seen, calls, now, late=()):
     """What is overdue in a session still PENDING (ADR-0046 ruling 6),
     as the row's fields, or None when nothing is. A call is overdue when
     the line that carried its event was `received` more than
@@ -4540,11 +4679,14 @@ def overdue(seen, calls, now):
     while the session is pending, since a receipt may be a newer call's.
     A hole in the counter is overdue below a number that arrived more
     than the window ago. A call or a number with no arrival time has no
-    age, and is never overdue."""
+    age, and is never overdue. A receipt of an id in `late` pays nothing
+    here either (#620)."""
     cutoff = now - timedelta(seconds=SETTLE_SECONDS)
     old = [call for call in seen["results"]
            if call[3] is not None and call[3] < cutoff]
-    rule, _, deficit, _, missing = pair_calls(old, calls, seen["witnessed"])
+    pairing = pair_calls(old, calls, seen["witnessed"], late)
+    rule, deficit, missing = (pairing["rule"], pairing["deficit"],
+                              pairing["missing"])
     aged = [number for number, when in seen["arrived"].items()
             if when < cutoff]
     count, numbers = missing_numbers(
@@ -4608,7 +4750,7 @@ def session_acknowledgement(acknowledged, session):
 
 
 def watch_receiver(root, families, events, now, show_before_memory=False,
-                   acknowledged=()):
+                   acknowledged=(), named_missing=None, forgotten=None):
     """The completeness half of a tick over a receiver's folder (ADR-0041
     rulings 4 and 5): every session the chain copies or the events name,
     the copies as what was paid and the events as what was owed, judged
@@ -4621,17 +4763,25 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
     classify() as a session that ended, ENDED-DEFICIT tool by tool or by
     the call's id, or
     SECOND-RECORD-ABSENT when receipts arrived and no events did, or
+    none naming a completed call, or
     SECOND-RECORD-GAP when its counter has holes and no deficit, else
     ENDED-SURPLUS or ENDED-CLEAN. A surplus is expected while #476
     stands and is no alarm. A session whose chain copy's newest entry
     predates the day of the oldest events file held, readable or not,
     is from before the second record's memory: counted in one block,
     never a row, as ADR-0029 counts sessions older than the calibration
-    memory (#559 ruling 3). The hook's note
+    memory (#559 ruling 3), unless the copy carries the hook's note that
+    the second record was cut (#486 item 11). The hook's note
     that the second record was cut is quoted on the row when the copy
     carries one. A row in one of RECEIVER_FINDINGS carries `raises`, and
     raises the exit, unless `acknowledged`, the memory's records, accepts
-    that state with the counts it now reports (ADR-0046 ruling 2)."""
+    that state with the counts it now reports (ADR-0046 ruling 2).
+    `named_missing` is the memory's record of the calls settled looks named
+    missing (#620), updated in place with what this look names and first
+    sees: a receipt of such a call first seen more than
+    LATE_RECEIPT_SECONDS after the look that named it pays nothing.
+    `forgotten` says why no such record could be read, if none could."""
+    named_missing = {} if named_missing is None else named_missing
     days = events["days"]
     oldest = min(days) if days else None
     newest = max(days) if days else None
@@ -4662,7 +4812,8 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
                       "differs is that nothing on the agent's machine "
                       "reaches a line once it landed (ADR-0041)")},
     }
-    said = []
+    said = [forgotten] if forgotten else []
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     # `days` holds every file listed, so a folder whose every events
     # file is unreadable holds files, and must not read as one no
     # harness has sent to (#487). An unread file is still the edge: the
@@ -4695,9 +4846,19 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
         by_tool = {}
         for _, tool in family.get("moments", ()):
             by_tool[tool] = by_tool.get(tool, 0) + 1
-        rule, owed, deficit, surplus, missing = pair_calls(
+        # First seen is the reader's own memory, never the chain's
+        # timestamps, which the writer sets: a call with no receipt seen
+        # yet is judged as if this look first saw one (#620).
+        held = named_missing.get(session, {})
+        late = {call for call, record in held.items()
+                if (parse_when(record.get("seen", stamp))
+                    - parse_when(record["named"])).total_seconds()
+                > LATE_RECEIPT_SECONDS}
+        pairing = pair_calls(
             seen["results"] if seen else [], family.get("calls", []),
-            seen["witnessed"] if seen else set())
+            seen["witnessed"] if seen else set(), late)
+        owed, deficit, missing = (pairing["owed"], pairing["deficit"],
+                                  pairing["missing"])
         counts = {}
         for _, tool in owed:
             counts.setdefault(tool, {"owed": 0, "receipts": 0})["owed"] += 1
@@ -4719,8 +4880,11 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
         if family.get("cut"):
             row["second_record_cut"] = family["cut"]
         copy_newest = family.get("newest_ts")
+        # A copy carrying the cut note is never before memory: the note
+        # exists only since the pin did, and the dates beside it are the
+        # writer's, which SOURCE_DATE_EPOCH sets (#486 item 11).
         if seen is None and oldest and isinstance(copy_newest, str) \
-                and copy_newest[:10] < oldest:
+                and copy_newest[:10] < oldest and not family.get("cut"):
             # Not WATCH_WORDS' entry: that one offers `calibrate
             # --since`, which seeds a coverage memory this reading does
             # not keep.
@@ -4734,30 +4898,41 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
             continue
         quiet_for = ((now - heard).total_seconds()
                      if heard is not None else None)
-        late = None
+        due = None
         if quiet_for is not None and quiet_for < SETTLE_SECONDS:
             # Ruling 6: the session is not settled, but a call the
             # harness reported more than the window ago is judged by its
             # own age, so arrivals after it cannot keep it unjudged. A
             # session with no events has no call to be overdue (the
             # ADR's non-claim).
-            late = overdue(seen, family.get("calls", []), now) if seen \
-                else None
-            state = "PENDING-OVERDUE" if late else "PENDING"
-            if late:
-                row.update(late)
-        elif seen is None:
+            due = overdue(seen, family.get("calls", []), now, late) \
+                if seen else None
+            state = "PENDING-OVERDUE" if due else "PENDING"
+            if due:
+                row.update(due)
+        elif seen is None or (not seen["results"]
+                              and family.get("receipts", 0)):
+            # Events naming no completed call are no second record for
+            # receipts: one event posted through the URL, a refusal or a
+            # request, would read every receipt as surplus (found with
+            # #620).
             state = "SECOND-RECORD-ABSENT"
+            if seen is not None:
+                row["note"] = ("events arrived for this session, but none "
+                               "names a completed call (a tool_result), so "
+                               "its receipts have no second record to be "
+                               "counted against")
             if unread:
                 # The ruling's "with that note beside it": the words say
                 # its events never arrived, and the note beside them says
                 # a file went unread (#559 ruling 3).
-                row["note"] = unread
+                row["note"] = "; ".join(filter(None, (row.get("note"),
+                                                      unread)))
         else:
-            state = classify(len(owed), deficit, surplus, True, True,
-                             None, False)
+            state = classify(len(owed), deficit, pairing["surplus"], True,
+                             True, None, False)
             row["deficit"] = deficit
-            row["paired_by"] = rule
+            row["paired_by"] = pairing["rule"]
             if missing:
                 row["missing_calls"] = {"count": len(missing),
                                         "calls": missing[:GAP_NAMED]}
@@ -4769,8 +4944,18 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
                 if state != "ENDED-DEFICIT":
                     state = "SECOND-RECORD-GAP"
         row["state"] = state
-        if late:
-            row["words"] = overdue_words(late)
+        set_aside = pairing_words(pairing)
+        if set_aside:
+            row["note"] = "; ".join(filter(None, (row.get("note"), set_aside)))
+        for call in pairing["matched"] & set(held):
+            held[call].setdefault("seen", stamp)
+        if not state.startswith("PENDING"):
+            for call in pairing["missing"]:
+                held.setdefault(call, {"named": stamp})
+        if held:
+            named_missing[session] = held
+        if due:
+            row["words"] = overdue_words(due)
             # Never quieted by an acknowledgement: its counts move with
             # every call of a live session (ADR-0046 ruling 6).
             row["raises"] = True
@@ -5584,6 +5769,8 @@ def write_memory(look, memory, to_remember, stamp):
             # Kept whole: rare acts by a person, testimony every report
             # carries (ADR-0039).
             "acknowledged": memory["acknowledged"],
+            **({"named_missing": memory["named_missing"]}
+               if look.receiver else {}),
         }, indent=2) + "\n")
     except OSError as error:
         # Any refusal, a folder swapped in or one this user may not
@@ -5593,6 +5780,26 @@ def write_memory(look, memory, to_remember, stamp):
                 "look remembered is lost, and the next look reads whatever "
                 "stands there"), unkept
     return memory["note"], None
+
+
+def remembered_named(memory):
+    """(named, forgotten) for a look at a receiver: the memory's record
+    of the calls settled looks named missing (#620), the very dict the
+    baseline is written from, and the words for a look that has none to
+    read. Without one the look reads as before that record was kept, a
+    late receipt paying its call, and says so; never quieter than
+    that."""
+    lost = ("so no call an earlier look named missing is remembered: a "
+            "receipt that arrived after its call was named missing pays it "
+            "on this look, as before that memory was kept (#620)")
+    if memory["blind"]:
+        return {}, "the baseline cannot be read, " + lost
+    if memory["named_missing"] is None:
+        memory["named_missing"] = {}
+        return memory["named_missing"], (
+            "the baseline holds no record of calls named missing, written "
+            "before this reader kept one, " + lost + "; this look starts it")
+    return memory["named_missing"], None
 
 
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
@@ -5658,16 +5865,20 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     to_remember.update(rows)
     events += gone
     fresh += gone_fresh
+    if look.receiver:
+        # Judged before the memory is written, which keeps the calls this
+        # look names missing and the receipts it first sees (#620).
+        named, forgotten = remembered_named(memory)
+        completeness = watch_receiver(
+            look.root, families, read_events(look.root, closed), now,
+            show_before_memory=look.show_before_memory,
+            acknowledged=memory["acknowledged"], named_missing=named,
+            forgotten=forgotten)
     note, unkept = write_memory(look, memory, to_remember, stamp)
     if events or blind or unkept:
         worst = max(worst, 5)
 
-    if look.receiver:
-        completeness = watch_receiver(
-            look.root, families, read_events(look.root, closed), now,
-            show_before_memory=look.show_before_memory,
-            acknowledged=memory["acknowledged"])
-    else:
+    if not look.receiver:
         completeness = watch_completeness(
             look.root, look.witness, families, everywhere=look.store,
             calibration=memory["judging"], sessionend=memory["sessionend"],
@@ -6411,6 +6622,7 @@ def acknowledge_baseline(root, store, path, daybook, receiver=False):
             "acknowledged": [{"ts": stamp, "baseline": path.name,
                               "change": change, "stood": memory["stood"],
                               "accepted": {"chains": len(heads)}}],
+            **({"named_missing": {}} if receiver else {}),
         }, indent=2) + "\n")
     except OSError as error:
         return refused(f"{path.name} could not be written: "
@@ -6427,10 +6639,11 @@ def acknowledge_baseline(root, store, path, daybook, receiver=False):
     return 0
 
 
-def receiver_reading(root, acknowledged):
+def receiver_reading(root, acknowledged, named=None):
     """The completeness reading a scan over a receiver's folder makes
     now, with nothing written: the chain copies folded by session as the
-    census folds them, against the events there (`watch_receiver`)."""
+    census folds them, against the events there (`watch_receiver`),
+    with the memory's calls named missing, read and never kept."""
     look = Look(root, tick=False, remember=False, receiver=True)
     closed = []
     families = {}
@@ -6443,7 +6656,8 @@ def receiver_reading(root, acknowledged):
                    family_facts(look, relpath, log, read_entries(log), None))
     return watch_receiver(root, families, read_events(root, closed),
                           datetime.now(timezone.utc),
-                          acknowledged=acknowledged)
+                          acknowledged=acknowledged,
+                          named_missing=json.loads(json.dumps(named or {})))
 
 
 def acknowledge_session(root, path, daybook, session, state):
@@ -6477,7 +6691,7 @@ def acknowledge_session(root, path, daybook, session, state):
                        "`supervisor scan --receiver DIR` first, and "
                        "acknowledge the state it reports")
     rows = {row["session"]: row for row in receiver_reading(
-        root, memory["acknowledged"])["sessions"]}
+        root, memory["acknowledged"], memory["named_missing"])["sessions"]}
     row = rows.get(session)
     if row is None:
         return refused(f"no session {visible(session)} is read at "
@@ -11243,6 +11457,16 @@ const CHIP = {
   superseded: () => "BROKEN · superseded",
 };
 
+// A receiver row's note: why receipts paid nothing, and what was read
+// past (#620). Its call ids and tool names come from the chain and the
+// events, so a control or format character in it (a bidi override) is
+// drawn as ?. Only the receiver's rows: the agent's machine draws its
+// own words.
+function rowNote(s) {
+  if (!s.by_tool || !s.note) return "";
+  return String(s.note).replace(/\\p{C}/gu, "?");
+}
+
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -12071,6 +12295,7 @@ function render(report) {
       (s.missing_calls.count > s.missing_calls.calls.length ? ", …" : "")));
     if (s.paired_by) row.appendChild(el("p", "claim",
       "paired by " + s.paired_by));
+    if (rowNote(s)) row.appendChild(el("p", "claim", rowNote(s)));
     if (s.acknowledged) row.appendChild(el("p", "claim",
       "acknowledged " + (s.acknowledged.ts || "") + " as " +
       s.acknowledged.state + ": " + s.acknowledged.words));
