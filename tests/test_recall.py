@@ -769,6 +769,34 @@ class ShowCallTest(RecallBase):
                 self.assertNotIn("[call=", out.stdout)
                 self.assertEqual(out.stdout.count(FOLDED_NOTE), 1)
 
+    def test_a_long_folded_row_is_clipped_before_its_mark(self):
+        # #619: a row cut to the width keeps the mark the note names, so
+        # the head is clipped first and the mark follows it.
+        body = {"session_id": self.SESSION, "hook_event_name": "PostToolUse",
+                "tool_name": "Bash", "tool_use_id": self.CALL,
+                "tool_input": {"command": "pytest -q " + "x" * 190},
+                "tool_response": {}}
+        hooked = run(LOXODONTA, "hook", stdin=json.dumps(body),
+                     env=self.scan_env(**self.env))
+        self.assertEqual(hooked.returncode, 0, hooked.stderr)
+        (chain,) = (self.root / "storehome" / "receipts").glob(
+            f"*/receipts-{self.SESSION}.jsonl")
+        entry = json.loads(chain.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertGreater(len(entry["action"]), 190)
+        address = entry["entry_hash"][:8]
+        for verb, args in (("search", ["pytest"]),
+                           ("timeline", [entry["entry_hash"][:12]]),
+                           ("digest", [])):
+            with self.subTest(verb=verb):
+                out = run_py(SUPERVISOR, verb, *args, "--repo",
+                             str(self.project), env_extra=self.env)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                (row,) = [line for line in out.stdout.splitlines()
+                          if line.startswith(address)]
+                action = row.split("  claude-code  ", 1)[1].split("   <- ")[0]
+                self.assertTrue(action.endswith("... [...]"), row)
+                self.assertEqual(len(action), 110, row)
+
     def test_search_and_timeline_mark_a_hand_written_suffix(self):
         # #619: `loxodonta log` may name the hook's actor and end its
         # line in a group of the suffix's shape; the listings cannot tell
