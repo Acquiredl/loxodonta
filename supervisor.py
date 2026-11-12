@@ -1165,8 +1165,10 @@ PENDING_LINE = re.compile(
     r"ANCHOR-PENDING: head ([0-9a-f]{12}…) "
     r"submitted (at an unrecorded time|\S+) "
     r"via (no recorded calendar|\S+) — "
-    r"(?:run `loxodonta anchor --upgrade`|`loxodonta anchor --upgrade` "
-    r"cannot complete it; `loxodonta anchor --force` submits the head again)")
+    r"(?:on the machine that holds the chain, the operator can run "
+    r"`loxodonta anchor --upgrade`|`loxodonta anchor --upgrade` cannot "
+    r"complete it; on the machine that holds the chain, the operator can "
+    r"run `loxodonta anchor --force` to submit the head again)")
 
 
 def anchor_span(line):
@@ -8878,7 +8880,9 @@ def package_readme(unit, packed, sessions, witness, record, notes,
         "Get `verifier.py` from a release you trust "
         "(https://github.com/Acquiredl/loxodonta/releases; check it "
         "against the release's `SHA256SUMS`). Python 3.9 or newer, no "
-        "dependencies. Then, on the zip or on the unpacked folder:",
+        "dependencies. Then, on the zip or on the unpacked folder, with "
+        "`-I` so that a module dropped beside the verifier cannot shadow "
+        "the standard library:",
         "",
         "    python -I verifier.py verify-package <this package>",
         "",

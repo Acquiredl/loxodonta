@@ -122,7 +122,9 @@ def read_log(path):
 
 
 def missing_log(path):
-    print(f"error: {visible(path)} not found — run `loxodonta init` first", file=sys.stderr)
+    print(f"error: {visible(path)} not found — on the machine that will "
+          "hold the chain, the operator can run `loxodonta init` first",
+          file=sys.stderr)
     return EX_NOINPUT
 
 
@@ -1136,8 +1138,11 @@ def check_anchors(log, entries, headers, used, packaged=False):
             print(f"NO-ANCHORS: {visible(name)} is not in this package — "
                   "anchoring is optional")
         else:
+            # A recipient holds verifier.py alone, so a step only the
+            # recorder takes is named as the operator's (#588).
             print(f"NO-ANCHORS: {visible(name)} not found — anchoring is "
-                  "optional; run `loxodonta anchor` to add one")
+                  "optional; on the machine that holds the chain, the "
+                  "operator can run `loxodonta anchor` to add one")
         return False
     unreadable = unreadable_sidecar(anchors_path(log))
     if unreadable is not None:
@@ -1201,11 +1206,14 @@ def check_anchors(log, entries, headers, used, packaged=False):
                       "settled this head — no upgrade is owed")
                 continue
             if "calendar" in record:
-                advice = "run `loxodonta anchor --upgrade`"
+                advice = ("on the machine that holds the chain, the "
+                          "operator can run `loxodonta anchor --upgrade`")
             else:
                 # The upgrade asks the calendar a proof names (SPEC 9.4).
                 advice = ("`loxodonta anchor --upgrade` cannot complete it; "
-                          "`loxodonta anchor --force` submits the head again")
+                          "on the machine that holds the chain, the operator "
+                          "can run `loxodonta anchor --force` to submit the "
+                          "head again")
             print(f"ANCHOR-PENDING: head {head}… submitted {ts} via "
                   f"{calendar} — {advice}")
         elif kind == "mismatch":
@@ -1552,8 +1560,9 @@ def check_stamps(log, entries, chain_file, packaged=False):
                   "authority timestamp is optional")
         else:
             print(f"NO-STAMPS: {visible(name)} not found — the authority "
-                  "timestamp is optional; run `loxodonta stamp --authority "
-                  "URL` to add one")
+                  "timestamp is optional; on the machine that holds the "
+                  "chain, the operator can run `loxodonta stamp "
+                  "--authority URL` to add one")
         return False
     unreadable = unreadable_sidecar(stamps_path(log))
     if unreadable is not None:
@@ -1824,9 +1833,10 @@ def cmd_head(args):
         return EX_NOINPUT
     last = tail_entry(lines)
     if last is None:
+        # `verify`, not `loxodonta verify`: both files have it.
         print(f"error: {visible(args.log)} has a damaged tail — run "
-              "`loxodonta verify` (a torn tail has no head to record)",
-              file=sys.stderr)
+              "`verify` on it for the verdict (a damaged tail has no head "
+              "to record)", file=sys.stderr)
         return 1
     head = last["entry_hash"]
     # A head is a SHA256 in lowercase hex and nothing else, so anything
@@ -1835,7 +1845,8 @@ def cmd_head(args):
     if not (isinstance(head, str) and len(head) == 64
             and all(c in "0123456789abcdef" for c in head)):
         print(f"error: {visible(args.log)} ends in an entry whose entry_hash is not "
-              "a chain head — run `loxodonta verify`", file=sys.stderr)
+              "a chain head — run `verify` on it for the verdict",
+              file=sys.stderr)
         return 1
     print(head)
     return 0
@@ -2322,13 +2333,17 @@ def judge_manifest_anchor(folder, headers, used):
                   f"submitted {ts} via {calendar}, which never came back; "
                   "another calendar settled it, so no upgrade is owed")
             continue
+        # The upgrade is the recorder's verb, which a recipient holding
+        # verifier.py alone does not have, so the line says whose it is.
         if "calendar" in record:
-            advice = ("unpack the package and run `loxodonta anchor --upgrade "
-                      "--manifest=<its manifest.json>` after a few hours")
+            advice = ("whoever holds the recorder can unpack the package "
+                      "and run `loxodonta anchor --upgrade --manifest=<its "
+                      "manifest.json>` after a few hours")
         else:
             advice = ("`loxodonta anchor --upgrade` cannot complete it; "
-                      "`loxodonta anchor --force --manifest=<its "
-                      "manifest.json>` submits the manifest again")
+                      "whoever holds the recorder can run `loxodonta anchor "
+                      "--force --manifest=<its manifest.json>` to submit the "
+                      "manifest again")
         print(f"seal anchor: ANCHOR-PENDING: the manifest was submitted "
               f"{ts} via {calendar} — {advice}; the rung is not earned until "
               "the proof completes and a block header checks its block")

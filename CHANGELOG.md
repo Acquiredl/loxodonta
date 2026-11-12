@@ -29,6 +29,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `verify` on a chain whose only line is torn says `no entry intact`, where it printed `entries 0..-1 intact`. The verdict and the exit are unchanged (#589).
 - A project record that is an object naming no string `path` (`{}`, `{"path": 5}`) cannot be read as a project record, `it names no project path`, where it read as a missing project named `(None)` or `(5)` (#589).
 - `verify` prints the `--transcript` path and the `--authority-chain` file with control characters escaped, in `TRANSCRIPT-UNRESOLVED`, `STAMPED` and the not-found note, where they printed raw (#589).
+- A line advising a recorder verb says whose step it is, the operator's or the recorder holder's, since `verifier.py` prints it too; `head` sends the reader to `verify`. A package's README says why it runs `python -I` (#588).
 
 ## [0.20.0] - 2026-11-12
 

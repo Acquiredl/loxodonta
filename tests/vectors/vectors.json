@@ -438,7 +438,7 @@
       "exit": 0,
       "last_line": "VALID",
       "stdout": [
-        "ANCHOR-PENDING: head fab3462eec00\u2026 submitted 2026-09-23T12:05:00Z via https://calendar.example/ \u2014 run `loxodonta anchor --upgrade`",
+        "ANCHOR-PENDING: head fab3462eec00\u2026 submitted 2026-09-23T12:05:00Z via https://calendar.example/ \u2014 on the machine that holds the chain, the operator can run `loxodonta anchor --upgrade`",
         "VALID"
       ]
     },

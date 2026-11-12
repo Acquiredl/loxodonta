@@ -616,7 +616,8 @@ def build(workdir):
                 "as a calendar first answers: not a failure, and it earns "
                 "nothing yet.", 0,
                 [f"ANCHOR-PENDING: head {head[:12]}… submitted {SIDECAR_TS} "
-                 f"via {CALENDAR} — run `loxodonta anchor --upgrade`",
+                 f"via {CALENDAR} — on the machine that holds the chain, the "
+                 "operator can run `loxodonta anchor --upgrade`",
                  "VALID"])
 
     sidecar("anchor-complete", "anchors",
