@@ -31,6 +31,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - Within its ripeness test, the keeper sends a chain written to since its last turn, one whose memo does not show the end held, or one whose last send failed (ADR-0045).
 - A chain row is written only for a batch the receiver appended to; the chain's attempt rows name their remote by fingerprint, and `publish --chain` writes one every time (ADR-0045).
 - `supervisor scan --receiver DIR` exits 6 for `ENDED-DEFICIT`, `SECOND-RECORD-ABSENT` and `SECOND-RECORD-GAP`, at every scan, until each is acknowledged there: a receiver's scan that exited 0 over old findings now exits 6 (ADR-0046).
+- A session still arriving whose call was reported over the settle window ago with no receipt, or whose counter has a hole that old, reads `PENDING-OVERDUE` and exits 6; it cannot be acknowledged (ADR-0046).
 - Where the harness's event and the receipt both name the call, the reading at the receiver pairs them by its id and names each call with no receipt; `paired_by` says which rule judged the session (ADR-0046).
 - `SUPERVISOR_SETTLE_SECONDS` defaults to one hour, where it was seven, and the docs say the on-machine witness catches faults while the receiver judges whether anything is missing (ADR-0046).
 

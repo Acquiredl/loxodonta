@@ -140,9 +140,11 @@ them, it returns per session the dict `read_witness` returns, so
 `pair_calls` pairs them, by the call's id where both name it and
 otherwise by `reconcile`'s count by tool (ADR-0046), and
 `watch_receiver` runs that reading over a receiver's folder (`scan
---receiver`, docs/RECEIVER.md section 7) with three words of its own:
-PENDING inside the settle window, SECOND-RECORD-ABSENT for receipts
-with no events, SECOND-RECORD-GAP for a counter with holes.
+--receiver`, docs/RECEIVER.md section 7) with four words of its own:
+PENDING inside the settle window, PENDING-OVERDUE when a call or a
+counter number older than the window is still unpaid there (`overdue`,
+ADR-0046 ruling 6), SECOND-RECORD-ABSENT for receipts with no events,
+SECOND-RECORD-GAP for a counter with holes.
 
 Two field findings calibrate the count (2026-08-29): the witness counts
 only tools the *wired matchers* cover (`hook_matchers` reads the
