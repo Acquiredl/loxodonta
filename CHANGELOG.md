@@ -14,6 +14,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 - `docs/CLAIMS.md` names a limit ADR-0047's measured run found: where a `PreToolUse` hook rewrites a call's input, the receipt holds the input as the model sent it, not what ran.
 
+### Fixed
+
+- At the receiver, an acknowledged session whose events hold a call naming no tool stays acknowledged: its counts were compared before the memory's JSON had turned the missing name into `"null"`, so they never matched (ADR-0046).
+
 ## [0.20.0] - 2026-11-12
 
 ### Added

@@ -4496,10 +4496,14 @@ def session_counts(row):
     """What an acknowledgement at the receiver accepts beside the state:
     the counts the session's row reports. A session whose counts differ
     from these after it was acknowledged is a finding again (ADR-0046
-    ruling 2)."""
-    return {"tools": row["tools"], "receipts": row["receipts"],
-            "by_tool": row["by_tool"],
-            "gap": (row.get("gap") or {}).get("count", 0)}
+    ruling 2). Returned as the memory's JSON reads them back: an event
+    that names no tool is counted under None, which JSON keeps as the
+    key "null", and counts compared any other way would never equal the
+    ones written down."""
+    return json.loads(json.dumps({
+        "tools": row["tools"], "receipts": row["receipts"],
+        "by_tool": row["by_tool"],
+        "gap": (row.get("gap") or {}).get("count", 0)}))
 
 
 def session_acknowledgement(acknowledged, session):
