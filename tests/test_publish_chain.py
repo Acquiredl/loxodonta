@@ -818,7 +818,7 @@ class PublishChainAtSessionEndTest(PublishBase):
         self.one_entry_per_batch()
         # Of the Codex budget's 1.5: the refused last entry and the
         # genesis take 0.8 between them, which leaves a slow runner 0.7
-        # to land one batch, and the six posts in all still cannot fit.
+        # to land one batch, and the seven posts in all still cannot fit.
         self.receiver.chain_delay = 0.4
 
         result = self.session_end("--publish-chain", self.receiver.url,
