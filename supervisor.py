@@ -2680,6 +2680,123 @@ def wired_rules(witness, event):
     return rules
 
 
+# --- Whether the managed install's footing holds (#469) -----------------------
+# A managed install holds only while the account the agent runs as
+# cannot write the managed hook file or the copy its commands name
+# (ADR-0040, ADR-0042). The supervisor runs as that account, so each
+# scan asks, of the account it runs as, and says so on the settings
+# note: a note about the setup, never a verdict about a chain, and no
+# exit moves. It asks without writing: nothing is changed, made or
+# left behind, and no mtime moves.
+
+def managed_paths():
+    """(the managed hook file, the copies its commands name) when the
+    recorder's managed file wires the recorder or the digest, else
+    None: a plain install, whose file the account writes by design."""
+    managed = Path(managed_hooks_path())
+    settings = read_settings(managed)
+    hooks = settings.get("hooks") if settings else None
+    copies = []
+    for rules in hooks.values() if isinstance(hooks, dict) else []:
+        for rule in rules if isinstance(rules, list) else []:
+            entries = rule.get("hooks") if isinstance(rule, dict) else None
+            for hook in entries if isinstance(entries, list) else []:
+                script = isinstance(hook, dict) and owned_script(
+                    hook.get("command"), RECORDER_NAMES + DIGEST_NAMES)
+                copy = script and Path(os.path.expanduser(script))
+                if copy and copy not in copies:
+                    copies.append(copy)
+    return (managed, copies) if copies else None
+
+
+def token_elevated():
+    """Whether this process runs with an administrator's token on
+    Windows (shell32's IsUserAnAdmin), or None when it cannot be asked."""
+    try:
+        import ctypes  # Windows alone calls this
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, ImportError, OSError):
+        return None
+
+
+def could_write(path, folder=False):
+    """Whether the account this process runs as could write the file at
+    `path`, or make a file in the folder at `path` (`folder`): True,
+    False, or None when it cannot be told. Nothing is written. On POSIX,
+    the effective ids' access, and root can. On Windows a file is opened
+    for appending, by CreateFileW so the system's own answer is read,
+    and closed: only access denied (5) is "cannot", since a sharing
+    violation (32) refuses an account that may write. A folder is asked
+    by the token: an elevated one can, and any other is read as cannot,
+    the quieter question than making a file there."""
+    if sys.platform != "win32":
+        if os.geteuid() == 0:
+            return True
+        mode = os.W_OK | (os.X_OK if folder else 0)
+        try:
+            if os.access in os.supports_effective_ids:
+                return os.access(path, mode, effective_ids=True)
+            return os.access(path, mode)
+        except OSError:
+            return None
+    if folder:
+        elevated = token_elevated()
+        return None if elevated is None else elevated
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = (
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        # FILE_APPEND_DATA, every share mode, OPEN_EXISTING: never made.
+        handle = kernel32.CreateFileW(str(path), 0x4, 0x7, None, 3, 0, None)
+        if handle in (None, wintypes.HANDLE(-1).value):
+            return False if ctypes.get_last_error() == 5 else None
+        kernel32.CloseHandle(wintypes.HANDLE(handle))
+        return True
+    except (AttributeError, ImportError, OSError):
+        return None
+
+
+def footing_said():
+    """The settings note's lines on the managed install's footing: one
+    when LOXODONTA_MANAGED_DIR names the folder read here (#466 ruling
+    1), since a writer who sets it hides the managed hook from the scan;
+    one when a managed install is in place and the account this runs as
+    could write what it rests on (#469). Nothing for a plain install."""
+    lines = []
+    if environment("LOXODONTA_MANAGED_DIR"):
+        lines.append(
+            "LOXODONTA_MANAGED_DIR is set where this scan runs, so the managed "
+            f"hook file was read as {Path(managed_hooks_path()).as_posix()} and "
+            f"not under the harness's own {harness_managed_folder()}: a hook "
+            "wired there is not seen by this scan")
+    found = managed_paths()
+    if found is None:
+        return lines
+    managed, copies = found
+    asked = [(managed, False), (managed.parent, True)]
+    for copy in copies:
+        asked.append((copy, False))
+        if (copy.parent, True) not in asked:
+            asked.append((copy.parent, True))
+    writable = [path.as_posix() + (" (a file can be made there)" if folder
+                                   else "")
+                for path, folder in asked if could_write(path, folder)]
+    if writable:
+        lines.append(
+            "the account this supervisor runs as can write what the managed "
+            f"install rests on: {', '.join(writable)}. The install holds only "
+            "while the account the agent runs as cannot, so a session run as "
+            "this account could switch the recorder off or change what it "
+            "runs. This asks of the account the supervisor runs as, not of a "
+            "session: one started elevated beside a scan that is not reads "
+            "here as one that cannot")
+    return lines
+
+
 # --- Which hook entries are the recorder's ------------------------------------
 # The settings file is shared with the user's own hooks, so a reader must
 # know which entries the installer wrote before it reads anything off
@@ -6018,10 +6135,11 @@ def memory_notes(look, skipped):
     # managed file's name hides a hook as one at the operator's does,
     # and so does a file there that is not JSON (#465).
     unset = "; ".join(
-        f"{settings.as_posix()} cannot be read as harness settings: {why} "
-        "— read as none, as if no hook were wired"
-        for settings in wired_files(look.witness)
-        for why in [settings_reading(settings)[1]] if why)
+        [f"{settings.as_posix()} cannot be read as harness settings: {why} "
+         "— read as none, as if no hook were wired"
+         for settings in wired_files(look.witness)
+         for why in [settings_reading(settings)[1]] if why]
+        + footing_said())
     if unset:
         notes["settings_note"] = unset
     return notes

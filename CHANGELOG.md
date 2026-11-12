@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `supervisor scan` says on its settings note when the account it runs as can write a managed install's hook file or copy, and when `LOXODONTA_MANAGED_DIR` names the managed folder read. A note: no exit moves (#469, #466).
+
 ### Changed
 
 - `docs/CLAIMS.md` names a limit ADR-0047's measured run found: where a `PreToolUse` hook rewrites a call's input, the receipt holds the input as the model sent it, not what ran.
