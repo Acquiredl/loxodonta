@@ -93,12 +93,25 @@ def log_entry(log, action, actor="claude-code", files=()):
         action, *file_args, check=True)
 
 
+def tamper(log):
+    """Rewrite the first receipt's action in place, keeping the file's
+    times: verify reads the chain BROKEN from that entry on."""
+    times = os.stat(log)
+    lines = log.read_text(encoding="utf-8").splitlines()
+    entry = json.loads(lines[1])
+    entry["action"] = "something else entirely"
+    lines[1] = json.dumps(entry)
+    log.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    os.utime(log, (times.st_atime, times.st_mtime))
+
+
 def strip_drawn(test, page, report):
     """What the page's verdict strip says over `report`: its colour, its
     state line and its why. The words are chosen by the page's script,
     so this runs `renderStrip` itself under a JavaScript runtime, with a
-    stand-in for the document (#612). Skips where no runtime is
-    installed: neither is a dependency of this repo."""
+    stand-in for the document (#612), in the test's isolated homes.
+    Skips where no runtime is installed: neither is a dependency of
+    this repo."""
     runner = shutil.which("node") or shutil.which("bun")
     if runner is None:
         test.skipTest("no node or bun on this machine to draw the strip")
@@ -125,7 +138,7 @@ def strip_drawn(test, page, report):
           "why: drawn.statewhy.textContent}));\n", encoding="utf-8")
     result = subprocess.run([runner, str(probe), str(served)],
                             capture_output=True, encoding="utf-8",
-                            timeout=120)
+                            env=test.env, timeout=120)
     test.assertEqual(result.returncode, 0, result.stderr)
     return json.loads(result.stdout)
 
@@ -263,6 +276,96 @@ class DashboardTest(ServerFixture):
         self.assertIn("NOT THE RECORDED HISTORY", page)
         self.assertIn("RECEIPTS STOPPED ARRIVING", page)
         self.assertIn("all quiet", page)
+
+    def serve_beside_a_live_alarm(self):
+        """Serve the root with a witness that holds one session visibly
+        active and recorded nowhere, ALARM-SILENT; the served status and
+        the page, once the test has laid down what sits beside it."""
+        witness = temp_folder(self) / "witness"
+        install_witness_hook(witness)
+        prime_memory(self.root)
+        write_transcript(witness, self.root / "beta", "sess-nowhere",
+                         event_times=[ago(600), ago(400), ago(120)])
+        self.serve(extra_args=("--witness", str(witness)))
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 6)
+        states = {s["session"]: s["state"]
+                  for s in served["completeness"]["sessions"]}
+        self.assertEqual(states["sess-nowhere"], "ALARM-SILENT")
+        return served, page
+
+    def test_a_live_alarm_does_not_hide_a_broken_chain(self):
+        # #612 on the agent's machine: a session gone quiet while active
+        # and a chain that fails verification, in one look. The strip
+        # names both, the live alarm first, as the exit (6) does.
+        tamper(make_chain(self.root / "alpha" / "receipts", "sess-aaaa"))
+
+        served, page = self.serve_beside_a_live_alarm()
+
+        strip = strip_drawn(self, page, served)
+        self.assertEqual(strip["colour"], "grave")
+        self.assertEqual(strip["state"], "RECEIPTS STOPPED ARRIVING"
+                                         " · HISTORY WAS ALTERED")
+        self.assertLess(strip["why"].index("visibly active"),
+                        strip["why"].index("1 chain(s) fail verification"))
+
+    def test_a_live_alarm_does_not_hide_a_chain_verify_could_not_judge(self):
+        # #612, the strip's last clause: an exit no other words explain
+        # (here 4, an empty chain verify will not judge) is named beside
+        # the live alarm by the chains' own verdicts, never only when
+        # nothing else was found.
+        empty = self.root / "alpha" / "receipts" / "receipts-sess-empty.jsonl"
+        empty.parent.mkdir(parents=True)
+        empty.write_text("", encoding="utf-8")
+
+        served, page = self.serve_beside_a_live_alarm()
+
+        (repo,) = served["repos"]
+        self.assertEqual([(c["verdict"], c["exit"]) for s in repo["sessions"]
+                          for c in s["chains"]], [("NO-VERDICT", 4)])
+        strip = strip_drawn(self, page, served)
+        self.assertEqual(strip["colour"], "grave")
+        self.assertEqual(strip["state"], "RECEIPTS STOPPED ARRIVING"
+                                         " · CHANGED SINCE LAST LOOK")
+        self.assertTrue(strip["why"].endswith(
+            " · 1 chain(s) NO-VERDICT — details in the band below"
+            " (scan exit 6)"), strip["why"])
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not list")
+    def test_a_change_does_not_hide_a_folder_the_scan_cannot_list(self):
+        # #612, inside the amber words: a chain gone since the last look
+        # and a folder the census cannot list, in one look, each named in
+        # its own words, in the order the strip ranks them.
+        gone = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        run(SUPERVISOR, "scan", "--root", str(self.root), "--json",
+            env=self.env, check=True)
+        gone.unlink()
+        shut = self.root / "gamma" / "receipts"
+        shut.mkdir(parents=True)
+        os.chmod(shut, 0)
+        self.addCleanup(os.chmod, shut, 0o755)
+        self.serve()
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 5)
+        self.assertEqual([e["change"] for e in served["baseline"]["events"]],
+                         ["vanished"])
+        self.assertEqual(len(served["closed"]), 1)
+        strip = strip_drawn(self, page, served)
+        self.assertEqual(strip["colour"], "damage")
+        self.assertEqual(strip["state"], "CHANGED SINCE LAST LOOK"
+                                         " · FOLDER CANNOT BE LISTED")
+        self.assertEqual(strip["why"], (
+            "1 change(s) the baseline cannot explain as appends · 1 "
+            "folder(s) the scan cannot list, so what they hold is unknown, "
+            "never read as empty (scan exit 5)"))
 
     def test_a_watch_row_says_the_counts_that_decided_its_chip(self):
         # ADR-0034: paired tool by tool, the totals can match while a
@@ -1787,6 +1890,33 @@ class ReceiverServeTest(ServerFixture):
         self.assertIn('s.state === "PENDING-OVERDUE"', page)
         self.assertIn("acknowledged here with supervisor acknowledge "
                       "--receiver DIR", page)
+
+    def test_a_broken_chain_does_not_hide_a_finding_no_one_has_accepted(self):
+        # #612: one look, both findings. The exit carries the worse (6,
+        # the finding), and the strip names both, the worse first, each
+        # in its own words.
+        tamper(chain_copy(self.data, FIXTURE_SESSION,
+                          actions=FIXTURE_RECEIPTS[:1]))
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 6)
+        (repo,) = served["repos"]
+        self.assertEqual([c["verdict"] for s in repo["sessions"]
+                          for c in s["chains"]], ["BROKEN"])
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["raises"]),
+                         ("ENDED-DEFICIT", True))
+        strip = strip_drawn(self, page, served)
+        self.assertEqual(strip["colour"], "grave")
+        self.assertEqual(strip["state"], "A FINDING NO ONE HAS ACCEPTED"
+                                         " · HISTORY WAS ALTERED")
+        self.assertLess(strip["why"].index("1 settled session(s)"),
+                        strip["why"].index("1 chain(s) fail verification"))
+        self.assertEqual(strip["why"].count("(scan exit 6)"), 1)
 
     def test_the_startup_line_says_no_keeper_runs_at_the_far_end(self):
         # #487 item 12.
