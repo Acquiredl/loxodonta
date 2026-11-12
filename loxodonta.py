@@ -7454,9 +7454,17 @@ def managed_dir_said():
 # verb run again from newer files.
 
 COPIED = ("loxodonta.py", "supervisor.py")
-# Where Windows keeps what only an administrator writes, by name: the
-# standard library reads no access list (ADR-0042 ruling 3).
-SYSTEM_PLACES = ("C:\\Program Files", "C:\\Windows")
+# The folders under System32 an ordinary account may write by default,
+# refused by name (#574), from the list for Windows 10 1803 in
+# github.com/api0cradle/UltimateAppLockerByPassList,
+# Generic-AppLockerbypasses.md. That list names a folder inside Tasks;
+# Tasks itself gives Authenticated Users write in its own access list.
+# LogFiles\WMI was proposed and is left out: that list does not name
+# it, and its access list gives write to Performance Log Users alone.
+WRITABLE_IN_SYSTEM32 = ("Tasks", "Tasks_Migrated", "spool\\drivers\\color",
+                        "spool\\PRINTERS", "spool\\SERVERS",
+                        "Microsoft\\Crypto\\RSA\\MachineKeys", "com\\dmp",
+                        "FxsTmp")
 # The kernel follows at most this many links in one path (Linux's
 # MAXSYMLINKS), and the check follows no more (#576).
 LINK_HOPS = 40
@@ -7556,30 +7564,123 @@ def within(path, folder):
         return False
 
 
+def windows_places():
+    """(the folders a path passes under, the Windows folder) on Windows
+    (ADR-0042 ruling 3, as #574 narrowed it): Program Files, Program
+    Files (x86) where the system has one, and System32, as the machine's
+    own registry names them in its 64-bit view, which only an
+    administrator writes. Never the environment: an account sets a user
+    variable without rights, and an administrator's elevated shell
+    inherits it (stand_in). A value that cannot be read is left out, so
+    nothing passes under it."""
+    import winreg  # Windows alone has it
+    found = {}
+    for key, names in (("SOFTWARE\\Microsoft\\Windows\\CurrentVersion",
+                        ("ProgramFilesDir", "ProgramFilesDir (x86)")),
+                       ("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                        ("SystemRoot",))):
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key, 0,
+                                winreg.KEY_READ | winreg.KEY_WOW64_64KEY) \
+                    as opened:
+                for name in names:
+                    try:
+                        value, kind = winreg.QueryValueEx(opened, name)
+                    except OSError:
+                        continue
+                    # A plain absolute path, never one to expand.
+                    if kind == winreg.REG_SZ and ntpath.isabs(value):
+                        found[name] = value
+        except OSError:
+            pass
+    windows = found.get("SystemRoot")
+    places = [found[name] for name in ("ProgramFilesDir",
+                                       "ProgramFilesDir (x86)")
+              if name in found]
+    if windows:
+        places.append(os.path.join(windows, "System32"))
+    return places, windows
+
+
+def long_spelling(path):
+    """`path` with each 8.3 short name in the part of it that exists
+    spelled in full (GetLongPathNameW), which follows no link or
+    junction, so the path as written stays the path as written. As it
+    was when anything goes wrong."""
+    import ctypes  # Windows alone calls this
+    standing, rest = path, ""
+    while not os.path.lexists(standing):
+        parent = os.path.dirname(standing)
+        if parent == standing:
+            return path
+        rest = os.path.join(os.path.basename(standing), rest)
+        standing = parent
+    try:
+        size = ctypes.windll.kernel32.GetLongPathNameW(standing, None, 0)
+        buffer = ctypes.create_unicode_buffer(size)
+        if not size or not ctypes.windll.kernel32.GetLongPathNameW(
+                standing, buffer, size):
+            return path
+    except (AttributeError, OSError, ValueError):
+        return path
+    return os.path.join(buffer.value, rest) if rest else buffer.value
+
+
+def and_joined(words):
+    """`a`, `a and b`, `a, b and c`."""
+    return (", ".join(words[:-1]) + " and " + words[-1] if len(words) > 1
+            else "".join(words))
+
+
+def by_place(place, places, windows):
+    """Why `place` is within an ordinary account's reach by where it is
+    on Windows (windows_places), or None when it is under a place that
+    passes and outside every folder there that such an account may
+    write by default."""
+    system = os.path.join(windows, "System32") if windows else None
+    if system:
+        for name in WRITABLE_IN_SYSTEM32:
+            open_by_default = os.path.join(system, name)
+            if within(place, open_by_default):
+                return (f"is under {open_by_default}, which an ordinary "
+                        "account may write by default")
+    if any(within(place, passing) for passing in places):
+        return None
+    if windows and within(place, windows):
+        return (f"is under {windows} and not under {system}, the one "
+                f"folder there taken as out of reach: others under {windows} "
+                "an ordinary account may write by default")
+    if within(place, "C:\\Users") or within(place, os.path.expanduser("~")):
+        return "is under a user profile, which its account writes"
+    if not places:
+        return ("cannot be placed: this installer could not read from the "
+                "registry where the system keeps its program folders")
+    return (f"is outside {and_joined(places)}, and this installer cannot "
+            "read that folder's access list from here")
+
+
 def in_reach(path):
     """Why an ordinary account can reach `path`, as far as this tool can
     see, or None when it cannot (ADR-0042 ruling 3). On POSIX the walk
-    of walk_path. On Windows by place, asked of the path as written,
-    which is what the command names and what a junction in a folder
-    the account owns could later be retargeted under, and of the path
-    resolved, which is what runs today: the standard library reads no
-    access list."""
-    written = os.path.abspath(path)
-    if sys.platform == "win32":
-        real = os.path.realpath(path)
-        for place, it in ((written, "it"),
-                          (real, f"it resolves to {real}, which")):
-            if any(within(place, system) for system in SYSTEM_PLACES):
-                continue
-            if within(place, "C:\\Users") \
-                    or within(place, os.path.expanduser("~")):
-                return (f"{it} is under a user profile, which its account "
-                        "writes")
-            return (f"{it} is outside {' and '.join(SYSTEM_PLACES)}, and "
-                    "this installer cannot read that folder's access list "
-                    "from here")
-        return None
-    return walk_path(path)[0]
+    of walk_path. On Windows, by place (by_place), the standard library
+    reading no access list: asked of the path as written, which is what
+    the command names and what a junction in a folder the account owns
+    could later be retargeted under, with its 8.3 names spelled in full,
+    and of the path resolved, which is what runs today. A device or
+    network spelling (\\\\?\\, \\\\.\\, \\??\\, \\\\localhost\\C$\\) is
+    under no place and fails: the loud side, since spelled back it could
+    name a folder any account may make at a drive's root (C:\\Program
+    Files. under \\\\?\\ is not C:\\Program Files)."""
+    if sys.platform != "win32":
+        return walk_path(path)[0]
+    places, windows = windows_places()
+    real = os.path.realpath(path)
+    for place, it in ((long_spelling(os.path.abspath(path)), "it"),
+                      (real, f"it resolves to {real}, which")):
+        why = by_place(place, places, windows)
+        if why:
+            return f"{it} {why}"
+    return None
 
 
 def walk_path(path, made=None, judge=True):
