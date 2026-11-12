@@ -3865,9 +3865,13 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
         # A file not one line of which can be read hides its calls and
         # pays none, so a deficit the rest shows stands. Where none does,
         # the session reads as one whose transcript cannot be opened,
-        # never as one whose calls were none (#473).
-        path, lines = seen["unread"][0]
-        raise OSError(errno.EINVAL, no_line_read(lines), str(path))
+        # never as one whose calls were none (#473). The row's note names
+        # the first file; every other one follows it in the same words.
+        (path, lines), *rest = seen["unread"]
+        why = "; ".join([no_line_read(lines)]
+                        + [cannot_read(other, no_line_read(count))
+                           for other, count in rest])
+        raise OSError(errno.EINVAL, why, str(path))
     deficit_since = parse_when(unpaid) if unpaid else None
     deficit_age = ((now - deficit_since).total_seconds()
                    if deficit_since else None)

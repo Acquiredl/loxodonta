@@ -2920,6 +2920,26 @@ class UnreadableTranscriptTest(unittest.TestCase):
 
         self.assert_unreadable(rows["sess-sub"], sidechain, receipts=2)
 
+    def test_every_garbled_subagent_file_is_named(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-two",
+                   actions=["Bash: a", "Bash: b"])
+        write_transcript(self.witness, self.root / "alpha", "sess-two",
+                         event_times=[ago(6000), ago(5990)])
+        garbled = []
+        for agent in ("aaa", "bbb"):
+            path = write_subagent_transcript(
+                self.witness, self.root / "alpha", "sess-two", agent)
+            path.write_bytes(GARBLED["text"])
+            garbled.append(path)
+
+        rows, _ = self.scan(expect=0)
+
+        row = rows["sess-two"]
+        self.assertEqual(row["state"], "UNWITNESSED")
+        for path in garbled:
+            self.assertIn(f"{path.as_posix()} cannot be read as a "
+                          f"transcript: {GARBLED_WHY}", row["note"])
+
     def test_a_garbled_subagent_file_never_quiets_the_parents_alarm(self):
         # A deficit the readable files show stands: a file that cannot be
         # read can only hide more calls, never pay one. The file is named.
