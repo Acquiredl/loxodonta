@@ -58,7 +58,7 @@ Names: `GIT_TIMEOUT`, `checkout_commit`, `version_line`, `VersionAction`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
 
-Every file answers `--version` with the same line, tool, format and the commit it sits in, read by local git only and never fetched (ADR-0015, ADR-0022), and a git that has not answered within the same bound reads as unknown (#572).
+Every file answers `--version` with the same line, tool, format and the commit it sits in, read by local git only and never fetched (ADR-0015, ADR-0022), and a git that has not answered within `GIT_TIMEOUT` reads as unknown (#572).
 
 ### A usage error
 

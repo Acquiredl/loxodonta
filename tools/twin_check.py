@@ -109,7 +109,7 @@ TWINS = (
          "Every file answers `--version` with the same line, tool, format "
          "and the commit it sits in, read by local git only and never "
          "fetched (ADR-0015, ADR-0022), and a git that has not answered "
-         "within the same bound reads as unknown (#572)."),
+         "within `GIT_TIMEOUT` reads as unknown (#572)."),
     Twin("A usage error", ("EX_USAGE", "UsageParser"), ORIGINAL, BOTH,
          "A wrong flag exits 64 from every file, never a number a script "
          "could read as an answer (ADR-0026 ruling 7)."),
