@@ -347,8 +347,9 @@ The masking rule is deliberate: a regenerated chain with tidy files must
 shout "not the recorded history," not report a housekeeping issue.
 
 **`report`.** Same walk, zero judgment — a timeline with breaks inlined
-where they sit, closed by the philosophy in one line: *"this timeline is
-testimony only — run `receipts verify` for the verdict."* Narration and
+where they sit, closed, when there are any, by the philosophy in one line:
+*"chain integrity: BROKEN — this timeline is testimony only (run
+`loxodonta verify` for the verdict)"*. Narration and
 judgment are different jobs; neither impersonates the other.
 
 **`explain` — the narrator under contract.** A language model narrates
@@ -403,21 +404,28 @@ the kitchen running, keep printing.
 - **`ensure_chain` — the startup race.** Genesis is written under the
   lock, guarding both "missing" and "exists but empty": two hook
   processes racing to create the same chain must not leave one dying on
-  "run `receipts init` first" against a file that was about to be a
+  "run `loxodonta init` first" against a file that was about to be a
   chain.
 - **`cmd_hook` — the assembly line.** The payload is read from stdin as
   UTF-8 bytes and decoded explicitly (JSON's interchange encoding —
   never the console codepage). Chain placement, most specific wins:
-  `--log-dir` flag, else `$CLAUDE_PROJECT_DIR/receipts` through
-  `main_repo_root`, else the working directory — with the env var read
+  `--log-dir` flag, else the store's drawer for `$CLAUDE_PROJECT_DIR`
+  through `main_repo_root` (`~/.loxodonta/receipts/<project-slug>/`,
+  ADR-0011), else the working directory — with the env var read
   *in Python, not the shell*, which is why one installed hook command
-  works under every shell on every platform. The session id is
+  works under every shell on every platform. A harness that sets no
+  `CLAUDE_PROJECT_DIR` names the project in the payload's `cwd`
+  instead (ADR-0020). `LOXODONTA_HOME` moves the store, except under
+  `--managed`, where the hook reads no environment variable but
+  `CLAUDE_PROJECT_DIR` (ADR-0043). A session's first receipt picks its
+  drawer, and a later one that resolves elsewhere still goes where the
+  session's chain already is (ADR-0023). The session id is
   sanitized before it may name a file. A directory the hook creates
   gets a protective `.gitignore` (`*` + `!.gitignore`): action lines
   record every command a session ran, and that history must not ride
   into a commit by accident. Files are fingerprinted only when they sit
-  under the log's directory and still exist — anything else is skipped,
-  never fatal.
+  under the project (the log's directory, when no project is named) and
+  still exist — anything else is skipped, never fatal.
 
 A deliberate scope boundary, worth knowing: the hook reads `tool_input`
 and ignores `tool_response` — a hook ticket records what was attempted

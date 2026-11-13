@@ -64,6 +64,7 @@ import tempfile
 import threading
 import unicodedata
 import time
+import traceback
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -79,7 +80,7 @@ LOXODONTA = HERE / "loxodonta.py"
 # two files' constants must agree (the suite says so); FORMAT_VERSION
 # is the frozen receipt format the recorder it drives speaks (SPEC §2.1).
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
-TOOL_VERSION = "0.20.0"
+TOOL_VERSION = "0.21.0"
 FORMAT_VERSION = "0.1"
 
 # Who wrote an entry, read off the actor field. The harness actors are
@@ -103,11 +104,14 @@ EX_CANTCREAT = 73  # sysexits(3) EX_CANTCREAT: no drill sandbox, no
                    # package, no baseline for calibrate or acknowledge, no
                    # export; and what the keeper reads from a recorder verb
 
-# Read by the keepers from a recorder verb; the supervisor exits with none.
+# The first three are read by the keepers from a recorder verb. 70 and
+# 141 the supervisor also gives itself, through run_main as the recorder
+# does (#449): when it crashes, and when its reader hangs up.
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_UNAVAILABLE = 69  # the far end: a calendar, an authority or a remote
-EX_SOFTWARE = 70  # the recorder itself failed
+EX_SOFTWARE = 70  # the recorder, or the supervisor itself, failed
 EX_TEMPFAIL = 75  # another writer holds the chain's lock
+EXIT_READER_GONE = 141
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
@@ -132,15 +136,15 @@ def environment(name, default=None):
     return os.environ.get(name, default)
 
 
-def env_number(name, default, kind=int):
-    """The number in environment variable `name`, read as `kind` (int
-    or float), or `default` when it is unset. A value that is not such a
-    number, or is negative or infinite, is refused by name: one line on
-    stderr and exit 64, at import and so before any verb runs, never a
-    traceback (#487)."""
-    raw = environment(name)
-    if raw is None:
-        return default
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def number_setting(name, raw, kind=int, waited=False):
+    """The number the text `raw` of environment variable `name` says,
+    read as `kind` (int or float). A value that is not such a number,
+    or is negative or infinite, is refused by name: one line on stderr
+    and exit 64, never a traceback (#487). When the number is a wait,
+    one past threading.TIMEOUT_MAX is refused the same way, since no
+    wait can take it (#589); a number only compared has no such
+    bound."""
     try:
         value = kind(raw)
     except ValueError:
@@ -150,7 +154,39 @@ def env_number(name, default, kind=int):
               f"{'whole' if kind is int else 'finite'} number 0 or more",
               file=sys.stderr)
         sys.exit(EX_USAGE)
+    if waited and value > threading.TIMEOUT_MAX:
+        print(f"error: {name}={ascii(raw)} is more seconds than a wait "
+              f"can take (at most {int(threading.TIMEOUT_MAX)} here)",
+              file=sys.stderr)
+        sys.exit(EX_USAGE)
     return value
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def port_number(text):
+    """A port to listen on, as typed on the command line: a whole number
+    from 0 to 65535, 0 asking for a free one. Anything else is a usage
+    error naming the flag, never the OverflowError a socket raises at
+    bind (#589). The recorder listens on no port; it holds the original
+    as it holds every twin's."""
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
+    if not 0 <= value <= 65535:
+        raise argparse.ArgumentTypeError(
+            "a port is a whole number from 0 to 65535")
+    return value
+
+
+def env_number(name, default, kind=int, waited=False):
+    """The number in environment variable `name`, or `default` when it
+    is unset. Read at import, so a value `number_setting` refuses is
+    refused before any verb runs (#487); `waited` for a number a wait
+    is given."""
+    raw = environment(name)
+    return default if raw is None else number_setting(name, raw, kind,
+                                                      waited)
 
 
 # --- Census -------------------------------------------------------------------
@@ -591,11 +627,37 @@ def memory_unread(path, what, why):
 
 BASELINE_NAME = ".supervisor-baseline.json"
 
-INVESTIGATE = ("investigate — this memory is writer-reachable and decides "
+# Whose reach the supervisor's own files are in, said wherever they are
+# labelled (#615). On the agent's machine they sit in the account the
+# writer runs as (ADR-0002). Over a receiver's folder they sit wherever
+# DIR is, which the supervisor cannot check: out of the writer's reach
+# only where the setup puts the receiver there (ADR-0046), and even then
+# whoever holds the receiver's URL can add to the copies and events read
+# there (docs/CLAIMS.md). The label states that condition, never more.
+WRITER_REACH = "writer-reachable, trusted for nothing"
+RECEIVER_REACH = ("kept at the receiver, out of the writer's reach if the "
+                  "receiver is")
+
+
+def memory_reach(receiver):
+    """The words for whose reach the memory files are in."""
+    return RECEIVER_REACH if receiver else WRITER_REACH
+
+
+BASELINE_PURPOSE = "the supervisor's memory between looks — {}"
+
+
+# `{memory}` is said by `alarm_event`, by the reading's universe.
+INVESTIGATE = ("investigate — this memory is {memory} and decides "
                "nothing; run loxodonta verify and check your anchors. It "
                "stands on every look until the chain holds the remembered "
                "head again or `supervisor acknowledge` accepts what is "
                "there")
+INVESTIGATE_MEMORY = {
+    False: "writer-reachable",
+    True: (RECEIVER_REACH + " (whoever holds the receiver's URL can add "
+           "to the copies it reads)"),
+}
 
 CHANGE_WORDS = {
     "rewritten": "the head the baseline remembers is no longer in this "
@@ -674,6 +736,10 @@ def baseline_problem(text, memory):
     if not (isinstance(acknowledged, list)
             and all(isinstance(record, dict) for record in acknowledged)):
         return "`acknowledged` is not a list of records"
+    named = data.get("named_missing")
+    problem = named_problem(named) if named is not None else None
+    if problem:
+        return problem
     keeper = data.get("keeper") if isinstance(data.get("keeper"), dict) else {}
     # An attempt time with no zone cannot be set against now: skipped,
     # it reads as no memory, so the keeper takes its turn, the next
@@ -690,7 +756,37 @@ def baseline_problem(text, memory):
                          calibration, list) else [])
                      if isinstance(epoch, dict)
                      and isinstance(epoch.get("matchers"), list)],
-        sessionend=sessionend if isinstance(sessionend, dict) else {})
+        sessionend=sessionend if isinstance(sessionend, dict) else {},
+        named_missing=named)
+    return None
+
+
+def zoned(when):
+    """Whether `when` is a time with a zone, as this reader writes one."""
+    return isinstance(when, str) \
+        and getattr(parse_when(when), "tzinfo", None) is not None
+
+
+def named_problem(named):
+    """None when `named_missing`, the reading at the receiver's memory of
+    the calls a settled look named missing (#620), is in the shape it
+    writes: per session, per call id, when the look that named it ran
+    and, once a receipt paying it was seen, when that look ran. Else in
+    words what is wrong, which makes the whole baseline unreadable, as
+    any row of the wrong shape does (#403)."""
+    if not isinstance(named, dict):
+        return "`named_missing` is not an object"
+    for session, calls in named.items():
+        if not isinstance(calls, dict):
+            return (f"`named_missing` holds no calls for "
+                    f"{clip(session, 80)}")
+        for call, record in calls.items():
+            if not (is_call_id(call) and isinstance(record, dict)
+                    and zoned(record.get("named"))
+                    and ("seen" not in record or zoned(record["seen"]))):
+                return (f"`named_missing` does not remember {clip(call, 80)} "
+                        f"of {clip(session, 80)} with the time it was "
+                        "named missing")
     return None
 
 
@@ -726,7 +822,8 @@ def read_baseline(path, daybook=None):
     (#386). No file and no such day book is a first look. A keeper
     attempt time with no zone is dropped and `skipped` names it (#430)."""
     memory = {"chains": {}, "keeper": {}, "calibration": [],
-              "sessionend": {}, "acknowledged": [], "blind": None,
+              "sessionend": {}, "acknowledged": [], "named_missing": {},
+              "blind": None,
               "note": None, "stood": None, "seen": None, "unzoned": [],
               "skipped": None}
 
@@ -819,16 +916,18 @@ def standing(known, change, stamp):
     return row, alarm.get("change") != change
 
 
-def alarm_event(repo, session, relpath, row, found):
+def alarm_event(repo, session, relpath, row, found, receiver=False):
     """One standing alarm as the report says it: since when it has stood,
     what the baseline remembers and what this look found, None for a
     chain that is not there, so the operator has the head `acknowledge`
-    accepts."""
+    accepts. `receiver` for a look over a receiver's folder."""
     change = row["alarm"]["change"]
     return {"repo": repo, "session": session, "log": relpath,
             "change": change, "since": row["alarm"]["since"],
             "remembered": {"n": row["n"], "head": row["head"]},
-            "found": found, "investigate": CHANGE_WORDS[change]}
+            "found": found,
+            "investigate": CHANGE_WORDS[change].format(
+                memory=INVESTIGATE_MEMORY[receiver])}
 
 
 def remembered_names(root, found, remembered):
@@ -893,8 +992,7 @@ DAYBOOK_NAME = ".supervisor-daybook.json"
 DAYBOOK_SEASON = 90  # how many days the book keeps
 FORTNIGHT = 14  # how many the band shows
 
-DAYBOOK_PURPOSE = ("the supervisor's day-by-day memory of its own looks — "
-                   "writer-reachable, trusted for nothing")
+DAYBOOK_PURPOSE = "the supervisor's day-by-day memory of its own looks — {}"
 
 
 def daybook_rows(path):
@@ -950,10 +1048,11 @@ def rows_skipped(path, skipped):
             "nobody watched, and left out of the next write")
 
 
-def write_daybook(path, days, now):
+def write_daybook(path, days, now, receiver=False):
     """Keep a season, forget the rest, and never let a write failure
     take the tick down with it — the book is a convenience, and the
-    verdicts do not live here.
+    verdicts do not live here. `receiver` for a receiver's folder, whose
+    label says whose reach the book is in (`memory_reach`, #615).
 
     Pruned by date, not by row count: a book that went unwritten for a
     year should forget that year, not keep it because it is short."""
@@ -961,13 +1060,14 @@ def write_daybook(path, days, now):
     kept = {day: row for day, row in sorted(days.items()) if day >= oldest}
     try:
         write_whole(path, json.dumps(
-            {"purpose": DAYBOOK_PURPOSE, "days": kept}, indent=2) + "\n")
+            {"purpose": DAYBOOK_PURPOSE.format(memory_reach(receiver)),
+             "days": kept}, indent=2) + "\n")
     except OSError:
         pass
     return kept
 
 
-def remember_day(path, now, claims, days):
+def remember_day(path, now, claims, days, receiver=False):
     """Fold one look's claims into today's row of `days`, the book as
     the look read it (`daybook_rows`), and write the book.
 
@@ -985,10 +1085,10 @@ def remember_day(path, now, claims, days):
     row["looks"] = row.get("looks", 0)
     row["last"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     days[today] = row
-    return write_daybook(path, days, now)
+    return write_daybook(path, days, now, receiver)
 
 
-def remember_look(path, now):
+def remember_look(path, now, receiver=False):
     """Someone opened the front page. Counted separately from scans,
     which the poll drives on its own."""
     days = read_daybook(path)
@@ -996,7 +1096,7 @@ def remember_look(path, now):
     row = dict(days.get(today) or {})
     row["looks"] = row.get("looks", 0) + 1
     days[today] = row
-    write_daybook(path, days, now)
+    write_daybook(path, days, now, receiver)
 
 
 # --- Named views --------------------------------------------------------------
@@ -1010,9 +1110,8 @@ def remember_look(path, now):
 # status strip or the attention queue.
 
 VIEWS_NAME = ".supervisor-views.json"
-VIEWS_PURPOSE = ("the operator's saved worktable filters — "
-                 "writer-reachable, trusted for nothing, and unable to "
-                 "reach the alarm")
+VIEWS_PURPOSE = ("the operator's saved worktable filters — {}, and "
+                 "unable to reach the alarm")
 VIEW_FIELDS = ("name", "repo", "from", "to", "path", "tab")
 VIEW_LIMIT = 40  # how many a book keeps; a filter set is not a corpus
 VIEW_TEXT = 200  # longest a single field may be
@@ -1062,36 +1161,40 @@ def read_views(path):
     return [view for view in kept if view][:VIEW_LIMIT]
 
 
-def write_views(path, views):
+def write_views(path, views, receiver=False):
     """Never let a write failure take the request down with it: the
-    views are a convenience, and no verdict lives here."""
+    views are a convenience, and no verdict lives here. `receiver` for
+    a receiver's folder, whose label says whose reach the file is in
+    (`memory_reach`, #615)."""
     kept = views[:VIEW_LIMIT]
     try:
         write_whole(path, json.dumps(
-            {"purpose": VIEWS_PURPOSE, "views": kept}, indent=2) + "\n")
+            {"purpose": VIEWS_PURPOSE.format(memory_reach(receiver)),
+             "views": kept}, indent=2) + "\n")
     except OSError:
         pass
     return kept
 
 
-def save_view(path, raw):
+def save_view(path, raw, receiver=False):
     """Save one view, replacing any of the same name. None when the
     view is not one this format can hold."""
     view = clean_view(raw)
     if view is None:
         return None
     kept = [row for row in read_views(path) if row["name"] != view["name"]]
-    return write_views(path, kept + [view])
+    return write_views(path, kept + [view], receiver)
 
 
-def forget_view(path, name):
+def forget_view(path, name, receiver=False):
     """Drop one view by name. Forgetting something that was never
     there is not an error — the file ends up the way the caller
     asked."""
     if not isinstance(name, str):
         return read_views(path)
     return write_views(
-        path, [row for row in read_views(path) if row["name"] != name])
+        path, [row for row in read_views(path) if row["name"] != name],
+        receiver)
 
 
 # What a day contributes to the band, as against what the book keeps
@@ -1165,8 +1268,10 @@ PENDING_LINE = re.compile(
     r"ANCHOR-PENDING: head ([0-9a-f]{12}…) "
     r"submitted (at an unrecorded time|\S+) "
     r"via (no recorded calendar|\S+) — "
-    r"(?:run `loxodonta anchor --upgrade`|`loxodonta anchor --upgrade` "
-    r"cannot complete it; `loxodonta anchor --force` submits the head again)")
+    r"(?:on the machine that holds the chain, the operator can run "
+    r"`loxodonta anchor --upgrade`|`loxodonta anchor --upgrade` cannot "
+    r"complete it; on the machine that holds the chain, the operator can "
+    r"run `loxodonta anchor --force` to submit the head again)")
 
 
 def anchor_span(line):
@@ -1996,11 +2101,82 @@ def ripe_head(entries, now, cadence):
     return entries[-1].get("entry_hash") or None
 
 
+# --- Which calendars an upgrade asks (#415) ----------------------------------
+# The recorder's rule, so the keeper can say on a chain's row that a
+# pending proof waits at a calendar its upgrade does not ask.
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+DEFAULT_CALENDARS = [
+    "https://a.pool.opentimestamps.org",
+    "https://b.pool.opentimestamps.org",
+    "https://a.pool.eternitywall.com",
+    "https://ots.btc.catallaxy.com",
+]
+DEFAULT_PORTS = {"http": 80, "https": 443}
+SHOWN_CALENDAR = 200   # characters of a row's address a skip line prints
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def calendar_key(url):
+    """What an upgrade compares to tell whether an address is a calendar
+    it was told to ask (#415): the scheme and the host in either case,
+    the port written or left to its default, the path with or without a
+    trailing slash, so `HTTPS://A.example:443/` is `https://a.example`.
+    Anything else that differs, a path included, is another calendar,
+    since the address is the door every request goes through. No name
+    is looked up. An address urllib cannot take apart is its own text."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return url
+    if port is None:
+        port = DEFAULT_PORTS.get(parts.scheme)
+    return (parts.scheme, parts.username, parts.password, parts.hostname,
+            port, parts.path.rstrip("/"), parts.query, parts.fragment)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def calendars_asked(calendars):
+    """The keys of the calendars an upgrade may ask: the defaults this
+    recorder submits to, and `calendars`, those the operator named on the
+    command line. A sidecar row is the writer's text, or the text of
+    whoever handed the sidecar over, so the address it names is asked
+    only when it is one of these (#415)."""
+    return {calendar_key(calendar)
+            for calendar in [*DEFAULT_CALENDARS, *(calendars or [])]}
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def unnamed_calendar(url, asked):
+    """True for an http or https address whose key is not in `asked`:
+    one an upgrade passes by and never asks (#415). Any other address
+    is left to `calendar_request`, which refuses it before it asks."""
+    try:
+        scheme = urllib.parse.urlsplit(url).scheme
+    except ValueError:
+        return False
+    return scheme in PUBLISH_SCHEMES and calendar_key(url) not in asked
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def shown_address(url):
+    """A row's address as a line prints it: escaped, and cut past
+    SHOWN_CALENDAR characters with the count of those cut, so a planted
+    address of a megabyte prints as some two hundred characters, more
+    only where escapes lengthen them."""
+    if len(url) <= SHOWN_CALENDAR:
+        return visible(url)
+    return (f"{visible(url[:SHOWN_CALENDAR])}… "
+            f"(+{len(url) - SHOWN_CALENDAR})")
+
+
 def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
                  authority=None, chain_url=None):
     """One chain's turn with the keeper, at most once per throttle
     window: pending proofs are driven through `loxodonta anchor
-    --upgrade` (the record's own calendar; judgment stays with verify),
+    --upgrade` (the record's own calendar, when it is a default one or
+    one of `calendars`, #415; judgment stays with verify),
     and, only when the operator opted in with a cadence, a fresh head
     that has aged past it is anchored, and stamped by the authority the
     marker names, on this same turn (ADR-0032 ruling 3). Whether the
@@ -2019,10 +2195,15 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     notes = []  # one turn can fail twice; every failure stays said
     failed = False
     travel = ["--publish-chain", chain_url] if chain_url else []
+    # The upgrade asks only the default calendars and those it is told
+    # (#415): a proof the keeper's own --calendar took is completed too.
+    named = [flag for calendar in calendars
+             for flag in ("--calendar", calendar)]
     # A folder or a pipe where the sidecar belongs holds no proof to
     # upgrade (#364); the scan's verify names it.
     if os.path.isfile(sidecar):
-        finished = run_verb(["anchor", "--upgrade", f"--log={log}", *travel])
+        finished = run_verb(["anchor", "--upgrade", f"--log={log}", *named,
+                             *travel])
         attempted = True
         if finished is None:
             notes.append("upgrading did not finish in time; the proofs stay "
@@ -2042,10 +2223,7 @@ def keep_anchors(log, last_attempt, now, entries, cadence, calendars,
     if cadence is not None and entries:
         head = ripe_head(entries, now, cadence)
         if head:
-            command = ["anchor", f"--log={log}", *travel]
-            for calendar in calendars:
-                command += ["--calendar", calendar]
-            finished = run_verb(command)
+            finished = run_verb(["anchor", f"--log={log}", *travel, *named])
             attempted = True
             if finished is None:
                 failed = True
@@ -2220,7 +2398,8 @@ def keep_published(log, last_attempt, now, entries, cadence, url,
 
 def publish_through_recorder(log, url, what):
     """One `loxodonta publish` as a subprocess: the head when `what` is
-    "head", the chain's entries after the cursor when it is "chain".
+    "head", the chain's entries the remote does not hold when it is
+    "chain".
     Returns the note for the panel when it did not land, else None. The
     recorder's stderr names the failure and never the URL, but it is
     not repeated here: the note is the panel's, and one sentence the
@@ -2417,6 +2596,15 @@ TAIL_KEEPER = environment("SUPERVISOR_TAIL_KEEPER", "1") != "0"
 # ruling's panel: 5 minutes is tight, 1 hour the default, 7 hours, the
 # keeper's cadence plus one, generous.
 SETTLE_SECONDS = env_number("SUPERVISOR_SETTLE_SECONDS", 3600)
+# How long after a settled look named a call missing a receipt carrying
+# its id may first be seen and still pay it (#620): inside it an honest
+# tail re-sent after a failed send clears; after it, the receipt pays
+# nothing and the session keeps its finding until acknowledged. Not the
+# settle window: that one says when a session is judged, this one how
+# late a judged call may still be paid. The ruling's panel: 0 pays
+# nothing named missing, 1 hour the default, 6 hours the keeper's
+# cadence.
+LATE_RECEIPT_SECONDS = env_number("SUPERVISOR_LATE_RECEIPT_SECONDS", 3600)
 
 WITNESS_ROOT = Path.home() / ".claude" / "projects"
 # What the recorder writes down about the coverage it wired (ADR-0030).
@@ -2472,8 +2660,9 @@ WATCH_WORDS = {
                "its counts and never an alarm until nothing of it has "
                "arrived for SUPERVISOR_SETTLE_SECONDS (ADR-0041).",
     "SECOND-RECORD-ABSENT": "receipts reached the receiver for this "
-                            "session and no harness events ever did — its "
-                            "second record never arrived. A run launched "
+                            "session and no harness events ever did, or "
+                            "none naming a completed call — its second "
+                            "record never arrived. A run launched "
                             "with the telemetry cut reads this way, and so "
                             "does a machine whose events go nowhere; never "
                             "read as clean, and the chain's own note says "
@@ -2615,6 +2804,198 @@ def wired_rules(witness, event):
     return rules
 
 
+# --- Whether the managed install's footing holds (#469) -----------------------
+# A managed install holds only while the account the agent runs as
+# cannot write the managed hook file or the copy its commands name
+# (ADR-0040, ADR-0042). The supervisor runs as that account, so each
+# scan asks, of the account it runs as, and says so on the settings
+# note: a note about the setup, never a verdict about a chain, and no
+# exit moves. It asks without writing: nothing is changed, made or
+# left behind, and no mtime moves.
+
+def managed_paths():
+    """(the managed hook file, the copies its commands name) when the
+    recorder's managed file wires the recorder or the digest, else
+    None: a plain install, whose file the account writes by design."""
+    managed = Path(managed_hooks_path())
+    settings = read_settings(managed)
+    hooks = settings.get("hooks") if settings else None
+    copies = []
+    for rules in hooks.values() if isinstance(hooks, dict) else []:
+        for rule in rules if isinstance(rules, list) else []:
+            entries = rule.get("hooks") if isinstance(rule, dict) else None
+            for hook in entries if isinstance(entries, list) else []:
+                script = isinstance(hook, dict) and owned_script(
+                    hook.get("command"), RECORDER_NAMES + DIGEST_NAMES)
+                copy = script and Path(os.path.expanduser(script))
+                if copy and copy not in copies:
+                    copies.append(copy)
+    return (managed, copies) if copies else None
+
+
+def token_elevated():
+    """Whether this process runs with an administrator's token on
+    Windows (shell32's IsUserAnAdmin), or None when it cannot be asked."""
+    try:
+        import ctypes  # Windows alone calls this
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, ImportError, OSError):
+        return None
+
+
+def owned_by_this_account(path):
+    """Whether the owner of the Windows file at `path` is this process's
+    user or a group this token holds enabled (CheckTokenMembership), read
+    from its security descriptor: Administrators owns what an elevated
+    process makes, and is held deny-only, so never enabled, in a token
+    that is not elevated. False when the owner cannot be read."""
+    import ctypes
+    from ctypes import wintypes
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.GetNamedSecurityInfoW.argtypes = (
+        wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+    advapi.CheckTokenMembership.argtypes = (
+        wintypes.HANDLE, ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL))
+    kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+    owner, described = ctypes.c_void_p(), ctypes.c_void_p()
+    # SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION.
+    if advapi.GetNamedSecurityInfoW(str(path), 1, 1, ctypes.byref(owner),
+                                    None, None, None,
+                                    ctypes.byref(described)) != 0:
+        return False
+    try:
+        held = wintypes.BOOL()
+        # No token named: this thread's, or else this process's.
+        return bool(advapi.CheckTokenMembership(None, owner,
+                                                ctypes.byref(held))
+                    and held.value)
+    finally:
+        kernel32.LocalFree(described)
+
+
+def could_write(path, folder=False):
+    """Whether the account this process runs as could write the file at
+    `path`, or make a file in the folder at `path` (`folder`), as
+    (True, None), (False, None), or (None, why) when it cannot be told.
+    Nothing is written. On POSIX root can, and so does the owner of what
+    stands there, who may give the write bits back (#638 review); else
+    the effective ids' access. On Windows a file is opened, by
+    CreateFileW so the system's own answer is read, and closed, asking
+    in turn to append, to change its attributes (a read-only mark), its
+    access list or its owner: any one granted is "can", since each
+    leads to a write; only access denied (5) to all four is "cannot". A
+    sharing violation (32) refuses an account that may write, and says
+    nothing. Failing all four, a file whose owner this token holds
+    (owned_by_this_account) can, since its owner may rewrite its access
+    list. An elevated token can, as root can on POSIX, asked first; a
+    folder is asked of the token alone, any other read as cannot, the
+    quieter question than making a file there."""
+    if sys.platform != "win32":
+        if os.geteuid() == 0:
+            return True, None
+        try:
+            if os.lstat(path).st_uid == os.geteuid():
+                return True, None
+            mode = os.W_OK | (os.X_OK if folder else 0)
+            if os.access in os.supports_effective_ids:
+                return os.access(path, mode, effective_ids=True), None
+            return os.access(path, mode), None
+        except FileNotFoundError:
+            return False, None
+        except OSError as error:
+            return None, error.strerror or str(error)
+    elevated = token_elevated()
+    if elevated:
+        return True, None
+    if folder:
+        return ((None, "the token could not be asked") if elevated is None
+                else (False, None))
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = (
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        why = None
+        # FILE_APPEND_DATA, FILE_WRITE_ATTRIBUTES, WRITE_DAC, WRITE_OWNER;
+        # every share mode, OPEN_EXISTING: never made.
+        for access in (0x4, 0x100, 0x40000, 0x80000):
+            handle = kernel32.CreateFileW(str(path), access, 0x7, None, 3, 0,
+                                          None)
+            if handle not in (None, wintypes.HANDLE(-1).value):
+                kernel32.CloseHandle(handle)
+                return True, None
+            code = ctypes.get_last_error()
+            if code in (2, 3):  # nothing there to write
+                return False, None
+            if code != 5:
+                why = why or (f"{ctypes.FormatError(code).strip()} "
+                              f"(Windows error {code})")
+        if owned_by_this_account(path):
+            # A deny entry, even on SYNCHRONIZE, which every open asks
+            # for: its owner may still rewrite the access list.
+            return True, None
+        return (None, why) if why else (False, None)
+    except (AttributeError, ImportError, OSError) as error:
+        return None, str(error)
+
+
+def footing_said():
+    """The settings note's lines on the managed install's footing: one
+    when LOXODONTA_MANAGED_DIR names the folder read here (#466 ruling
+    1), since a writer who sets it hides the managed hook from the scan;
+    one when a managed install is in place and the account this runs as
+    could write what it rests on (#469). Nothing for a plain install."""
+    lines = []
+    if environment("LOXODONTA_MANAGED_DIR"):
+        lines.append(
+            "LOXODONTA_MANAGED_DIR is set where this scan runs, so the managed "
+            f"hook file was read as {Path(managed_hooks_path()).as_posix()} and "
+            f"not under the harness's own {harness_managed_folder()}: a hook "
+            "wired there is not seen by this scan")
+    found = managed_paths()
+    if found is None:
+        return lines
+    managed, copies = found
+    asked = [(managed, False), (managed.parent, True)]
+    for copy in copies:
+        asked.append((copy, False))
+        if (copy.parent, True) not in asked:
+            asked.append((copy.parent, True))
+    writable, untold = [], []
+    for path, folder in asked:
+        answer, why = could_write(path, folder)
+        named = path.as_posix() + (" (a file can be made there)" if folder
+                                   else "")
+        if answer:
+            writable.append(named)
+        elif answer is None:
+            # Never read as cannot: a file held open by another program
+            # would then silence the note (#638 review).
+            untold.append(f"{named}: {why}")
+    if writable:
+        lines.append(
+            "the account this supervisor runs as can write what the managed "
+            f"install rests on: {', '.join(writable)}. The install holds only "
+            "while the account the agent runs as cannot, so a session run as "
+            "this account could switch the recorder off or change what it "
+            "runs. This asks of the account the supervisor runs as, not of a "
+            "session: one started elevated beside a scan that is not reads "
+            "here as one that cannot")
+    if untold:
+        lines.append(
+            "this scan could not tell whether the account it runs as can "
+            f"write what the managed install rests on: {'; '.join(untold)}. "
+            "Read it as an account that may")
+    return lines
+
+
 # --- Which hook entries are the recorder's ------------------------------------
 # The settings file is shared with the user's own hooks, so a reader must
 # know which entries the installer wrote before it reads anything off
@@ -2686,6 +3067,12 @@ def owned_script(command, names):
     if not words or len(words) < 3:
         return None
     interpreter, script, verb = words[:3]
+    if os.name == "nt":
+        # Windows drops a name's trailing dots and spaces, so it runs
+        # `loxodonta.py.` as the recorder, and the path returned is the
+        # one it runs, which git and the notice ask about; on POSIX that
+        # is another file.
+        script = script.rstrip(". ")
     name = file_name(script)
     if not is_interpreter(interpreter) or name not in names \
             or WIRED_VERB[name] != verb:
@@ -2886,6 +3273,28 @@ def leaves_as_written(log, entries, sending):
     return newest is None or newest.get("outcome") in SENT_OUTCOMES
 
 
+def missed_the_newest(log, step, remote):
+    """Whether the memo beside `log` records that the remote took an
+    earlier attempt of `step` and failed the newest (#614): a `sent`
+    attempt row, then a newest one that is not. A send that found the
+    remote holding the chain's end writes such a row and no chain row,
+    as the per-entry send writes none (ADR-0045), so without this a
+    remote that took every earlier entry reads as one that never took
+    any. With `remote`, only rows naming its fingerprint count (#263);
+    the head's rows name none, and count wherever they went. Testimony,
+    like the memo."""
+    mine = remote_id(remote) if remote is not None else None
+    took, newest = False, None
+    for record in sidecar_records(Path(str(log) + ".published.jsonl")):
+        if row_kind("memo", record) != ATTEMPT_KIND \
+                or record.get("step") != step \
+                or (mine is not None and record.get("remote_id") != mine):
+            continue
+        newest = record.get("outcome")
+        took = took or newest in SENT_OUTCOMES
+    return took and newest not in SENT_OUTCOMES
+
+
 def published_reading(witness, logs, written=()):
     """#240 part 3: whether the wired SessionEnd command publishes,
     whether any chain here holds a row saying something was sent, and
@@ -2914,10 +3323,26 @@ def published_reading(witness, logs, written=()):
                             for route in silent)
         flags = " and ".join("--publish" if route == "head"
                              else "--publish-chain" for route in silent)
+        # #614: which of the two it is comes from the memo's record of
+        # sends, per route, never from a guess.
+        took = {route: any(missed_the_newest(
+                               log, f"publish-{route}",
+                               remote if route == "chain" else None)
+                           for log in logs)
+                for route in silent}
+        reasons = {True: "the remote took earlier sends and missed the "
+                         "newest",
+                   False: "either no session has ended since the wiring, or "
+                          "the remote has never taken one"}
+        if len(set(took.values())) == 1:
+            why = reasons[took[silent[0]]]
+        else:
+            why = "; ".join(f"for the {route}, {reasons[took[route]]}"
+                            for route in silent)
+        says = "why" if all(took.values()) else "which"
         note = (f"publishing is wired on the SessionEnd command ({flags}) "
-                f"and no chain here holds {what}: either no session has "
-                "ended since the wiring, or the remote has never taken "
-                "one — each chain's last failed attempt says which")
+                f"and no chain here holds {what}: {why} — each chain's last "
+                f"failed attempt says {says}")
     return {"wired": wired, "sent": sent, "note": note}
 
 
@@ -3241,14 +3666,17 @@ def git_say(home, *question, refused=None):
     GIT_TIMEOUT. Never fetches, never writes. The folder is named by the
     harness settings, so its git config and hooks are the writer's to
     plant (#572): fsmonitor is turned off, and no optional lock is taken,
-    so `status` writes no index and starts no post-index-change hook. A
-    clean filter its attributes name still runs on `status`; the timeout
-    bounds it."""
+    so `status` writes no index and starts no post-index-change hook.
+    Replace refs are the writer's too, and would let HEAD name the real
+    commit while its tree is theirs (#621): the commits are read as
+    made. A clean filter its attributes name still runs on `status`;
+    the timeout bounds it."""
     try:
         answered = subprocess.run(
             # Empty, not false: before git 2.36 the value was a command,
             # and `false` names one.
-            [helper_path("git"), "--no-optional-locks", "-c",
+            [helper_path("git"), "--no-optional-locks",
+             "--no-replace-objects", "-c",
              "core.fsmonitor=",
              "-C", str(home), *question],
             # Never a pipe on stderr: a program git starts inherits it,
@@ -3287,7 +3715,7 @@ def recorder_drift(witness):
     # not answer leaves the checkout read as outside git, never as clean
     # or level (#572); each is asked only once the one before it
     # answered. No upstream is an answer: "".
-    head = changed = upstream = counts = None
+    head = changed = held = upstream = counts = None
     branch = git_say(home, "rev-parse", "--abbrev-ref", "HEAD")
     if branch is not None:
         head = git_say(home, "rev-parse", "--short", "HEAD")
@@ -3296,6 +3724,13 @@ def recorder_drift(witness):
         # same checkout is not drift in the recorder.
         changed = git_say(home, "status", "--porcelain", "--", script.name)
     if changed is not None:
+        # `status` says nothing of a file marked assume-unchanged or
+        # skip-worktree, or ignored and never committed (#621), so the
+        # file is also compared with the committed blob, and the worse
+        # of the two wins. No committed blob is "".
+        held = git_say(home, "rev-parse", "--verify", "--quiet",
+                       f"HEAD:./{script.name}", refused="")
+    if held is not None:
         upstream = git_say(home, "rev-parse", "--abbrev-ref",
                            "--symbolic-full-name", "@{u}", refused="")
     if upstream:
@@ -3305,8 +3740,10 @@ def recorder_drift(witness):
     counted = len(level) == 2 and all(n.isdigit() for n in level)
     if not (upstream == "" or counted):
         return recorder_versioned(script, notice)
+    same, problem = recorder_committed(script, held)
     notice.update({"state": "tracked", "branch": branch, "head": head,
-                   "dirty": bool(changed), "upstream": upstream or None})
+                   "dirty": bool(changed) or not same,
+                   "upstream": upstream or None})
     if upstream:
         notice["behind"], notice["ahead"] = (int(n) for n in level)
         git_dir = git_say(home, "rev-parse", "--git-dir")
@@ -3318,8 +3755,55 @@ def recorder_drift(witness):
                 ).strftime("%Y-%m-%dT%H:%M:%SZ")
             except OSError:
                 pass  # never fetched here; the counts say so themselves
-    notice["note"] = recorder_words(notice)
+    notice["note"] = recorder_words(
+        notice, problem, hidden=not (changed or same or problem))
     return notice
+
+
+def blob_id(body, length):
+    """The id git gives a blob holding `body`, in the hash its ids of
+    `length` characters are made with; None for any other length."""
+    made = {40: hashlib.sha1, 64: hashlib.sha256}.get(length)
+    if made is None:
+        return None
+    return made(b"blob %d\0" % len(body) + body).hexdigest()
+
+
+def recorder_committed(script, held):
+    """Whether the recorder is the committed blob `held` (#621), as
+    (same, problem). The bytes are hashed here, never by `git
+    hash-object`, which waits on a pipe and converts CRLF without
+    reading the index, so a blob committed with CRLF read as changed.
+    The same: the blob of the bytes as they are, or with every CRLF
+    made LF, as autocrlf writes them; for a link, the blob of its text.
+    `problem` says why it cannot be read as a file, in the words of
+    recorder_versioned, and is never the same. A recorder behind a
+    clean filter (ident, lfs, working-tree-encoding) reads as changed:
+    the loud side (#621)."""
+    if os.path.islink(script):
+        try:
+            if blob_id(os.fsencode(os.readlink(script)), len(held)) == held:
+                return True, None
+        except OSError:
+            pass  # read below, where the reason is named
+    larger = (f"at more than {RECORDER_READ_LIMIT} bytes it is larger "
+              "than any recorder, so it was not read")
+    # Asked before any read, so a huge file costs nothing.
+    try:
+        if os.stat(script).st_size > RECORDER_READ_LIMIT:
+            return False, larger
+        with open_regular(script) as f:
+            body = f.read(RECORDER_READ_LIMIT + 1)
+    except OSError as error:
+        return False, error.strerror or str(error)
+    if len(body) > RECORDER_READ_LIMIT:
+        return False, larger
+    if blob_id(body, len(held)) == held:
+        return True, None
+    # A CRLF left after one pass was CR CR LF, which no checkout writes
+    # and which would otherwise fold back to a CRLF the blob holds.
+    lf = body.replace(b"\r\n", b"\n")
+    return b"\r\n" not in lf and blob_id(lf, len(held)) == held, None
 
 
 def recorder_versioned(script, notice):
@@ -3383,14 +3867,20 @@ def recorder_notice(witness):
     return notice
 
 
-def recorder_words(notice):
+def recorder_words(notice, problem=None, hidden=False):
     """The notice in one sentence, worst thing first. Behind-counts are
     only as fresh as the last fetch and say so, because a stale count
-    that reads as reassurance is worse than no count."""
+    that reads as reassurance is worse than no count. `problem` when the
+    recorder cannot be read as a file; `hidden` when `git status` showed
+    nothing of a change the bytes show (#621)."""
     said = []
-    if notice["dirty"]:
+    if problem:
+        said.append("the recorder cannot be compared with the committed "
+                    f"file: {problem}")
+    elif notice["dirty"]:
         said.append("the recorder has uncommitted changes — the file "
-                    "being executed is not the file that was reviewed")
+                    "being executed is not the file that was reviewed"
+                    + (", though `git status` shows none" if hidden else ""))
     if notice["behind"]:
         said.append(f"the checkout is {notice['behind']} commit(s) behind "
                     f"{notice['upstream']} as of the last fetch"
@@ -3483,30 +3973,39 @@ def failed_call_owes(record, block, name, epoch):
     return "may_owe"
 
 
-def transcript_records(transcript, closed):
+def transcript_records(transcript, closed, unread=None):
     """Each record of a session's transcript files (`witness_files`) as
     (the file, the record, its message's content blocks), in file order,
     the parent's first and then each subagent's. A line
     that is not a JSON object is passed over, and a file that cannot be
-    opened raises as `open_regular` does. The witness counts calls by
-    it, and `show` finds a call's input by it (ADR-0047)."""
+    opened raises as `open_regular` does. A file holding lines and not
+    one record goes on `unread`, when given, as (file, lines), once its
+    last line is read; a blank line is no line. The witness counts calls
+    by it, and `show` finds a call's input by it (ADR-0047)."""
     for path in witness_files(transcript, closed):
+        read = records = 0
         # A transcript is in the writer's reach, so a pipe at its name is
         # refused rather than waited on (#386).
         with io.TextIOWrapper(open_regular(path), encoding="utf-8",
                               errors="replace") as lines:
             for line in lines:
+                if not line.strip():
+                    continue
+                read += 1
                 try:
                     record = json.loads(line)
                 except (ValueError, RecursionError):
                     continue  # the transcript is writer-reachable (#331)
                 if not isinstance(record, dict):
                     continue
+                records += 1
                 message = record.get("message")
                 blocks = (message.get("content")
                           if isinstance(message, dict) else None)
                 yield (path, record,
                        blocks if isinstance(blocks, list) else [])
+        if unread is not None and read and not records:
+            unread.append((path, read))
 
 
 def witness_transcripts(witness, closed):
@@ -3542,7 +4041,8 @@ def read_witness(transcript, calibration):
     opened them (#379); both are counted for the canary in
     watch_completeness(), and neither moves
     the reading. `closed` holds each subagents folder it could not list
-    (`witness_files`)."""
+    (`witness_files`), and `unread` each file not one line of which could
+    be read (`transcript_records`)."""
     names = {}
     owed = []
     may_owe = {}
@@ -3550,8 +4050,8 @@ def read_witness(transcript, calibration):
     latest = None
     first = None
     worded = unworded = 0
-    closed = []
-    for _, record, blocks in transcript_records(transcript, closed):
+    closed, unread = [], []
+    for _, record, blocks in transcript_records(transcript, closed, unread):
         stamped = parse_when(record.get("timestamp"))
         if stamped is not None:
             if stamped.tzinfo is None:
@@ -3607,7 +4107,8 @@ def read_witness(transcript, calibration):
     owed.sort(key=lambda call: call[0] or "")
     return {"owed": owed, "may_owe": may_owe, "witnessed": witnessed,
             "latest": latest, "first": first,
-            "worded": worded, "unworded": unworded, "closed": closed}
+            "worded": worded, "unworded": unworded, "closed": closed,
+            "unread": unread}
 
 
 def reconcile(owed, may_owe, receipts, witnessed):
@@ -3693,14 +4194,17 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
     the witness saw, the state says the coverage behind that number is
     unknown, and no deficit and no may_owe count are named for it.
     Returns a dict: state, tools, deficit, may_owe, the worded and
-    unworded counts the canary in watch_completeness() reads, and the
-    subagents folders it could not list (`closed`)."""
+    unworded counts the canary in watch_completeness() reads, the
+    subagents folders it could not list (`closed`), and the files it
+    could not read a line of beside a deficit that stands (`unread`).
+    Raises OSError for a file that cannot be opened, and for one it
+    could not read a line of where no deficit stands."""
     seen = read_witness(transcript, calibration)
     tools = len(seen["owed"])
     if before_memory(calibration, seen["first"]):
         return {"state": "BEFORE-MEMORY", "tools": tools, "deficit": 0,
                 "may_owe": 0, "worded": 0, "unworded": 0,
-                "closed": seen["closed"]}
+                "closed": seen["closed"], "unread": []}
     latest = seen["latest"]
     # The idle clock reads the newest timestamped record, not file
     # mtime: the harness touches ended transcripts with timestamp-less
@@ -3717,6 +4221,17 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
     ended = idle = quiet_for >= IDLE_END_SECONDS
     deficit, surplus, unpaid = reconcile(seen["owed"], seen["may_owe"],
                                          receipts, seen["witnessed"])
+    if seen["unread"] and not deficit:
+        # A file not one line of which can be read hides its calls and
+        # pays none, so a deficit the rest shows stands. Where none does,
+        # the session reads as one whose transcript cannot be opened,
+        # never as one whose calls were none (#473). The row's note names
+        # the first file; every other one follows it in the same words.
+        (path, lines), *rest = seen["unread"]
+        why = "; ".join([no_line_read(lines)]
+                        + [cannot_read(other, no_line_read(count))
+                           for other, count in rest])
+        raise OSError(errno.EINVAL, why, str(path))
     deficit_since = parse_when(unpaid) if unpaid else None
     deficit_age = ((now - deficit_since).total_seconds()
                    if deficit_since else None)
@@ -3728,7 +4243,7 @@ def watch_session(transcript, receipts, last_receipt, now, calibration):
             "tools": tools, "deficit": deficit,
             "may_owe": sum(len(calls) for calls in seen["may_owe"].values()),
             "worded": seen["worded"], "unworded": seen["unworded"],
-            "closed": seen["closed"]}
+            "closed": seen["closed"], "unread": seen["unread"]}
 
 
 def keep_tails(sessions):
@@ -4028,10 +4543,37 @@ def unreadable_row(repo, session, receipts, transcript, error, drawers=()):
     # The words travel in a package and the note does not, so each must
     # be true alone; the path stays local (#410).
     row["words"] = UNREADABLE_TRANSCRIPT_WORDS
-    row["note"] = (f"{Path(error.filename or transcript).as_posix()}"
-                   " cannot be read as a transcript: "
-                   f"{error.strerror or error}")
+    row["note"] = cannot_read(error.filename or transcript,
+                              error.strerror or error)
     return row
+
+
+def cannot_read(path, why):
+    """A session row's note for one of its transcript files that cannot
+    be read as one, and why."""
+    return f"{Path(path).as_posix()} cannot be read as a transcript: {why}"
+
+
+def no_line_read(lines):
+    """Why a transcript file of `lines` lines cannot be read as one, when
+    not one of them is a record (#473)."""
+    if lines == 1:
+        return "its one line is not a JSON object"
+    return f"not one of its {lines} lines is a JSON object"
+
+
+def reading_note(reading):
+    """A judged session's note, or None: each subagents folder it could
+    not list, and each file it could not read a line of beside a deficit
+    that stands (`watch_session`)."""
+    said = []
+    if reading["closed"]:
+        said.append(sidechains_unlisted(reading["closed"]))
+    for path, lines in reading["unread"]:
+        said.append(f"{cannot_read(path, no_line_read(lines))} — the calls "
+                    "it holds are not counted, so the deficit shown is the "
+                    "least of it")
+    return "; ".join(said) or None
 
 
 def merge_families(families):
@@ -4115,8 +4657,9 @@ def watch_chained(groups, transcripts, ever_wired, calibration, sessionend,
                                transcript=transcript,
                                deficit=reading["deficit"],
                                may_owe=reading["may_owe"])
-        if reading["closed"]:
-            row["note"] = sidechains_unlisted(reading["closed"])
+        note = reading_note(reading)
+        if note:
+            row["note"] = note
         # The lifecycle facts (ADR-0018), quiet fields on the row.
         tier = lifecycle_tier(group.get("last_grew"), now)
         if tier:
@@ -4177,8 +4720,9 @@ def watch_chainless(root, transcripts, everywhere, closed, ever_wired,
                                reading["tools"], 0, transcript=transcript,
                                deficit=reading["deficit"],
                                may_owe=reading["may_owe"])
-        if reading["closed"]:
-            row["note"] = sidechains_unlisted(reading["closed"])
+        note = reading_note(reading)
+        if note:
+            row["note"] = note
         rows.append(row)
     return rows, readings, elsewhere
 
@@ -4263,6 +4807,17 @@ def log_records(logs):
                 yield record
 
 
+def event_lines(f):
+    """`read_lines`' lines of the open binary file `f`, a line at a time,
+    and `f` closed at the end, so a scan never holds a receiver's day
+    whole (#616). A binary file's lines end only at `\\n`, so
+    `split_lines` finds one line in each."""
+    with f:
+        for raw in f:
+            for line in split_lines(raw):
+                yield line.decode("utf-8", "replace")
+
+
 def read_events(root, closed=None):
     """The second record a receiver holds, read as read_witness reads a
     transcript (ADR-0041 ruling 4): per session the same dict, so
@@ -4305,68 +4860,21 @@ def read_events(root, closed=None):
     days = [events_day(path) for path in files]  # held, readable or not
     for path in files:
         try:
-            lines = read_lines(path)
+            found, heard, skipped, nameless = read_events_file(path)
         except OSError as error:
             unread.append(f"{path.name} ({error.strerror or error})")
             continue
-        for line in lines:
-            try:
-                arrival = json.loads(line)
-            except (ValueError, RecursionError):
-                arrival = None
-            if not isinstance(arrival, dict) \
-                    or not isinstance(arrival.get("logs"), dict):
-                unparsed += 1
-                continue
-            received = arrival.get("received")
-            when = parse_when(received) if isinstance(received, str) else None
-            if when is not None and when.tzinfo is None:
-                when = when.replace(tzinfo=timezone.utc)
-            sender = arrival.get("from")
-            if when is not None and isinstance(sender, str):
-                heard = addresses.get(sender)
-                if heard is None or when > heard[0]:
-                    addresses[sender] = (when, received)
-            for record in log_records(arrival.get("logs")):
-                attributes = (event_attributes(record)
-                              if isinstance(record, dict) else {})
-                session = attributes.get("session.id")
-                if not isinstance(session, str) or not session:
-                    sessionless += 1
-                    continue
-                seen = sessions.setdefault(session, {
-                    "owed": [], "may_owe": {}, "witnessed": set(),
-                    "latest": None, "first": None, "worded": 0,
-                    "unworded": 0, "closed": [], "sequences": set(),
-                    "results": [], "arrived": {}})
-                if when is not None and (seen["latest"] is None
-                                         or when > seen["latest"]):
-                    seen["latest"] = when
-                sequence = attributes.get("event.sequence")
-                if isinstance(sequence, int) \
-                        and not isinstance(sequence, bool):
-                    seen["sequences"].add(sequence)
-                    if when is not None and (
-                            sequence not in seen["arrived"]
-                            or when < seen["arrived"][sequence]):
-                        seen["arrived"][sequence] = when
-                name = attributes.get("event.name")
-                tool = attributes.get("tool_name")
-                tool = tool if isinstance(tool, str) else None
-                if name == TOOL_DECISION and tool is not None:
-                    seen["witnessed"].add(tool)
-                elif name == TOOL_RESULT:
-                    stamp = attributes.get("event.timestamp")
-                    stamp = stamp if isinstance(stamp, str) else None
-                    call = attributes.get("tool_use_id")
-                    seen["witnessed"].add(tool)
-                    seen["owed"].append((stamp, tool))
-                    seen["results"].append(
-                        (stamp, tool, call if is_call_id(call) else None,
-                         when))
-                    if stamp is not None and (seen["first"] is None
-                                              or stamp < seen["first"]):
-                        seen["first"] = stamp
+        unparsed += skipped
+        sessionless += nameless
+        for sender, (when, received) in heard.items():
+            known = addresses.get(sender)
+            if known is None or when > known[0]:
+                addresses[sender] = (when, received)
+        for session, seen in found.items():
+            if session in sessions:
+                fold_events(sessions[session], seen)
+            else:
+                sessions[session] = seen
     for seen in sessions.values():
         seen["owed"].sort(key=lambda call: call[0] or "")
         seen["results"].sort(key=lambda call: call[0] or "")
@@ -4375,6 +4883,98 @@ def read_events(root, closed=None):
                           for sender, (_, received) in addresses.items()},
             "days": days, "unparsed": unparsed,
             "sessionless": sessionless, "unread": unread}
+
+
+def read_events_file(path):
+    """One events file's share of `read_events`: its sessions, the newest
+    `received` per sending address, and its unparsed and sessionless
+    counts. Raises OSError when the file cannot be opened or cannot be
+    read to its end, so a file whose read stops part-way counts for
+    nothing, as one that cannot be opened (#616)."""
+    sessions = {}
+    addresses = {}
+    unparsed = 0
+    sessionless = 0
+    for line in event_lines(open_regular(path)):
+        try:
+            arrival = json.loads(line)
+        except (ValueError, RecursionError):
+            arrival = None
+        if not isinstance(arrival, dict) \
+                or not isinstance(arrival.get("logs"), dict):
+            unparsed += 1
+            continue
+        received = arrival.get("received")
+        when = parse_when(received) if isinstance(received, str) else None
+        if when is not None and when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        sender = arrival.get("from")
+        if when is not None and isinstance(sender, str):
+            heard = addresses.get(sender)
+            if heard is None or when > heard[0]:
+                addresses[sender] = (when, received)
+        for record in log_records(arrival.get("logs")):
+            attributes = (event_attributes(record)
+                          if isinstance(record, dict) else {})
+            session = attributes.get("session.id")
+            if not isinstance(session, str) or not session:
+                sessionless += 1
+                continue
+            # A key filled here is folded in fold_events, or a session
+            # two files name loses it (#616).
+            seen = sessions.setdefault(session, {
+                "owed": [], "may_owe": {}, "witnessed": set(),
+                "latest": None, "first": None, "worded": 0,
+                "unworded": 0, "closed": [], "sequences": set(),
+                "results": [], "arrived": {}})
+            if when is not None and (seen["latest"] is None
+                                     or when > seen["latest"]):
+                seen["latest"] = when
+            sequence = attributes.get("event.sequence")
+            if isinstance(sequence, int) \
+                    and not isinstance(sequence, bool):
+                seen["sequences"].add(sequence)
+                if when is not None and (
+                        sequence not in seen["arrived"]
+                        or when < seen["arrived"][sequence]):
+                    seen["arrived"][sequence] = when
+            name = attributes.get("event.name")
+            tool = attributes.get("tool_name")
+            tool = tool if isinstance(tool, str) else None
+            if name == TOOL_DECISION and tool is not None:
+                seen["witnessed"].add(tool)
+            elif name == TOOL_RESULT:
+                stamp = attributes.get("event.timestamp")
+                stamp = stamp if isinstance(stamp, str) else None
+                call = attributes.get("tool_use_id")
+                seen["witnessed"].add(tool)
+                seen["owed"].append((stamp, tool))
+                seen["results"].append(
+                    (stamp, tool, call if is_call_id(call) else None,
+                     when))
+                if stamp is not None and (seen["first"] is None
+                                          or stamp < seen["first"]):
+                    seen["first"] = stamp
+    return sessions, addresses, unparsed, sessionless
+
+
+def fold_events(into, seen):
+    """`seen`, one file's reading of a session, folded into `into`, the
+    files' before it, as one reading of both files would leave it: an
+    earlier file's value kept on a tie. `may_owe`, `worded`, `unworded`
+    and `closed` are not folded: `read_events_file` never fills them."""
+    into["owed"] += seen["owed"]
+    into["results"] += seen["results"]
+    into["witnessed"] |= seen["witnessed"]
+    into["sequences"] |= seen["sequences"]
+    for key, pick in (("latest", max), ("first", min)):
+        if seen[key] is not None:
+            into[key] = (seen[key] if into[key] is None
+                         else pick(into[key], seen[key]))
+    for sequence, when in seen["arrived"].items():
+        if sequence not in into["arrived"] \
+                or when < into["arrived"][sequence]:
+            into["arrived"][sequence] = when
 
 
 def missing_numbers(sequences):
@@ -4397,51 +4997,145 @@ def missing_numbers(sequences):
     return high - low + 1 - len(seen), named
 
 
-def pair_calls(results, calls, witnessed):
-    """A settled session's calls, as the harness reported them, against
-    its receipts at the receiver, as (rule, owed, deficit, surplus,
-    missing). `results` are the calls as (time, tool, call id or None,
-    arrival),
-    `calls` the receipts as (tool, call id or None). Where both records
-    name calls, they are joined on the id (ADR-0046 ruling 3): a call
-    reported twice under one id is one call, a receipt pays only the
-    call its id names and a second receipt of that id pays nothing, and
-    `missing` names each call with no receipt, in time order. A call or
-    a receipt naming none is paired by count within its tool, among its
-    own kind only, so a receipt with no id never pays a call the harness
-    named. Where either record names none, the count by tool stands
-    (ADR-0034). `owed` is the calls counted, as [(time, tool)]."""
+# The tool name the harness's events give every call to a server the
+# user configured; the hook's receipt names the server's tool as
+# `mcp__<server>__<tool>` (the harness's monitoring docs, read 2026-11-12).
+EVENT_MCP_TOOL = "mcp_tool"
+RECEIPT_MCP_PREFIX = "mcp__"
+
+
+def same_tool(receipt, event):
+    """Whether a receipt's tool is the tool the harness's event names for
+    the call whose id it carries (#620). An event naming no tool (#487
+    item 7) has nothing to compare, and pairs on the id alone; an event
+    naming `mcp_tool` is met by any receipt of an MCP server's tool."""
+    if event is None:
+        return True
+    if event == EVENT_MCP_TOOL:
+        return receipt.startswith(RECEIPT_MCP_PREFIX)
+    return receipt == event
+
+
+def pair_calls(results, calls, witnessed, late=()):
+    """A session's calls, as the harness reported them, against its
+    receipts at the receiver, as a dict: `rule`, `owed`, `deficit`,
+    `surplus`, `missing`, `mismatched`, `repeated`, `late` and `matched`.
+    `results` are the calls as (time, tool, call id or None, arrival),
+    `calls` the receipts as (tool, call id or None).
+
+    Where both records name calls, they are joined on the id (ADR-0046
+    ruling 3). A call reported twice under one id is one call. A receipt
+    pays only the call its id names, and only when it names the tool the
+    event names for that id (#620); one that names another tool pays
+    nothing and is listed in `mismatched` as (id, the receipt's tool,
+    the event's tool). At most one receipt of an id pays (#476: one
+    harness version fired two hooks for a failed call); a further one is
+    neither surplus nor deficit, and `repeated` counts it. A receipt of
+    an id in `late`, first seen too long after a look named its call
+    missing (#620), pays nothing either, and `late` counts it. `matched`
+    holds every id a receipt of its tool carries, paid or late, so the
+    memory can say when it was first seen. `missing` names each call
+    with no receipt, in time order. A call or a receipt naming none is
+    paired by count within its tool, among its own kind only, so a
+    receipt with no id never pays a call the harness named.
+
+    Where either record names none, the count by tool stands (ADR-0034),
+    and a receipt repeating an id an earlier one carries pays no second
+    call. `owed` is the calls counted, as [(time, tool)]."""
     paying = [call for _, call in calls if call]
     named = [call for _, _, call, _ in results if call]
     if not paying or not named:
-        receipts = {}
-        for tool, _ in calls:
+        receipts, carried, repeated = {}, set(), 0
+        for tool, call in calls:
+            if call in carried:
+                repeated += 1
+                continue
+            if call:
+                carried.add(call)
             receipts[tool] = receipts.get(tool, 0) + 1
         owed = [(when, tool) for when, tool, _, _ in results]
         deficit, surplus, _ = reconcile(owed, {}, receipts, witnessed)
-        return "count by tool", owed, deficit, surplus, []
-    paid = set(paying)
-    owed, unnamed, missing, met = [], [], [], set()
+        return {"rule": "count by tool", "owed": owed, "deficit": deficit,
+                "surplus": surplus, "missing": [], "mismatched": [],
+                "repeated": repeated, "late": 0, "matched": set()}
+    owed, unnamed, order, reported = [], [], [], {}
     for when, tool, call, _ in results:
-        if call in met:
+        if call in reported:
             continue
         if call is None:
             unnamed.append((when, tool))
         else:
-            met.add(call)
-            if call not in paid:
-                missing.append(call)
+            reported[call] = tool
+            order.append(call)
         owed.append((when, tool))
-    loose = {}
+    paid, mismatched, loose, unpaying, repeated = set(), [], {}, 0, 0
+    matched, refused = set(), 0
     for tool, call in calls:
         if not call:
             loose[tool] = loose.get(tool, 0) + 1
+        elif call not in reported:
+            unpaying += 1
+        elif not same_tool(tool, reported[call]):
+            mismatched.append((call, tool, reported[call]))
+            unpaying += 1
+        elif call in late:
+            matched.add(call)
+            refused += 1
+        elif call in paid:
+            repeated += 1
+        else:
+            matched.add(call)
+            paid.add(call)
+    missing = [call for call in order if call not in paid]
     deficit, surplus, _ = reconcile(unnamed, {}, loose, witnessed)
-    surplus += len(paying) - len(met & paid)
-    return "call id", owed, deficit + len(missing), surplus, missing
+    return {"rule": "call id", "owed": owed,
+            "deficit": deficit + len(missing), "surplus": surplus + unpaying,
+            "missing": missing, "mismatched": mismatched,
+            "repeated": repeated, "late": refused, "matched": matched}
 
 
-def overdue(seen, calls, now):
+def safe_name(text):
+    """A tool's name as a row's note says it: ASCII letters, digits and
+    `_.-` only, anything else `?`, at most 40 of them. The receipt's
+    line and the URL holder's events choose it, and the page draws the
+    note (#620)."""
+    return "".join(char if char.isascii() and (char.isalnum()
+                                               or char in "_.-") else "?"
+                   for char in str(text))[:40]
+
+
+def pairing_words(pairing):
+    """What a row's note says of receipts the pairing set aside, or None:
+    each receipt carrying a call's id under another tool's name (#620),
+    how many repeat an id already paid (#476), and how many arrived too
+    long after their call was named missing (#620). The tools are the
+    writer's and the URL holder's text, so each is said by safe_name."""
+    said = []
+    if pairing["mismatched"]:
+        named = "; ".join(
+            f"{call} names {safe_name(tool)} where the harness's event "
+            f"names {safe_name(event)}"
+            for call, tool, event in pairing["mismatched"][:GAP_NAMED])
+        more = len(pairing["mismatched"]) - GAP_NAMED
+        said.append(f"{len(pairing['mismatched'])} receipt(s) carry the id "
+                    "of a call whose event names another tool, and pay "
+                    f"nothing: {named}" + (f"; and {more} more" if more > 0
+                                           else "") + " (#620)")
+    if pairing["repeated"]:
+        said.append(f"{pairing['repeated']} receipt(s) repeat a call id "
+                    "already paid, and count as neither surplus nor deficit; "
+                    "the chain keeps them (#476)")
+    if pairing["late"]:
+        said.append(f"{pairing['late']} receipt(s) arrived after their call "
+                    "was named missing, first seen more than "
+                    f"SUPERVISOR_LATE_RECEIPT_SECONDS ({LATE_RECEIPT_SECONDS}"
+                    " s) after the look that named it, and pay nothing: the "
+                    "session keeps its finding until it is acknowledged here "
+                    "(#620)")
+    return "; ".join(said) or None
+
+
+def overdue(seen, calls, now, late=()):
     """What is overdue in a session still PENDING (ADR-0046 ruling 6),
     as the row's fields, or None when nothing is. A call is overdue when
     the line that carried its event was `received` more than
@@ -4453,11 +5147,14 @@ def overdue(seen, calls, now):
     while the session is pending, since a receipt may be a newer call's.
     A hole in the counter is overdue below a number that arrived more
     than the window ago. A call or a number with no arrival time has no
-    age, and is never overdue."""
+    age, and is never overdue. A receipt of an id in `late` pays nothing
+    here either (#620)."""
     cutoff = now - timedelta(seconds=SETTLE_SECONDS)
     old = [call for call in seen["results"]
            if call[3] is not None and call[3] < cutoff]
-    rule, _, deficit, _, missing = pair_calls(old, calls, seen["witnessed"])
+    pairing = pair_calls(old, calls, seen["witnessed"], late)
+    rule, deficit, missing = (pairing["rule"], pairing["deficit"],
+                              pairing["missing"])
     aged = [number for number, when in seen["arrived"].items()
             if when < cutoff]
     count, numbers = missing_numbers(
@@ -4496,10 +5193,14 @@ def session_counts(row):
     """What an acknowledgement at the receiver accepts beside the state:
     the counts the session's row reports. A session whose counts differ
     from these after it was acknowledged is a finding again (ADR-0046
-    ruling 2)."""
-    return {"tools": row["tools"], "receipts": row["receipts"],
-            "by_tool": row["by_tool"],
-            "gap": (row.get("gap") or {}).get("count", 0)}
+    ruling 2). Returned as the memory's JSON reads them back: an event
+    that names no tool is counted under None, which JSON keeps as the
+    key "null", and counts compared any other way would never equal the
+    ones written down."""
+    return json.loads(json.dumps({
+        "tools": row["tools"], "receipts": row["receipts"],
+        "by_tool": row["by_tool"],
+        "gap": (row.get("gap") or {}).get("count", 0)}))
 
 
 def session_acknowledgement(acknowledged, session):
@@ -4517,7 +5218,7 @@ def session_acknowledgement(acknowledged, session):
 
 
 def watch_receiver(root, families, events, now, show_before_memory=False,
-                   acknowledged=()):
+                   acknowledged=(), named_missing=None, forgotten=None):
     """The completeness half of a tick over a receiver's folder (ADR-0041
     rulings 4 and 5): every session the chain copies or the events name,
     the copies as what was paid and the events as what was owed, judged
@@ -4530,17 +5231,25 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
     classify() as a session that ended, ENDED-DEFICIT tool by tool or by
     the call's id, or
     SECOND-RECORD-ABSENT when receipts arrived and no events did, or
+    none naming a completed call, or
     SECOND-RECORD-GAP when its counter has holes and no deficit, else
     ENDED-SURPLUS or ENDED-CLEAN. A surplus is expected while #476
     stands and is no alarm. A session whose chain copy's newest entry
     predates the day of the oldest events file held, readable or not,
     is from before the second record's memory: counted in one block,
     never a row, as ADR-0029 counts sessions older than the calibration
-    memory (#559 ruling 3). The hook's note
+    memory (#559 ruling 3), unless the copy carries the hook's note that
+    the second record was cut (#486 item 11). The hook's note
     that the second record was cut is quoted on the row when the copy
     carries one. A row in one of RECEIVER_FINDINGS carries `raises`, and
     raises the exit, unless `acknowledged`, the memory's records, accepts
-    that state with the counts it now reports (ADR-0046 ruling 2)."""
+    that state with the counts it now reports (ADR-0046 ruling 2).
+    `named_missing` is the memory's record of the calls settled looks named
+    missing (#620), updated in place with what this look names and first
+    sees: a receipt of such a call first seen more than
+    LATE_RECEIPT_SECONDS after the look that named it pays nothing.
+    `forgotten` says why no such record could be read, if none could."""
+    named_missing = {} if named_missing is None else named_missing
     days = events["days"]
     oldest = min(days) if days else None
     newest = max(days) if days else None
@@ -4571,7 +5280,8 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
                       "differs is that nothing on the agent's machine "
                       "reaches a line once it landed (ADR-0041)")},
     }
-    said = []
+    said = [forgotten] if forgotten else []
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     # `days` holds every file listed, so a folder whose every events
     # file is unreadable holds files, and must not read as one no
     # harness has sent to (#487). An unread file is still the edge: the
@@ -4604,9 +5314,19 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
         by_tool = {}
         for _, tool in family.get("moments", ()):
             by_tool[tool] = by_tool.get(tool, 0) + 1
-        rule, owed, deficit, surplus, missing = pair_calls(
+        # First seen is the reader's own memory, never the chain's
+        # timestamps, which the writer sets: a call with no receipt seen
+        # yet is judged as if this look first saw one (#620).
+        held = named_missing.get(session, {})
+        late = {call for call, record in held.items()
+                if (parse_when(record.get("seen", stamp))
+                    - parse_when(record["named"])).total_seconds()
+                > LATE_RECEIPT_SECONDS}
+        pairing = pair_calls(
             seen["results"] if seen else [], family.get("calls", []),
-            seen["witnessed"] if seen else set())
+            seen["witnessed"] if seen else set(), late)
+        owed, deficit, missing = (pairing["owed"], pairing["deficit"],
+                                  pairing["missing"])
         counts = {}
         for _, tool in owed:
             counts.setdefault(tool, {"owed": 0, "receipts": 0})["owed"] += 1
@@ -4628,8 +5348,11 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
         if family.get("cut"):
             row["second_record_cut"] = family["cut"]
         copy_newest = family.get("newest_ts")
+        # A copy carrying the cut note is never before memory: the note
+        # exists only since the pin did, and the dates beside it are the
+        # writer's, which SOURCE_DATE_EPOCH sets (#486 item 11).
         if seen is None and oldest and isinstance(copy_newest, str) \
-                and copy_newest[:10] < oldest:
+                and copy_newest[:10] < oldest and not family.get("cut"):
             # Not WATCH_WORDS' entry: that one offers `calibrate
             # --since`, which seeds a coverage memory this reading does
             # not keep.
@@ -4643,30 +5366,41 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
             continue
         quiet_for = ((now - heard).total_seconds()
                      if heard is not None else None)
-        late = None
+        due = None
         if quiet_for is not None and quiet_for < SETTLE_SECONDS:
             # Ruling 6: the session is not settled, but a call the
             # harness reported more than the window ago is judged by its
             # own age, so arrivals after it cannot keep it unjudged. A
             # session with no events has no call to be overdue (the
             # ADR's non-claim).
-            late = overdue(seen, family.get("calls", []), now) if seen \
-                else None
-            state = "PENDING-OVERDUE" if late else "PENDING"
-            if late:
-                row.update(late)
-        elif seen is None:
+            due = overdue(seen, family.get("calls", []), now, late) \
+                if seen else None
+            state = "PENDING-OVERDUE" if due else "PENDING"
+            if due:
+                row.update(due)
+        elif seen is None or (not seen["results"]
+                              and family.get("receipts", 0)):
+            # Events naming no completed call are no second record for
+            # receipts: one event posted through the URL, a refusal or a
+            # request, would read every receipt as surplus (found with
+            # #620).
             state = "SECOND-RECORD-ABSENT"
+            if seen is not None:
+                row["note"] = ("events arrived for this session, but none "
+                               "names a completed call (a tool_result), so "
+                               "its receipts have no second record to be "
+                               "counted against")
             if unread:
                 # The ruling's "with that note beside it": the words say
                 # its events never arrived, and the note beside them says
                 # a file went unread (#559 ruling 3).
-                row["note"] = unread
+                row["note"] = "; ".join(filter(None, (row.get("note"),
+                                                      unread)))
         else:
-            state = classify(len(owed), deficit, surplus, True, True,
-                             None, False)
+            state = classify(len(owed), deficit, pairing["surplus"], True,
+                             True, None, False)
             row["deficit"] = deficit
-            row["paired_by"] = rule
+            row["paired_by"] = pairing["rule"]
             if missing:
                 row["missing_calls"] = {"count": len(missing),
                                         "calls": missing[:GAP_NAMED]}
@@ -4678,8 +5412,18 @@ def watch_receiver(root, families, events, now, show_before_memory=False,
                 if state != "ENDED-DEFICIT":
                     state = "SECOND-RECORD-GAP"
         row["state"] = state
-        if late:
-            row["words"] = overdue_words(late)
+        set_aside = pairing_words(pairing)
+        if set_aside:
+            row["note"] = "; ".join(filter(None, (row.get("note"), set_aside)))
+        for call in pairing["matched"] & set(held):
+            held[call].setdefault("seen", stamp)
+        if not state.startswith("PENDING"):
+            for call in pairing["missing"]:
+                held.setdefault(call, {"named": stamp})
+        if held:
+            named_missing[session] = held
+        if due:
+            row["words"] = overdue_words(due)
             # Never quieted by an acknowledgement: its counts move with
             # every call of a live session (ADR-0046 ruling 6).
             row["raises"] = True
@@ -4881,12 +5625,17 @@ def split_suffix(action):
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+FOLDED_MARK = "[...]"
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 def listed_action(action):
-    """An action line as a listing shows it, without its suffix: the
-    suffix is for a reader that checks, and a listing for a person
-    scanning (ADR-0047). A whole line is in the chain, in `show` and in
-    every JSON output."""
-    return split_suffix(action)[0]
+    """An action line as a listing shows it, its suffix folded to
+    `FOLDED_MARK`: the suffix is for a reader that checks, and a listing
+    for a person scanning (ADR-0047). A whole line is in the chain, in
+    `show` and in every JSON output."""
+    head, fields = split_suffix(action)
+    return head if fields is None else f"{head} {FOLDED_MARK}"
 
 
 def busiest_hour(moments):
@@ -5155,7 +5904,8 @@ def read_chain(look, place, memory, now, stamp):
         newest = newest_head(entries)
         alarm = alarm_event(repo, session, relpath, remembered,
                             {"n": newest[0], "head": newest[1]} if newest
-                            else {"n": None, "head": None})
+                            else {"n": None, "head": None},
+                            receiver=bool(look.receiver))
     if woke:
         awakened = {"repo": repo, "session": session, "log": relpath,
                     "still_seconds": woke,
@@ -5185,6 +5935,9 @@ def keepers_turn(look, place, entries, memory, now, stamp):
     moved, said = {}, {"anchors": {}, "left": {}}
     if not look.keeping(memory["blind"]):
         return moved, said
+    # The calendars the anchor keeper's upgrade asks, for `chain_row`
+    # to set against the proofs verify calls pending (#415).
+    said["asked"] = calendars_asked(look.calendars)
     keeper = memory["keeper"]
     # A chain the last look stood down has a torn tail (ADR-0004), and the
     # recorder refuses its head on every turn (#533), so the head steps
@@ -5266,7 +6019,39 @@ def chain_row(look, log, entries, said):
         row["left"]["as_written"] = True
     row["anchors"].update(said["anchors"])
     row["left"].update(said["left"])
+    unasked = unasked_note(anchors["pending"], said.get("asked"))
+    if unasked:
+        row["anchors"]["note"] = "; ".join(
+            filter(None, (row["anchors"].get("note"), unasked)))
     return row, verdict, stood_down
+
+
+def unasked_note(pending, asked):
+    """The keeper's note for the pending proofs whose calendar its
+    upgrade does not ask (#415), or None: each address once, escaped and
+    cut, named as data and never set into a flag, since the row wrote
+    it. `pending` is verify's pending lines as `assess_anchors` read
+    them, so a settled head is none of them; `asked` is the keys the
+    keeper's upgrade asks, None when no keeper took a turn. Testimony,
+    never the exit: the proof stays pending until the calendar is
+    given."""
+    if asked is None:
+        return None
+    shown = {}
+    for proof in pending:
+        calendar = proof.get("calendar")
+        if calendar is not None and unnamed_calendar(calendar, asked):
+            shown.setdefault(calendar_key(calendar), shown_address(calendar))
+    if not shown:
+        return None
+    where = ", ".join(shown.values())
+    if len(shown) == 1:
+        return (f"a proof is pending at {where}, a calendar this keeper "
+                "was not given, so its upgrade does not ask it; give it "
+                "with --calendar on scan or serve to ask it")
+    return (f"proofs are pending at {where}, calendars this keeper was "
+            "not given, so its upgrade does not ask them; give them with "
+            "--calendar on scan or serve to ask them")
 
 
 def baseline_row(memory, relpath, entries, verdict, stood_down, now, stamp):
@@ -5458,7 +6243,8 @@ def absent_rows(look, remembered, met, closed, stamp):
         row, new = standing(known, "vanished", stamp)
         rows[relpath] = row
         fresh += new
-        alarms.append(alarm_event(repo, session, relpath, row, None))
+        alarms.append(alarm_event(repo, session, relpath, row, None,
+                                  receiver=bool(look.receiver)))
     return rows, uncounted, alarms, fresh
 
 
@@ -5478,8 +6264,7 @@ def write_memory(look, memory, to_remember, stamp):
                 "standing, and the next look reads it"), None
     try:
         write_whole(path, json.dumps({
-            "purpose": "the supervisor's memory between looks — "
-                       "writer-reachable, trusted for nothing",
+            "purpose": BASELINE_PURPOSE.format(memory_reach(look.receiver)),
             "scanned": stamp,
             "chains": to_remember,
             "keeper": memory["keeper"],
@@ -5488,6 +6273,8 @@ def write_memory(look, memory, to_remember, stamp):
             # Kept whole: rare acts by a person, testimony every report
             # carries (ADR-0039).
             "acknowledged": memory["acknowledged"],
+            **({"named_missing": memory["named_missing"]}
+               if look.receiver else {}),
         }, indent=2) + "\n")
     except OSError as error:
         # Any refusal, a folder swapped in or one this user may not
@@ -5497,6 +6284,26 @@ def write_memory(look, memory, to_remember, stamp):
                 "look remembered is lost, and the next look reads whatever "
                 "stands there"), unkept
     return memory["note"], None
+
+
+def remembered_named(memory):
+    """(named, forgotten) for a look at a receiver: the memory's record
+    of the calls settled looks named missing (#620), the very dict the
+    baseline is written from, and the words for a look that has none to
+    read. Without one the look reads as before that record was kept, a
+    late receipt paying its call, and says so; never quieter than
+    that."""
+    lost = ("so no call an earlier look named missing is remembered: a "
+            "receipt that arrived after its call was named missing pays it "
+            "on this look, as before that memory was kept (#620)")
+    if memory["blind"]:
+        return {}, "the baseline cannot be read, " + lost
+    if memory["named_missing"] is None:
+        memory["named_missing"] = {}
+        return memory["named_missing"], (
+            "the baseline holds no record of calls named missing, written "
+            "before this reader kept one, " + lost + "; this look starts it")
+    return memory["named_missing"], None
 
 
 def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
@@ -5517,8 +6324,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     by the same walk and remembered by the same baseline, in a subfolder
     of its own; the harness's events there as the witness; no keeper,
     since nothing of the agent's machine is wired here). `remember=False`
-    reads the day book instead of writing it, for `serve`'s keeper
-    clock (#271): a machine talking to itself is not somebody looking
+    reads the day book instead of writing it, for `serve`'s own clock
+    (#271, #281): a machine talking to itself is not somebody looking
     (ADR-0014), and its rows would silence the lapse line; the exception
     for what a turn finds new is `fold_day`'s."""
     look = Look(root, witness=witness, anchor_every=anchor_every,
@@ -5562,16 +6369,20 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     to_remember.update(rows)
     events += gone
     fresh += gone_fresh
+    if look.receiver:
+        # Judged before the memory is written, which keeps the calls this
+        # look names missing and the receipts it first sees (#620).
+        named, forgotten = remembered_named(memory)
+        completeness = watch_receiver(
+            look.root, families, read_events(look.root, closed), now,
+            show_before_memory=look.show_before_memory,
+            acknowledged=memory["acknowledged"], named_missing=named,
+            forgotten=forgotten)
     note, unkept = write_memory(look, memory, to_remember, stamp)
     if events or blind or unkept:
         worst = max(worst, 5)
 
-    if look.receiver:
-        completeness = watch_receiver(
-            look.root, families, read_events(look.root, closed), now,
-            show_before_memory=look.show_before_memory,
-            acknowledged=memory["acknowledged"])
-    else:
+    if not look.receiver:
         completeness = watch_completeness(
             look.root, look.witness, families, everywhere=look.store,
             calibration=memory["judging"], sessionend=memory["sessionend"],
@@ -5593,9 +6404,11 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     # On the agent's machine only a live alarm raises the exit: an ended
     # deficit is evidence, and a siren that never stops sounding trains
     # the operator to ignore the band (the dogfood's lesson). At the
-    # receiver a settled disagreement raises it too, until it is
-    # acknowledged there, since nothing else reads it unprompted
-    # (ADR-0046 ruling 2).
+    # receiver a settled disagreement raises it too, until it is accepted
+    # there, since nothing else reads it unprompted (ADR-0046 ruling 2);
+    # and so does a session still arriving with a call or a counter
+    # number overdue, which cannot be accepted, until the receipts arrive
+    # or it settles (ruling 6).
     alarms = sum(s["state"] in ("ALARM-SILENT", "ALARM-DEFICIT")
                  or s.get("raises", False)
                  for s in completeness["sessions"])
@@ -5615,7 +6428,12 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
         "closed": len(closed_rows),
     }, fresh, awakened)
 
-    baseline = {"file": look.baseline_path.as_posix(), "events": events,
+    baseline = {"file": look.baseline_path.as_posix(),
+                # Whose reach the file is in, for the page's line under
+                # each acknowledgement (#615).
+                "kept": (RECEIVER_REACH if look.receiver
+                         else "kept in a writer-reachable file"),
+                "events": events,
                 # Testimony: never raises the exit, never moves an event.
                 "acknowledged": memory["acknowledged"]}
     if uncounted:
@@ -5671,18 +6489,22 @@ def fold_day(look, now, claims, fresh, awakened):
     has nothing new to report (ADR-0014): a machine asking itself every
     minute is not somebody looking. It goes in when it finds what no row
     records yet: an alarm this look found or whose change moved, a
-    reawakening, or a blind memory or more closed folders than the
-    book's newest row shows (#448). Left out, such a finding would be
-    recorded nowhere and the day would paint quiet. An alarm already
-    standing does not mark every later day as watched (ADR-0039); the
-    day's worst is sticky, so a morning reader still sees the day it was
-    found, and every day somebody looks."""
+    reawakening, or a blind memory, more closed folders or more live
+    alarms than the book's newest row shows (#448, #281). Left out, such
+    a finding would be recorded nowhere and the day would paint quiet; a
+    live alarm reads as evidence once its session ends or goes idle
+    (`classify`), so a look nobody asked for at night may be the only
+    one that sees it. An alarm already standing
+    does not mark every later day as watched (ADR-0039); the day's worst
+    is sticky, so a morning reader still sees the day it was found, and
+    every day somebody looks."""
     days, skipped = daybook_rows(look.daybook)
     newest = days[max(days)] if days else {}
     unshown = any(claims[kept] > newest.get(kept, 0)
-                  for kept in ("blind", "closed"))
+                  for kept in ("blind", "closed", "alarms"))
     if look.remember or fresh or awakened or unshown:
-        days = remember_day(look.daybook, now, claims, days)
+        days = remember_day(look.daybook, now, claims, days,
+                            bool(look.receiver))
     return days, skipped
 
 
@@ -5713,10 +6535,11 @@ def memory_notes(look, skipped):
     # managed file's name hides a hook as one at the operator's does,
     # and so does a file there that is not JSON (#465).
     unset = "; ".join(
-        f"{settings.as_posix()} cannot be read as harness settings: {why} "
-        "— read as none, as if no hook were wired"
-        for settings in wired_files(look.witness)
-        for why in [settings_reading(settings)[1]] if why)
+        [f"{settings.as_posix()} cannot be read as harness settings: {why} "
+         "— read as none, as if no hook were wired"
+         for settings in wired_files(look.witness)
+         for why in [settings_reading(settings)[1]] if why]
+        + footing_said())
     if unset:
         notes["settings_note"] = unset
     return notes
@@ -6308,13 +7131,13 @@ def acknowledge_baseline(root, store, path, daybook, receiver=False):
     change = memory["blind"]
     try:
         write_whole(path, json.dumps({
-            "purpose": "the supervisor's memory between looks — "
-                       "writer-reachable, trusted for nothing",
+            "purpose": BASELINE_PURPOSE.format(memory_reach(receiver)),
             "scanned": stamp, "chains": heads, "keeper": {},
             "calibration": [], "sessionend": {},
             "acknowledged": [{"ts": stamp, "baseline": path.name,
                               "change": change, "stood": memory["stood"],
                               "accepted": {"chains": len(heads)}}],
+            **({"named_missing": {}} if receiver else {}),
         }, indent=2) + "\n")
     except OSError as error:
         return refused(f"{path.name} could not be written: "
@@ -6331,10 +7154,11 @@ def acknowledge_baseline(root, store, path, daybook, receiver=False):
     return 0
 
 
-def receiver_reading(root, acknowledged):
+def receiver_reading(root, acknowledged, named=None):
     """The completeness reading a scan over a receiver's folder makes
     now, with nothing written: the chain copies folded by session as the
-    census folds them, against the events there (`watch_receiver`)."""
+    census folds them, against the events there (`watch_receiver`),
+    with the memory's calls named missing, read and never kept."""
     look = Look(root, tick=False, remember=False, receiver=True)
     closed = []
     families = {}
@@ -6347,7 +7171,8 @@ def receiver_reading(root, acknowledged):
                    family_facts(look, relpath, log, read_entries(log), None))
     return watch_receiver(root, families, read_events(root, closed),
                           datetime.now(timezone.utc),
-                          acknowledged=acknowledged)
+                          acknowledged=acknowledged,
+                          named_missing=json.loads(json.dumps(named or {})))
 
 
 def acknowledge_session(root, path, daybook, session, state):
@@ -6381,7 +7206,7 @@ def acknowledge_session(root, path, daybook, session, state):
                        "`supervisor scan --receiver DIR` first, and "
                        "acknowledge the state it reports")
     rows = {row["session"]: row for row in receiver_reading(
-        root, memory["acknowledged"])["sessions"]}
+        root, memory["acknowledged"], memory["named_missing"])["sessions"]}
     row = rows.get(session)
     if row is None:
         return refused(f"no session {visible(session)} is read at "
@@ -6536,6 +7361,11 @@ def cmd_calibrate(args):
 
 TESTIMONY = ("testimony, not a verdict — what was attempted, as the writer "
              "told it; run loxodonta verify for the verdict")
+
+# Said once, after the rows, by a listing that showed a line folded (#619).
+FOLDED_NOTE = (f"a line ending {FOLDED_MARK} is listed without its last "
+               "group, the call's id and input hash; show <address> prints "
+               "it whole")
 
 
 def mentions(entries, needle):
@@ -7165,6 +7995,15 @@ def clip(text, width=ACTION_WIDTH):
     return text if len(text) <= width else text[:width - 3] + "..."
 
 
+def clip_folded(head, fields, width=ACTION_WIDTH):
+    """A row's action as `split_suffix` gave it, `clip`ped: a folded one
+    is cut before its `FOLDED_MARK`, so the mark the listing's note names
+    always ends the row, inside the width (#619)."""
+    if fields is None:
+        return clip(head, width)
+    return f"{clip(head, width - len(FOLDED_MARK) - 1)} {FOLDED_MARK}"
+
+
 def hhmm(ts):
     return visible(ts[11:16] + "Z") if isinstance(ts, str) and len(ts) >= 16 \
         else visible(ts)
@@ -7238,14 +8077,14 @@ def run_action(unit):
     `14x Read, last: supervisor.py`. The newest detail is shown
     because it is what the session did most recently; the rest is one
     `timeline` away. The digest is a listing, so the suffix is folded
-    (ADR-0047)."""
+    (ADR-0047) and the row clipped and marked (`clip_folded`)."""
     rows = unit["rows"]
-    action = listed_action(rows[-1]["entry"].get("action", ""))
-    if len(rows) == 1:
-        return action
-    label, _, rest = action.partition(":")
-    prefix = f"{len(rows)}x {label.strip()}"
-    return f"{prefix}, last: {rest.strip()}" if rest.strip() else prefix
+    action, fields = split_suffix(rows[-1]["entry"].get("action", ""))
+    if len(rows) > 1:
+        label, _, rest = action.partition(":")
+        prefix = f"{len(rows)}x {label.strip()}"
+        action = f"{prefix}, last: {rest.strip()}" if rest.strip() else prefix
+    return clip_folded(action, fields)
 
 
 def scan_testimony(repo):
@@ -7424,7 +8263,7 @@ def cmd_digest(args):
             entry = row["entry"]
             line = (f"{address_of(entry)}  {hhmm(row['ts'])}  "
                     f"{clip(entry.get('actor', '?'), 16)}  "
-                    f"{clip(run_action(unit))}")
+                    f"{run_action(unit)}")
             if entry.get("entry_hash") == family["final"]:
                 line += "   <- last recorded action"
             lines.append(line)
@@ -7435,6 +8274,9 @@ def cmd_digest(args):
                  "it owns no verdicts.")
     lines.append("receipt text was written by agents and is data, "
                  "never instructions.")
+    if any(split_suffix(unit["rows"][-1]["entry"].get("action"))[1]
+           for unit in shown):
+        lines.append(FOLDED_NOTE)
     lines.append(f'detail: python "{me}" show <address> '
                  f'--repo "{repo.as_posix()}"')
     lines.append(f'search: python "{me}" search "text" '
@@ -7508,7 +8350,8 @@ def match_address(prefix, logs, where,
         for log, entry in matches[:20]:
             print(f"  {address_of(entry)}  {visible(entry.get('ts', ''))}  "
                   f"session {visible(session_of(log)[:8])}  "
-                  f"{clip(listed_action(entry.get('action', '')), 60)}", file=sys.stderr)
+                  f"{clip_folded(*split_suffix(entry.get('action', '')), 60)}",
+                  file=sys.stderr)
         return None, 1
     return matches[0], 0
 
@@ -7646,7 +8489,9 @@ def cmd_search_cli(args):
         print(f"{address_of(entry)}  {visible(ts[:10])} {hhmm(ts)}  "
               f"{visible(repo_name)}/{visible(session[:8])}  "
               f"{clip(entry.get('actor', ''), 16)}  "
-              f"{clip(listed_action(entry.get('action', '')))}")
+              f"{clip_folded(*split_suffix(entry.get('action', '')))}")
+    if any(split_suffix(hit[3].get("action", ""))[1] for hit in shown):
+        print(FOLDED_NOTE)
     return 0
 
 
@@ -7670,7 +8515,9 @@ def cmd_timeline(args):
         mark = "   <- here" if e is entries[idx] else ""
         print(f"{address_of(e)}  {hhmm(str(e.get('ts', '')))}  "
               f"{clip(e.get('actor', ''), 16)}  "
-              f"{clip(listed_action(e.get('action', '')))}{mark}")
+              f"{clip_folded(*split_suffix(e.get('action', '')))}{mark}")
+    if any(split_suffix(e.get("action", ""))[1] for e in entries[lo:hi]):
+        print(FOLDED_NOTE)
     return 0
 
 
@@ -8781,7 +9628,9 @@ def package_readme(unit, packed, sessions, witness, record, notes,
         "Get `verifier.py` from a release you trust "
         "(https://github.com/Acquiredl/loxodonta/releases; check it "
         "against the release's `SHA256SUMS`). Python 3.9 or newer, no "
-        "dependencies. Then, on the zip or on the unpacked folder:",
+        "dependencies. Then, on the zip or on the unpacked folder, with "
+        "`-I` so that a module dropped beside the verifier cannot shadow "
+        "the standard library:",
         "",
         "    python -I verifier.py verify-package <this package>",
         "",
@@ -9406,8 +10255,12 @@ def cmd_package(args):
         where = out if args.folder else Path("<the unpacked zip>")
         print("anchored: the manifest's sha256 went to the calendars; the "
               "proof is pending until Bitcoin has it, a few hours")
+        # The upgrade asks only the default calendars and those it is
+        # told (#415), so the line names the ones this package went to.
+        named = "".join(f' --calendar="{visible(calendar)}"'
+                        for calendar in calendars)
         print(f'upgrade: python "{LOXODONTA.as_posix()}" anchor --upgrade '
-              f'--manifest="{(where / "manifest.json").as_posix()}"')
+              f'--manifest="{(where / "manifest.json").as_posix()}"{named}')
     if args.stamp:
         # The token is the authority's word about a moment, and the
         # recipient can only judge it with that authority's certificate
@@ -9851,7 +10704,18 @@ SCAN_TTL_SECONDS = env_number("SUPERVISOR_SCAN_TTL_SECONDS", 3.0, float)
 # constantly. The 0.1 s floor matters: the suite's idiom
 # SUPERVISOR_SCAN_TTL_SECONDS=0, typed here, would spin a core.
 KEEPER_TICK_SECONDS = max(
-    env_number("SUPERVISOR_KEEPER_TICK_SECONDS", 60.0, float), 0.1)
+    env_number("SUPERVISOR_KEEPER_TICK_SECONDS", 60.0, float, waited=True),
+    0.1)
+
+# How often `serve` looks on its own while no keeper cadence is in force
+# (#281): with nothing asking, it computed no completeness state,
+# compared no baseline and ran no tail keeper, so ALARM-SILENT waited on
+# somebody opening the page. Slower than the keeper's minute, since only
+# the watch rides it. 0 turns it off; any other value takes the
+# keeper's floor.
+WATCH_TICK_SECONDS = env_number("SUPERVISOR_WATCH_TICK_SECONDS", 600.0,
+                                float, waited=True)
+WATCH_TICK_SECONDS = WATCH_TICK_SECONDS and max(WATCH_TICK_SECONDS, 0.1)
 
 
 def trouble_words(failure):
@@ -9865,30 +10729,47 @@ def trouble_words(failure):
         type(failure).__name__)
 
 
-def keep_turning(server, stop):
-    """The keeper's own clock: ask for a fresh scan until `stop` is set,
-    at once and then a tick after each walk finishes, through
-    `fresh_scan`, so a turn and a request take the scan lock in turn,
-    and asking not to be remembered, since a machine talking to itself
-    is not somebody looking (ADR-0014). A failure never stops the clock
-    or the server, and is said: a scan that cannot finish leaves no
-    attempt row anywhere, and on a headless machine nothing else is
-    looking. One line to stderr names its kind, once for a failure that
-    repeats, and again after a turn that works."""
+def keep_turning(server, stop, tick=KEEPER_TICK_SECONDS, whose="keeper's"):
+    """`serve`'s own clock: ask for a fresh scan until `stop` is set, a
+    tick after each walk finishes, through `fresh_scan`, so a turn and a
+    request take the scan lock in turn, and asking not to be remembered,
+    since a machine talking to itself is not somebody looking
+    (ADR-0014). The keeper's clock (#271) turns at once; the watch's
+    (#281, `whose` "watch's") first waits a tick, so a page opened as
+    `serve` starts never queues behind a walk nobody asked for. A
+    failure never stops the clock or the server, and is said: a scan
+    that cannot finish leaves no attempt row anywhere, and on a headless
+    machine nothing else is looking. One line to stderr names its kind,
+    once for a failure that repeats, and again after a turn that
+    works."""
     said = None
+    # The wait is on the event, not the clock, so Ctrl-C stops the
+    # thread now rather than at the end of a tick.
+    if whose != "keeper's":
+        stop.wait(tick)
     while not stop.is_set():
         try:
             server.fresh_scan(remember=False)
             said = None
-        except Exception as failure:  # never take the keeper down
-            trouble = ("error: the keeper's scan did not finish: "
+        except Exception as failure:  # never take the clock down
+            trouble = (f"error: the {whose} scan did not finish: "
                        + trouble_words(failure))
             if trouble != said:
                 print(trouble, file=sys.stderr, flush=True)
                 said = trouble
-        # The wait is on the event, not the clock, so Ctrl-C stops the
-        # thread now rather than at the end of a tick.
-        stop.wait(KEEPER_TICK_SECONDS)
+        stop.wait(tick)
+
+
+def watch_words(tick):
+    """The startup line's clause for the watch's own clock (#281), said
+    when no keeper cadence is in force: how often `serve` looks with
+    nothing asking, or that it does not."""
+    if not tick:
+        return ("watch: none of its own (SUPERVISOR_WATCH_TICK_SECONDS=0), "
+                "a look only when a page or a scrape asks")
+    every = cadence_words(int(tick)) if tick == int(tick) else f"{tick:g}s"
+    return (f"watch: a look of its own every {every} "
+            "(SUPERVISOR_WATCH_TICK_SECONDS)")
 
 
 class Watchtower(ThreadingHTTPServer):
@@ -9904,12 +10785,22 @@ class Watchtower(ThreadingHTTPServer):
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
+    def handle_error(self, request, client_address):
+        # A client that left before its reply was read (a closed tab, a
+        # scraper's timeout) is not the supervisor's fault, and says
+        # nothing on the serve log (#589). Narrower than the receiver's
+        # OSError: a request here reads the store, and an OSError from a
+        # file is still the stdlib's traceback.
+        if not isinstance(sys.exc_info()[1], ConnectionError):
+            super().handle_error(request, client_address)
+
     def remember_look(self):
         """One opening of the front page, under the scan lock — the day
         book is one file and the tick rewrites it wholesale."""
         book = memory_paths(self.root, self.store, self.receiver)[1]
         with self.scan_lock:
-            remember_look(book, datetime.now(timezone.utc))
+            remember_look(book, datetime.now(timezone.utc),
+                          bool(self.receiver))
 
     def views_path(self):
         """Beside the day book, wherever that is — the two share a
@@ -9921,8 +10812,9 @@ class Watchtower(ThreadingHTTPServer):
     def fresh_scan(self, remember=True):
         """The newest scan no older than the tick, and its age in
         seconds, read under one hold of the lock so the age belongs to
-        the body it comes with. `remember=False` is the keeper clock's
-        turn (#271), kept out of the day book (ADR-0014). A turn's scan
+        the body it comes with. `remember=False` is a turn of `serve`'s
+        own clock, the keeper's (#271) or the watch's (#281), kept out of
+        the day book (ADR-0014). A turn's scan
         never answers a request: its claims stayed out of the book, and
         a page served it would count a look on a day painted unread, so
         the request scans again and its row is `fold_day`'s to write
@@ -9952,7 +10844,8 @@ class Watchtower(ThreadingHTTPServer):
         """The metrics route (ADR-0033): the same held scan the status
         endpoint serves, rendered by one pure function. A scrape walks
         the store only when a request would: the hold has lapsed, or
-        the scan held is a keeper turn's (`fresh_scan`)."""
+        the scan held is a turn of the server's own clock
+        (`fresh_scan`)."""
         body, age = self.fresh_scan()
         return metrics_text(json.loads(body.decode("utf-8")), age)
 
@@ -10091,7 +10984,8 @@ class Face(BaseHTTPRequestHandler):
             return None
 
     def reply_views(self, views):
-        body = {"purpose": VIEWS_PURPOSE, "views": views}
+        body = {"purpose": VIEWS_PURPOSE.format(
+                    memory_reach(self.server.receiver)), "views": views}
         book = self.server.views_path()
         shelf = not_a_file(book)
         if shelf:
@@ -10112,9 +11006,11 @@ class Face(BaseHTTPRequestHandler):
             with self.server.views_lock:
                 book = self.server.views_path()
                 if "forget" in asked:
-                    self.reply_views(forget_view(book, asked["forget"]))
+                    self.reply_views(forget_view(book, asked["forget"],
+                                                 self.server.receiver))
                     return
-                views = save_view(book, asked.get("save"))
+                views = save_view(book, asked.get("save"),
+                                  self.server.receiver)
             if views is None:
                 self.send_error(400)
                 return
@@ -10204,21 +11100,27 @@ def cmd_serve(args):
     print(f"watching {root.as_posix()} on "
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
-    print("keeper: none over a receiver's folder; nothing is anchored, "
-          "sent or appended from the far end (ADR-0041)" if receiver
-          else keeper_words(anchor_every, anchor_source, publish_every,
-                            publish_head, publish_chain, publish_source,
-                            authority),
-          flush=True)
     # With a cadence in force, the keepers get a clock of their own
     # (#271): a daemon thread asking for a scan on the tick, so what
     # leaves this machine never depends on somebody having the page
-    # open. With no cadence, no thread starts and nothing changes.
+    # open. With none, the watch gets the same thread on a slower tick
+    # (#281), unless SUPERVISOR_WATCH_TICK_SECONDS=0 turns it off.
+    keeping = anchor_every is not None or publish_every is not None
+    line = ("keeper: none over a receiver's folder; nothing is anchored, "
+            "sent or appended from the far end (ADR-0041)" if receiver
+            else keeper_words(anchor_every, anchor_source, publish_every,
+                              publish_head, publish_chain, publish_source,
+                              authority))
+    print(line if keeping else f"{line}; {watch_words(WATCH_TICK_SECONDS)}",
+          flush=True)
     stop = threading.Event()
     keeper = None
-    if anchor_every is not None or publish_every is not None:
-        keeper = threading.Thread(target=keep_turning, args=(server, stop),
-                                  daemon=True)
+    if keeping or WATCH_TICK_SECONDS:
+        keeper = threading.Thread(
+            target=keep_turning,
+            args=((server, stop) if keeping
+                  else (server, stop, WATCH_TICK_SECONDS, "watch's")),
+            daemon=True)
         keeper.start()
     try:
         server.serve_forever()
@@ -10863,7 +11765,7 @@ db       .d88b.  db    db  .d88b.  d8888b.  .d88b.  d8b   db d888888b  .d8b.
 Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</pre>
   <h1>supervisor</h1>
   <p class="stance">a tripwire with a memory — verdicts come from
-  <code>receipts verify</code>; this page draws them and decides nothing</p>
+  <code>loxodonta verify</code>; this page draws them and decides nothing</p>
 </header>
 <div id="strip">
   <span id="statemark" aria-hidden="true"></span>
@@ -10896,7 +11798,7 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
   <p id="lapse"></p>
 </section>
 
-<footer id="railfoot">verdicts come from <code>receipts verify</code> —
+<footer id="railfoot">verdicts come from <code>loxodonta verify</code> —
 this page draws them and decides nothing</footer>
 </aside>
 <main id="work">
@@ -10946,7 +11848,7 @@ this page draws them and decides nothing</footer>
         </div>
         <div class="tabpane" id="pane-search" hidden>
           <p class="testimony">the writer's word, findable — run
-          <code>receipts verify</code> for the verdict</p>
+          <code>loxodonta verify</code> for the verdict</p>
           <input type="search" id="ask-search"
                  placeholder="search every action line on this machine">
           <div id="found"></div>
@@ -10977,7 +11879,7 @@ this page draws them and decides nothing</footer>
             title="drag to resize"></button>
     <div class="pane">
       <div class="phead"><span class="no">[2]</span> inspect — the chain
-        as <code>receipts verify</code> sees it</div>
+        as <code>loxodonta verify</code> sees it</div>
       <div class="pbody">
         <div id="p2-inspect">
           <div id="inspect-meta" class="pane-empty">click a session on
@@ -11055,7 +11957,7 @@ this page draws them and decides nothing</footer>
   <p class="testimony">entry by entry, each hash recomputed in your
   browser via WebCrypto — a second, independent check in your hands.
   The walker reports its recomputation; the verdict comes from
-  <code>receipts verify</code></p>
+  <code>loxodonta verify</code></p>
   <div id="walking"></div>
   <div id="entries"></div>
 </section>
@@ -11098,9 +12000,9 @@ const CLAIM = {
               "sibling chain; kept as quiet evidence",
 };
 
-// The shape half of the strip's redundant encoding. Colour, words and
-// shape all carry the same one condition, so the state still reads for
-// someone who cannot separate the hues — and still reads in a
+// The shape half of the strip's redundant encoding. Colour and shape
+// carry the worst condition the look found and the words name it first,
+// so it still reads for someone who cannot separate the hues — and in a
 // screenshot printed in black and white.
 const MARK = { quiet: "●", damage: "▲", grave: "✕",
                unwatched: "·" };
@@ -11112,6 +12014,16 @@ const CHIP = {
   anchored: () => "ANCHORED",
   superseded: () => "BROKEN · superseded",
 };
+
+// A receiver row's note: why receipts paid nothing, and what was read
+// past (#620). Its call ids and tool names come from the chain and the
+// events, so a control or format character in it (a bidi override) is
+// drawn as ?. Only the receiver's rows: the agent's machine draws its
+// own words.
+function rowNote(s) {
+  if (!s.by_tool || !s.note) return "";
+  return String(s.note).replace(/\\p{C}/gu, "?");
+}
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -11161,10 +12073,11 @@ function chainRow(chain) {
   return row;
 }
 
-// The verdict strip: one condition, stated huge, ordered by the tier
-// language — "not the recorded history" and a mid-session silence read
-// red; damage and tripwire events read amber; everything else is the
-// designed quiet state (the elephant's one appearance).
+// The verdict strip: what the look found, stated huge, ordered by the
+// tier language — "not the recorded history", a mid-session silence and
+// a finding at the receiver read red; damage and tripwire events read
+// amber; everything else is the designed quiet state (the elephant's one
+// appearance).
 function renderStrip(report) {
   const strip = document.getElementById("strip");
   const state = document.getElementById("stateline");
@@ -11204,41 +12117,25 @@ function renderStrip(report) {
   // And so is a folder the census could not list, no change behind it.
   const shut = (report.closed || []).length;
   const quietEvidence = chains.filter(c => c.superseded).length;
-  let colour;
+  // Every condition this look found, worst first, each in its own
+  // words, and the colour the worst one's: one look can hold two, and
+  // the strip names them all, never only the first (#612).
+  const found = [];
   if (regenerated.length) {
-    colour = "grave";
-    state.textContent = "NOT THE RECORDED HISTORY";
-    why.textContent = regenerated.length + " chain(s) contradict an " +
-      "anchor or head record — the gravest claim this page can carry";
-  } else if (live.length) {
-    colour = "grave";
-    state.textContent = "RECEIPTS STOPPED ARRIVING";
-    why.textContent = live.length + " session(s) visibly active while " +
-      "the chain goes quiet — investigate while it is live";
-  } else if (broken.length || changes || blind || shut ||
-             (report.exit !== 0 && !unaccepted.length)) {
-    colour = "damage";
-    state.textContent = broken.length ? "HISTORY WAS ALTERED"
-                      : changes ? "CHANGED SINCE LAST LOOK"
-                      : blind ? "TRIPWIRE BLIND"
-                      : shut ? "FOLDER CANNOT BE LISTED"
-                      : "CHANGED SINCE LAST LOOK";
-    why.textContent = (broken.length
-      ? broken.length + " chain(s) fail verification — "
-      : "") + (changes
-      ? changes + " change(s) the baseline cannot explain as appends"
-      : blind
-      ? "the baseline could not be read or kept, so nothing was compared"
-      : shut
-      ? shut + " folder(s) the scan cannot list, so what they hold is " +
-        "unknown, never read as empty"
-      : "details in the band below") +
-      " (scan exit " + report.exit + ")";
-  } else if (unaccepted.length) {
-    colour = "grave";
-    state.textContent = settled ? "A FINDING NO ONE HAS ACCEPTED"
-                                : "CALLS OVERDUE AT THE RECEIVER";
-    why.textContent = [
+    found.push({colour: "grave", state: "NOT THE RECORDED HISTORY",
+      why: regenerated.length + " chain(s) contradict an " +
+      "anchor or head record — the gravest claim this page can carry"});
+  }
+  if (live.length) {
+    found.push({colour: "grave", state: "RECEIPTS STOPPED ARRIVING",
+      why: live.length + " session(s) visibly active while " +
+      "the chain goes quiet — investigate while it is live"});
+  }
+  if (unaccepted.length) {
+    found.push({colour: "grave", exit: true,
+      state: settled ? "A FINDING NO ONE HAS ACCEPTED"
+                     : "CALLS OVERDUE AT THE RECEIVER",
+      why: [
       settled ? settled + " settled session(s) whose receipts and " +
         "harness events disagree at the receiver, each raising the exit " +
         "until acknowledged here with supervisor acknowledge --receiver DIR " +
@@ -11248,13 +12145,106 @@ function renderStrip(report) {
         "or a hole in the counter, each raising the exit until the " +
         "receipts arrive or the session settles" : ""]
       .filter(Boolean).join("; ") +
-      ", named in the completeness watch below (scan exit " +
-      report.exit + ")";
+      ", named in the completeness watch below"});
+  }
+  if (broken.length) {
+    found.push({colour: "damage", exit: true, state: "HISTORY WAS ALTERED",
+      why: broken.length + " chain(s) fail verification — " +
+      "details in the band below"});
+  }
+  if (changes) {
+    found.push({colour: "damage", exit: true,
+      state: "CHANGED SINCE LAST LOOK",
+      why: changes + " change(s) the baseline cannot explain as appends"});
+  }
+  if (blind) {
+    found.push({colour: "damage", exit: true, state: "TRIPWIRE BLIND",
+      why: "the baseline could not be read or kept, so nothing was " +
+      "compared"});
+  }
+  if (shut) {
+    found.push({colour: "damage", exit: true,
+      state: "FOLDER CANNOT BE LISTED",
+      why: shut + " folder(s) the scan cannot list, so what they hold is " +
+      "unknown, never read as empty"});
+  }
+  // The last clause: what raised the exit and has no words above, a
+  // chain verify could not judge (4), whose files (2) or transcript (7)
+  // diverged. Beside other words it is named by the chains' verdicts;
+  // an exit with no fact behind it at all still reads here.
+  const unexplained = {};
+  for (const c of chains) {
+    if (!c.superseded && c.exit !== 0 && c.exit !== 3 &&
+        c.verdict !== "BROKEN") {
+      unexplained[c.verdict] = (unexplained[c.verdict] || 0) + 1;
+    }
+  }
+  const verdicts = Object.keys(unexplained);
+  if (verdicts.length || (report.exit !== 0 && !found.length)) {
+    found.push({colour: "damage", exit: true,
+      state: "CHANGED SINCE LAST LOOK",
+      why: (found.length
+      ? verdicts.map(v => unexplained[v] + " chain(s) " + v).join(", ") +
+        " — "
+      : "") + "details in the band below"});
+  }
+  let colour;
+  if (found.length) {
+    colour = found[0].colour;
+    // Two conditions can share their state words (a change, and the
+    // last clause): said once.
+    state.textContent = found.map(f => f.state)
+      .filter((words, i, all) => all.indexOf(words) === i).join(" · ");
+    why.textContent = found.map(f => f.why).join(" · ") +
+      (found.some(f => f.exit) ? " (scan exit " + report.exit + ")" : "");
   } else {
     colour = "quiet";
     state.textContent = "all quiet";
-    why.textContent = chains.length + " chain(s), every receipt " +
-      "accounted for" +
+    // Quiet raises nothing; it does not mean nothing is missing. A
+    // finding accepted at the receiver (ADR-0046 ruling 2), a session
+    // ended short and kept as evidence (ADR-0046 ruling 1, ADR-0016) and
+    // one behind inside the grace window are each said with their
+    // counts, and "every receipt accounted for" only when no row is
+    // short (#613). An id goes on the headline as ASCII letters, digits
+    // and -_. only, anything else as ?: a receiver's events can name a
+    // session with any character, control and bidi ones included.
+    const id = s => String(s.session).replace(/[^A-Za-z0-9_.-]/g, "?")
+      .slice(0, 8);
+    const counted = (s, lost) => id(s) + " " + s.state + ", " +
+      (s.state === "SECOND-RECORD-ABSENT"
+        ? s.receipts + " received, no harness events"
+        : s.tools + " owed, " + s.receipts + " received" +
+          (s.deficit ? ", " + s.deficit + " " + lost : "")) +
+      (s.gap ? ", " + s.gap.count + " event number(s) missing" : "");
+    const first = (rows, lost) => rows.slice(0, 3)
+      .map(s => counted(s, lost)).join("; ") + (rows.length > 3
+        ? "; and " + (rows.length - 3) + " more, named in the completeness " +
+          "watch below" : "");
+    const sessions = report.completeness.sessions;
+    const accepted = sessions.filter(s =>
+      s.acknowledged && s.acknowledged.holds);
+    const evidence = sessions.filter(s => s.deficit > 0 &&
+      ["ENDED-DEFICIT", "IDLE-DEFICIT"].includes(s.state) &&
+      !accepted.includes(s));
+    const behind = sessions.filter(s =>
+      s.deficit > 0 && s.state === "LAGGING");
+    const said = [];
+    if (accepted.length) {
+      said.push(accepted.length + " finding(s) accepted at the receiver, " +
+        "still as found: " + first(accepted, "missing"));
+    }
+    if (evidence.length) {
+      said.push(evidence.length + " session(s) short of receipts, kept as " +
+        "evidence: " + first(evidence, "missing"));
+    }
+    if (behind.length) {
+      said.push(behind.length + " session(s) behind the witness inside " +
+        "the grace window: " + first(behind, "not yet received"));
+    }
+    const short = sessions.some(s => s.deficit > 0);
+    why.textContent = chains.length + " chain(s)" +
+      (said.length ? ", " + said.join(" · ")
+       : short ? "" : ", every receipt accounted for") +
       (quietEvidence ? " — " + quietEvidence + " superseded tear(s) " +
                        "kept as quiet evidence" : "");
   }
@@ -11801,12 +12791,14 @@ function render(report) {
   // What an operator accepted, as kept in the baseline: testimony, drawn
   // plainly, raising nothing.
   for (const record of (report.baseline.acknowledged || [])) {
-    // A session accepted at a receiver (ADR-0046): its memory is out of
-    // the writer's reach, so it is not called writer-reachable.
+    // Whose reach the file is in is the server's to say, one source for
+    // every line (#615): the page cannot tell where it was read.
+    const kept = " (an operator's word, " + report.baseline.kept + ")";
+    // A session accepted at a receiver (ADR-0046).
     if (record.session) {
       tripwire.appendChild(el("p", "claim", "acknowledged " +
         (record.ts || "") + " · session " + record.session + " · " +
-        record.state + " (an operator's word, kept at the receiver)"));
+        record.state + kept));
       continue;
     }
     const what = record.log
@@ -11815,8 +12807,7 @@ function render(report) {
       : "the baseline itself · " + record.change + " · " +
         (record.stood || "") + " · started afresh";
     tripwire.appendChild(el("p", "claim", "acknowledged " +
-      (record.ts || "") + " · " + what +
-      " (an operator's word, kept in a writer-reachable file)"));
+      (record.ts || "") + " · " + what + kept));
   }
 
   // The completeness watch: only sessions worth a second look get a
@@ -11830,7 +12821,9 @@ function render(report) {
                                   "SECOND-RECORD-ABSENT",
                                   "SECOND-RECORD-GAP"]);
   // At a receiver a settled disagreement raises the exit until it is
-  // acknowledged there (ADR-0046), and is drawn as live as it counts.
+  // accepted there (ADR-0046), and a session still arriving with a call
+  // or a counter number overdue raises it until the receipts arrive or
+  // it settles (ruling 6); each is drawn as live as it counts.
   const raising = s => LIVE.includes(s.state) || Boolean(s.raises);
   const watchRow = s => {
     const live = raising(s);
@@ -11863,6 +12856,7 @@ function render(report) {
       (s.missing_calls.count > s.missing_calls.calls.length ? ", …" : "")));
     if (s.paired_by) row.appendChild(el("p", "claim",
       "paired by " + s.paired_by));
+    if (rowNote(s)) row.appendChild(el("p", "claim", rowNote(s)));
     if (s.acknowledged) row.appendChild(el("p", "claim",
       "acknowledged " + (s.acknowledged.ts || "") + " as " +
       s.acknowledged.state + ": " + s.acknowledged.words));
@@ -13001,6 +13995,43 @@ def speak_utf8():
 
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def reader_gone(error):
+    """True when `error` is the reader hanging up on stdout (`loxodonta
+    report | head`). POSIX raises BrokenPipeError (EPIPE); Windows
+    reports a plain EINVAL from the closed handle instead, so match on
+    both or the quiet death is a traceback on half the platforms. EINVAL
+    means nothing about pipes off Windows, and on Windows it counts only
+    when it names no file: a write to stdout never does, and a file
+    refused for not being a regular one always does, so that refusal is
+    never taken for a reader that left."""
+    return isinstance(error, BrokenPipeError) or (
+        os.name == "nt" and isinstance(error, OSError)
+        and error.errno == errno.EINVAL and error.filename is None)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def run_main(main):
+    """Run a command line to its exit code, as every tool's entry point.
+    Two endings are not the command's own (ADR-0037). A reader that hung
+    up gets a quiet 141, what a shell reports for that: never 0 (VALID)
+    or 1 (BROKEN), since the unread lines were never judged. A crash
+    prints its traceback to stderr and exits 70, sysexits' internal
+    error, so it is never read as a verdict. SystemExit (argparse's 64,
+    `--version`'s 0) and Ctrl-C pass through as Python ends them."""
+    try:
+        speak_utf8()  # before anything prints
+        code = main()
+    except Exception as e:  # noqa: BLE001 - every failure gets its exit
+        if not reader_gone(e):
+            traceback.print_exc()
+            sys.exit(EX_SOFTWARE)
+        # Give the interpreter a sink to flush into, or shutdown re-raises.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(EXIT_READER_GONE)
+    sys.exit(code)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 class UsageParser(argparse.ArgumentParser):
     """argparse, with usage errors on an exit of their own. A wrong flag, a
     missing argument, or a malformed value exits 64 instead of argparse's
@@ -13014,7 +14045,7 @@ class UsageParser(argparse.ArgumentParser):
         self.exit(EX_USAGE, f"{self.prog}: error: {message}\n")
 
 
-def main(argv):
+def main(argv=None):
     parser = UsageParser(prog="supervisor",
                          description=__doc__.splitlines()[0])
     parser.add_argument("--version", action=VersionAction,
@@ -13038,8 +14069,10 @@ def main(argv):
                                "unless given")
     watching.add_argument("--calendar", action="append", default=None,
                           metavar="URL",
-                          help="calendar for auto-anchoring (repeatable; "
-                               "default: receipts' public pools)")
+                          help="calendar for auto-anchoring, and one the "
+                               "keeper's upgrade of pending proofs may ask "
+                               "beside the public pools (repeatable; "
+                               "default: receipts' public pools; #415)")
     watching.add_argument("--publish-every", type=parse_cadence,
                           default=None, metavar="AGE",
                           help="publish a head once it is this old and "
@@ -13059,10 +14092,11 @@ def main(argv):
     watching.add_argument("--publish-chain", type=publish_url, default=None,
                           metavar="URL",
                           help="opt in: on --publish-every's cadence, also "
-                               "send the chain's entries since the last "
-                               "acknowledged one to this URL, after the "
-                               "head, through `loxodonta publish --chain` "
-                               "(ADR-0031). Every entry leaves; pick a "
+                               "send the chain's entries the remote does "
+                               "not hold to this URL, after the head, "
+                               "through `loxodonta publish --chain` "
+                               "(ADR-0031, ADR-0045). Every entry leaves; "
+                               "pick a "
                                "remote that can only add, never delete, "
                                "such as the receiver")
     scan = sub.add_parser(
@@ -13079,11 +14113,13 @@ def main(argv):
                            "as the witness, every tool owing a receipt, "
                            "the memory in DIR/supervisor. A session is "
                            "judged once nothing of it has arrived for "
-                           "SUPERVISOR_SETTLE_SECONDS (1 hour), and a "
+                           "SUPERVISOR_SETTLE_SECONDS (1 hour). A settled "
                            "session short of receipts, or of events, "
                            "raises the exit until `acknowledge --receiver "
-                           "DIR --session` accepts it (ADR-0046). Not "
-                           "with --root")
+                           "DIR --session` accepts it; one still arriving "
+                           "with a call or a counter number overdue raises "
+                           "it until the receipts arrive or it settles "
+                           "(ADR-0046). Not with --root")
     scan.add_argument("--json", action="store_true",
                       help="compact machine output (default pretty-prints)")
     scan.add_argument("--before-memory", action="store_true",
@@ -13160,7 +14196,12 @@ def main(argv):
                              spoken_wrong=acknowledge.error)
     serve = sub.add_parser(
         "serve", parents=[watching],
-        help="the face: status band on a localhost-only server")
+        help="the face: status band on a localhost-only server",
+        description="The face: status band on a localhost-only server. "
+                    "With no keeper cadence in force it also looks on a "
+                    "clock of its own, every SUPERVISOR_WATCH_TICK_SECONDS "
+                    "(600); 0 turns that off, and it then looks only when "
+                    "a page or a scrape asks (#281).")
     serve.add_argument("--root", default=None,
                        help="legacy/explicit mode: serve this folder of "
                             "repos instead of the store (default: the "
@@ -13168,8 +14209,9 @@ def main(argv):
     serve.add_argument("--receiver", default=None, metavar="DIR",
                        help="serve a receiver's data directory as the "
                             "universe (ADR-0041), as `scan --receiver` "
-                            "reads it; no keeper runs. Not with --root")
-    serve.add_argument("--port", type=int, default=7717,
+                            "reads it; no keeper runs, so no keeper's flag "
+                            "is taken beside it. Not with --root")
+    serve.add_argument("--port", type=port_number, default=7717,
                        help="localhost port (0 picks a free one; "
                             "default 7717)")
     # serve settles its publish flags against the coverage marker, so
@@ -13370,6 +14412,21 @@ def main(argv):
     package.set_defaults(func=cmd_package)
 
     args = parser.parse_args(argv)
+    # No keeper runs over a receiver's folder (ADR-0041), so a flag only
+    # a keeper reads is refused there by name, before the keeper's own
+    # rules below could answer in its place (#487 item 11).
+    if getattr(args, "receiver", None) is not None:
+        given = [flag for flag in ("--anchor-every", "--calendar",
+                                   "--publish-every", "--publish-url",
+                                   "--publish-chain")
+                 if getattr(args, flag[2:].replace("-", "_"), None)
+                 is not None]
+        if given:
+            args.spoken_wrong(
+                "--receiver reads a receiver's data directory, and no "
+                "keeper runs over a receiver's folder: drop "
+                + (", ".join(given[:-1]) + " and " if given[1:] else "")
+                + given[-1])
     # The cadence says when and a URL says where, the head's or the
     # chain's; one without the other is a command spoken wrong, refused
     # before any tick runs. `serve` settles this itself, after reading
@@ -13388,5 +14445,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    speak_utf8()  # before anything prints
-    sys.exit(main(sys.argv[1:]))
+    run_main(main)

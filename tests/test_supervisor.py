@@ -2778,6 +2778,196 @@ class CompletenessTest(unittest.TestCase):
             self.assertNotIn(overclaim, words)
 
 
+# Three lines each, not one of them a transcript record: text that is
+# not JSON, JSON that is not an object, and bytes that are not UTF-8.
+GARBLED = {"text": b"not json\nnor this\n{\"cut\": \n",
+           "values": b"[1, 2]\n42\n\"a string\"\n",
+           "bytes": b"\xff\xfe\x00\n\x80\x81\n\xc3\x28\n"}
+GARBLED_WHY = "not one of its 3 lines is a JSON object"
+
+
+class UnreadableTranscriptTest(unittest.TestCase):
+    """#473: a transcript that holds bytes, not one line of which can be
+    read, was counted as a session that ran no tools, so a live session
+    the scan had called ALARM-SILENT read QUIET, exit 0. It reads
+    UNWITNESSED with why, as one that cannot be opened does (#386, #452),
+    with that row's exit. One readable line is enough to be read by
+    (#331); an empty transcript is a session only just started, and
+    stays QUIET; a transcript cut to fewer readable calls is not
+    reported, the limit docs/CLAIMS.md states."""
+
+    def setUp(self):
+        base = temp_folder(self)
+        self.root = base / "repos"
+        self.root.mkdir()
+        self.witness = base / "witness"
+        install_witness_hook(self.witness)
+        prime_memory(self.root)
+        self.env = isolated_env(base / "home")
+
+    def scan(self, expect):
+        result = run_scan(self.root, "--witness", str(self.witness),
+                          env=self.env)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.returncode, expect,
+                         result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["exit"], expect)
+        return {row["session"]: row
+                for row in report["completeness"]["sessions"]}, report
+
+    def live(self, session, project="alpha"):
+        """The issue's session: live, three calls the witness counts."""
+        return write_transcript(self.witness, self.root / project, session,
+                                event_times=[ago(600), ago(400), ago(120)])
+
+    def assert_unreadable(self, row, path, receipts=0):
+        self.assertEqual(row["state"], "UNWITNESSED")
+        self.assertEqual(row["tools"], 0)
+        self.assertEqual(row["receipts"], receipts)
+        self.assertIn(f"{path.as_posix()} cannot be read as a transcript: "
+                      f"{GARBLED_WHY}", row["note"])
+        # The words travel in a package and the note does not (#410).
+        self.assertIn("cannot be read", row["words"])
+        self.assertNotIn(row["session"], row["words"])
+
+    def test_a_chainless_transcript_garbled_whole_is_named_not_quiet(self):
+        for kind, garbled in GARBLED.items():
+            with self.subTest(garbled=kind):
+                session = f"sess-never-{kind}"
+                transcript = self.live(session)
+                rows, _ = self.scan(expect=6)
+                self.assertEqual(rows[session]["state"], "ALARM-SILENT")
+                transcript.write_bytes(garbled)
+
+                rows, _ = self.scan(expect=0)
+
+                self.assert_unreadable(rows[session], transcript)
+                transcript.unlink()
+
+    def test_a_chained_transcript_garbled_whole_is_named_not_quiet(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-chained",
+                   entries=1)
+        transcript = self.live("sess-chained")
+        rows, _ = self.scan(expect=6)
+        self.assertEqual(rows["sess-chained"]["tools"], 3)
+        transcript.write_bytes(GARBLED["text"])
+
+        rows, report = self.scan(expect=0)
+
+        self.assert_unreadable(rows["sess-chained"], transcript, receipts=1)
+        (chain,) = chains_by_session(report)[("alpha", "sess-chained")]
+        self.assertEqual(chain["verdict"], "VALID")
+
+    def test_an_empty_transcript_is_a_session_only_just_started(self):
+        # Ruling 2: zero bytes, and a file of blank lines alike; a blank
+        # line is no line that could not be read.
+        for kind, content in (("empty", b""), ("blank", b"\n\r\n  \n\t\n")):
+            with self.subTest(transcript=kind):
+                session = f"sess-{kind}"
+                self.live(session).write_bytes(content)
+                make_chain(self.root / "alpha" / "receipts",
+                           f"sess-chained-{kind}", entries=1)
+                self.live(f"sess-chained-{kind}").write_bytes(content)
+
+                rows, _ = self.scan(expect=0)
+
+                self.assertEqual(rows[session]["state"], "QUIET")
+                self.assertNotIn("note", rows[session])
+                # With a chain beside it, read as an empty witness always
+                # was: receipts no call is seen for.
+                self.assertEqual(rows[f"sess-chained-{kind}"]["state"],
+                                 "SURPLUS")
+
+    def test_one_readable_line_among_unreadable_ones_is_read_by(self):
+        # #331 left it so: the threshold is every line.
+        transcript = write_transcript(self.witness, self.root / "alpha",
+                                      "sess-one", chatter=1)
+        with transcript.open("ab") as out:
+            out.write(GARBLED["text"] * 20)
+
+        rows, _ = self.scan(expect=0)
+
+        self.assertEqual(rows["sess-one"]["state"], "QUIET")
+        self.assertNotIn("note", rows["sess-one"])
+
+    def test_readable_lines_with_no_tool_events_stay_quiet(self):
+        write_transcript(self.witness, self.root / "alpha", "sess-talk",
+                         chatter=3, metadata=2)
+
+        rows, _ = self.scan(expect=0)
+
+        self.assertEqual(rows["sess-talk"]["state"], "QUIET")
+
+    def garble_subagent(self, session, events=()):
+        path = write_subagent_transcript(self.witness, self.root / "alpha",
+                                         session, "aaa", event_times=events)
+        path.write_bytes(GARBLED["text"])
+        return path
+
+    def test_a_garbled_subagent_file_beside_a_clean_parent_is_named(self):
+        # The rule holds per file: the calls a garbled subagent file
+        # held are unknown, so a parent paid in full is no clean session.
+        make_chain(self.root / "alpha" / "receipts", "sess-sub",
+                   actions=["Bash: a", "Bash: b"])
+        write_transcript(self.witness, self.root / "alpha", "sess-sub",
+                         event_times=[ago(6000), ago(5990)])
+        rows, _ = self.scan(expect=0)
+        self.assertEqual(rows["sess-sub"]["state"], "ENDED-CLEAN")
+        sidechain = self.garble_subagent("sess-sub", events=[ago(5980)])
+
+        rows, _ = self.scan(expect=0)
+
+        self.assert_unreadable(rows["sess-sub"], sidechain, receipts=2)
+
+    def test_every_garbled_subagent_file_is_named(self):
+        make_chain(self.root / "alpha" / "receipts", "sess-two",
+                   actions=["Bash: a", "Bash: b"])
+        write_transcript(self.witness, self.root / "alpha", "sess-two",
+                         event_times=[ago(6000), ago(5990)])
+        garbled = []
+        for agent in ("aaa", "bbb"):
+            path = write_subagent_transcript(
+                self.witness, self.root / "alpha", "sess-two", agent)
+            path.write_bytes(GARBLED["text"])
+            garbled.append(path)
+
+        rows, _ = self.scan(expect=0)
+
+        row = rows["sess-two"]
+        self.assertEqual(row["state"], "UNWITNESSED")
+        for path in garbled:
+            self.assertIn(f"{path.as_posix()} cannot be read as a "
+                          f"transcript: {GARBLED_WHY}", row["note"])
+
+    def test_a_garbled_subagent_file_never_quiets_the_parents_alarm(self):
+        # A deficit the readable files show stands: a file that cannot be
+        # read can only hide more calls, never pay one. The file is named.
+        self.live("sess-loud")
+        sidechain = self.garble_subagent("sess-loud")
+
+        rows, _ = self.scan(expect=6)
+
+        row = rows["sess-loud"]
+        self.assertEqual(row["state"], "ALARM-SILENT")
+        self.assertEqual(row["tools"], 3)
+        self.assertIn(f"{sidechain.as_posix()} cannot be read as a "
+                      f"transcript: {GARBLED_WHY}", row["note"])
+
+    def test_a_session_before_the_memory_is_not_named_for_a_garbled_file(self):
+        # ADR-0029: the session's first call dates it before the memory
+        # began, so nothing about it is judged, its garbled file included.
+        prime_memory(self.root, age=3000)
+        write_transcript(self.witness, self.root / "alpha", "sess-old",
+                         event_times=[ago(6000), ago(5990)])
+        self.garble_subagent("sess-old")
+
+        rows, report = self.scan(expect=0)
+
+        self.assertNotIn("sess-old", rows)
+        self.assertEqual(report["completeness"]["before_memory"]["count"], 1)
+
+
 class CalibrationTest(unittest.TestCase):
     """Effective-dated coverage (ADR-0016): each session is judged by
     the matchers in force at its time, so a matcher change never
@@ -3989,7 +4179,8 @@ class AnchorKeeperTest(unittest.TestCase):
             check=True, env=self.env)
         calendar.mode = "complete"
 
-        result = run_scan(self.root, env=self.env)
+        # The keeper's own --calendar, as `serve --calendar` hands it on.
+        result = run_scan(self.root, "--calendar", calendar.url, env=self.env)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         chain = self.chain_report(result, "alpha", "sess-aaaa")
@@ -4000,16 +4191,64 @@ class AnchorKeeperTest(unittest.TestCase):
         self.assertTrue(chain["claimed"])
         self.assertEqual(len(calendar.polled), 1)
 
+    def test_the_keeper_asks_no_calendar_it_was_not_given(self):
+        # #415: the upgrade asks the default calendars and the keeper's
+        # own --calendar; a row naming any other address stays pending,
+        # and its calendar is never asked.
+        calendar = self.start_calendar()
+        log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        run(LOXODONTA, "anchor", "--log", str(log), "--calendar", calendar.url,
+            check=True, env=self.env)
+        calendar.mode = "complete"
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-aaaa")
+        self.assertEqual(len(chain["anchors"]["pending"]), 1)
+        self.assertEqual(calendar.polled, [])
+        # Said on the row, so the page and `scan --json` show why the
+        # proof stays pending, with the address named once, as data.
+        note = chain["anchors"].get("note", "")
+        self.assertIn(f"pending at {calendar.url}, a calendar this keeper "
+                      "was not given", note)
+        self.assertIn("give it with --calendar on scan or serve", note)
+        self.assertNotIn(f"--calendar {calendar.url}", note)
+        self.assertNotIn("failed", chain["anchors"])
+
+        named = run_scan(self.root, "--calendar", calendar.url, env={
+            **self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"})
+
+        self.assertEqual(named.returncode, 0, named.stdout + named.stderr)
+        chain = self.chain_report(named, "alpha", "sess-aaaa")
+        self.assertNotIn("not given", chain["anchors"].get("note", ""))
+        self.assertEqual(chain["anchors"]["pending"], [])
+
+    def test_the_keeper_note_names_an_unlisted_address_escaped_and_cut(self):
+        log = make_chain(self.root / "alpha" / "receipts", "sess-long")
+        long = "http://127.0.0.1:1/" + "x" * 5000
+        write_pending_anchor(log, chain_head(log), ago(600), calendar=long)
+
+        result = run_scan(self.root, env=self.env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        chain = self.chain_report(result, "alpha", "sess-long")
+        note = chain["anchors"]["note"]
+        self.assertIn("http://127.0.0.1:1/xxx", note)
+        self.assertIn("… (+", note)
+        self.assertLess(len(note), 600, note)
+
     def test_upgrade_attempts_are_polite_between_ticks(self):
         calendar = self.start_calendar()
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         run(LOXODONTA, "anchor", "--log", str(log), "--calendar", calendar.url,
             check=True, env=self.env)
 
-        first = run_scan(self.root, env=self.env)   # polls: pending
+        named = ("--calendar", calendar.url)
+        first = run_scan(self.root, *named, env=self.env)   # polls: pending
         calendar.mode = "complete"
-        throttled = run_scan(self.root, env=self.env)
-        eager = run_scan(self.root, env={
+        throttled = run_scan(self.root, *named, env=self.env)
+        eager = run_scan(self.root, *named, env={
             **self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"})
 
         self.assertEqual(len(calendar.polled), 2,
@@ -4348,11 +4587,11 @@ class AnchorKeeperTest(unittest.TestCase):
             f.write('{"n":3,"half-written')
         make_chain(self.root / "alpha" / "receipts", "sess-tore-002")
         env = {**self.env, "SUPERVISOR_UPGRADE_EVERY_SECONDS": "0"}
-        first = run_scan(self.root, env=env)
+        first = run_scan(self.root, "--calendar", calendar.url, env=env)
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         calendar.mode = "complete"
 
-        second = run_scan(self.root, env=env)
+        second = run_scan(self.root, "--calendar", calendar.url, env=env)
 
         tore, _ = chains_by_session(json.loads(second.stdout))[
             ("alpha", "sess-tore")]
@@ -4744,7 +4983,9 @@ class WalkFindingsTest(unittest.TestCase):
         (self.root / ".supervisor-baseline.json").write_text(json.dumps({
             "chains": {},
             "keeper": {relpath: "2099-01-01T00:00:00Z"}}), encoding="utf-8")
-        finished = run_scan(self.root, env=self.env)
+        # The row's calendar named, so the upgrade asks it (#415).
+        finished = run_scan(self.root, "--calendar", "http://127.0.0.1:1",
+                            env=self.env)
         report = json.loads(finished.stdout)
         chain = chains_by_session(report)[("alpha", "sess-futr")][0]
         # the upgrade was attempted (and failed fast, offline): the note
@@ -4765,7 +5006,9 @@ class WalkFindingsTest(unittest.TestCase):
             "chains": {},
             "keeper": {relpath: "2026-08-22T09:00:00"}}), encoding="utf-8")
 
-        finished = run_scan(self.root, env=self.env)
+        # The row's calendar named, so the upgrade asks it (#415).
+        finished = run_scan(self.root, "--calendar", "http://127.0.0.1:1",
+                            env=self.env)
 
         self.assertNotIn("Traceback", finished.stderr)
         report = json.loads(finished.stdout)
@@ -4800,13 +5043,17 @@ class RecorderDriftTest(unittest.TestCase):
                               capture_output=True, encoding="utf-8",
                               timeout=120)
 
-    def make_checkout(self, branch="main"):
-        """A git checkout holding a stand-in recorder, wired as the hook."""
+    def make_checkout(self, branch="main", autocrlf=None):
+        """A git checkout holding a stand-in recorder, wired as the hook.
+        `autocrlf` sets the checkout's own core.autocrlf, over whatever
+        the machine's git config says."""
         home = self.base / "recorder"
         home.mkdir()
         script = home / "loxodonta.py"
-        script.write_text("# stand-in recorder\n", encoding="utf-8")
+        script.write_bytes(b"# stand-in recorder\n")
         self.git("init", "-b", branch, cwd=home)
+        if autocrlf is not None:
+            self.git("config", "core.autocrlf", autocrlf, cwd=home)
         self.git("config", "user.email", "t@example.com", cwd=home)
         self.git("config", "user.name", "test", cwd=home)
         self.git("add", "-A", cwd=home)
@@ -4816,9 +5063,10 @@ class RecorderDriftTest(unittest.TestCase):
             command=f'python "{script.as_posix()}" hook')
         return home, script
 
-    def notice(self):
-        result = run_scan(self.root, "--witness", str(self.witness), "--json",
-                          env=self.env)
+    def notice(self, timeout=120):
+        result = run(SUPERVISOR, "scan", "--root", str(self.root), "--json",
+                     "--witness", str(self.witness), env=self.env,
+                     timeout=timeout)
         self.assertEqual(result.returncode, 0,
                          result.stdout + result.stderr)
         return json.loads(result.stdout)["recorder"]
@@ -4842,6 +5090,200 @@ class RecorderDriftTest(unittest.TestCase):
 
         self.assertTrue(recorder["dirty"])
         self.assertIn("uncommitted", recorder["note"].lower())
+
+    def hidden_edit(self, flag):
+        """An edited recorder git has been told not to look at (#621)."""
+        home, script = self.make_checkout()
+        script.write_bytes(b"# edited, and git told to look away\n")
+        self.git("update-index", flag, "loxodonta.py", cwd=home)
+        said = self.git("status", "--porcelain", "--", "loxodonta.py",
+                        cwd=home)
+        self.assertEqual(said.stdout.strip(), "", "git status still sees it")
+        return self.notice()
+
+    def test_an_edit_git_assumes_unchanged_is_still_drift(self):
+        # #621: `git status` answers nothing for a file marked
+        # assume-unchanged, so the notice compares the bytes itself.
+        recorder = self.hidden_edit("--assume-unchanged")
+
+        self.assertTrue(recorder["dirty"])
+        self.assertIn("uncommitted", recorder["note"])
+        self.assertIn("though `git status` shows none", recorder["note"])
+        self.assertNotIn("clean", recorder["note"])
+
+    def test_an_edit_git_skips_in_the_worktree_is_still_drift(self):
+        recorder = self.hidden_edit("--skip-worktree")
+
+        self.assertTrue(recorder["dirty"])
+        self.assertIn("uncommitted", recorder["note"])
+        self.assertIn("though `git status` shows none", recorder["note"])
+
+    def test_a_recorder_git_ignores_and_never_committed_is_drift(self):
+        # The same silence from the other side: a recorder taken out of
+        # the commit and listed as ignored has no committed bytes at all.
+        home, script = self.make_checkout()
+        self.git("rm", "--cached", "-q", "loxodonta.py", cwd=home)
+        (home / "README").write_text("kept\n", encoding="utf-8")
+        self.git("add", "README", cwd=home)
+        self.git("commit", "-q", "-m", "recorder out", cwd=home)
+        (home / ".git" / "info").mkdir(exist_ok=True)
+        (home / ".git" / "info" / "exclude").write_text("loxodonta.py\n",
+                                                       encoding="utf-8")
+        said = self.git("status", "--porcelain", "--", "loxodonta.py",
+                        cwd=home)
+        self.assertEqual(said.stdout.strip(), "", "git status still sees it")
+
+        recorder = self.notice()
+
+        self.assertTrue(recorder["dirty"])
+        self.assertIn("though `git status` shows none", recorder["note"])
+
+    def assert_unreadable_in_a_checkout(self, recorder, words):
+        """#621: git answered, so the checkout is read as one, and a
+        recorder that cannot be read as a file cannot be the committed
+        one."""
+        self.assertEqual(recorder["state"], "tracked")
+        self.assertEqual(recorder["branch"], "main")
+        self.assertTrue(recorder["dirty"])
+        self.assertIn(words, recorder["note"])
+        self.assertNotIn("not in a git checkout", recorder["note"])
+        self.assertNotIn("clean", recorder["note"])
+        self.assertNotIn("shows none", recorder["note"])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a named pipe")
+    def test_a_pipe_in_the_recorders_place_is_named_never_read(self):
+        # An open of a pipe waits for a writer; the bound is the test's
+        # timeout, well under git's own.
+        _, script = self.make_checkout()
+        script.unlink()
+        os.mkfifo(script)
+
+        recorder = self.notice(timeout=8)
+
+        self.assert_unreadable_in_a_checkout(recorder, "not a regular file")
+
+    def test_a_folder_in_the_recorders_place_is_named_in_the_checkout(self):
+        _, script = self.make_checkout()
+        script.unlink()
+        script.mkdir()
+
+        recorder = self.notice()
+
+        self.assert_unreadable_in_a_checkout(recorder, "is a folder")
+
+    def test_a_recorder_larger_than_any_is_never_read(self):
+        # Sized without writing it: the size is asked before any read,
+        # so the scan's cost does not grow with the file.
+        _, script = self.make_checkout()
+        with open(script, "r+b") as f:
+            f.truncate(1 << 30)
+
+        recorder = self.notice(timeout=8)
+
+        self.assert_unreadable_in_a_checkout(recorder, "larger than")
+
+    def test_a_committed_crlf_blob_under_autocrlf_is_not_drift(self):
+        # git converts nothing on checkout or on add when the blob itself
+        # holds CRLF, so the file is the committed bytes exactly.
+        home, script = self.make_checkout(autocrlf="false")
+        script.write_bytes(b"# committed with CRLF\r\nline two\r\n")
+        self.git("commit", "-q", "-am", "crlf", cwd=home)
+        self.git("config", "core.autocrlf", "true", cwd=home)
+        said = self.git("status", "--porcelain", "--", "loxodonta.py",
+                        cwd=home)
+        self.assertEqual(said.stdout.strip(), "")
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "tracked")
+        self.assertFalse(recorder["dirty"])
+        self.assertIn("clean", recorder["note"])
+
+    @unittest.skipUnless(os.name != "nt", "a committed symbolic link; "
+                         "Windows checkouts write them as files by default")
+    def test_a_committed_link_as_the_recorder_is_not_drift(self):
+        # The commit holds the link's text, not its target's bytes.
+        home = self.base / "linked"
+        home.mkdir()
+        (home / "real.py").write_bytes(b"# the recorder's real bytes\n")
+        script = home / "loxodonta.py"
+        os.symlink("real.py", script)
+        self.git("init", "-b", "main", cwd=home)
+        self.git("config", "user.email", "t@example.com", cwd=home)
+        self.git("config", "user.name", "test", cwd=home)
+        self.git("add", "-A", cwd=home)
+        self.git("commit", "-q", "-m", "linked recorder", cwd=home)
+        install_witness_hook(
+            self.witness, command=f'python "{script.as_posix()}" hook')
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "tracked")
+        self.assertFalse(recorder["dirty"])
+        self.assertIn("clean", recorder["note"])
+
+    def test_a_crlf_doubled_by_a_carriage_return_is_drift(self):
+        # One pass of CRLF to LF folds CR CR LF back to a CRLF the blob
+        # holds, while Python reads one line more; git never writes CR CR
+        # LF on checkout, so it is an edit.
+        home, script = self.make_checkout(autocrlf="false")
+        script.write_bytes(b"one = 1\r\ntwo = 2\n")
+        self.git("commit", "-q", "-am", "mixed endings", cwd=home)
+        script.write_bytes(b"one = 1\r\r\ntwo = 2\n")
+        self.git("update-index", "--assume-unchanged", "loxodonta.py",
+                 cwd=home)
+
+        recorder = self.notice()
+
+        self.assertTrue(recorder["dirty"])
+        self.assertIn("uncommitted", recorder["note"])
+
+    def test_a_replaced_head_never_vouches_for_edited_bytes(self):
+        # `git replace` makes HEAD's tree the writer's, while HEAD still
+        # prints the real commit: the notice reads the commits as made.
+        home, script = self.make_checkout()
+        script.write_bytes(b"# edited, and committed only in a fake\n")
+        self.git("add", "loxodonta.py", cwd=home)
+        tree = self.git("write-tree", cwd=home).stdout.strip()
+        fake = self.git("commit-tree", tree, "-m", "fake",
+                        cwd=home).stdout.strip()
+        real = self.git("rev-parse", "HEAD", cwd=home).stdout.strip()
+        self.assertEqual(self.git("replace", real, fake,
+                                  cwd=home).returncode, 0)
+        said = self.git("status", "--porcelain", "--", "loxodonta.py",
+                        cwd=home)
+        self.assertEqual(said.stdout.strip(), "", "git status still sees it")
+
+        recorder = self.notice()
+
+        self.assertTrue(recorder["dirty"])
+        self.assertIn("uncommitted", recorder["note"])
+
+    def test_line_endings_converted_on_checkout_are_not_drift(self):
+        # #621: with autocrlf the file on disk ends its lines in CRLF and
+        # the blob in LF; the bytes with every CRLF made LF are the blob,
+        # so that difference is not an edit.
+        home, script = self.make_checkout(autocrlf="true")
+        script.unlink()
+        self.git("checkout", "--", "loxodonta.py", cwd=home)
+        self.assertIn(b"\r\n", script.read_bytes())
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "tracked")
+        self.assertFalse(recorder["dirty"])
+        self.assertIn("clean", recorder["note"])
+
+    def test_an_untouched_lf_checkout_is_not_drift(self):
+        _, script = self.make_checkout(autocrlf="false")
+        self.assertEqual(script.read_bytes(), b"# stand-in recorder\n")
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "tracked")
+        self.assertFalse(recorder["dirty"])
+        self.assertIn("clean", recorder["note"])
+        self.assertNotIn("shows none", recorder["note"])
 
     def test_a_recorder_outside_git_is_unknown_never_an_error(self):
         # No repo, no git, no upstream: say so plainly rather than
@@ -4894,6 +5336,41 @@ class RecorderDriftTest(unittest.TestCase):
         self.assertIn("failed tool calls", older["note"])
         self.assertIn("install-hook", older["note"])
         self.assertNotIn("failed tool calls", rewired["note"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows drops a trailing dot")
+    def test_a_name_windows_runs_as_the_recorder_is_wired(self):
+        # #589 item 8: Windows runs `loxodonta.py.` as `loxodonta.py`,
+        # so the notice must not say no recorder hook is wired.
+        home = self.base / "loose"
+        home.mkdir()
+        script = home / "loxodonta.py"
+        script.write_text("# loose recorder\n", encoding="utf-8")
+        for tail in (".", ". .", ".."):
+            with self.subTest(tail=tail):
+                install_witness_hook(
+                    self.witness,
+                    command=f'python "{script.as_posix()}{tail}" hook')
+
+                recorder = self.notice()
+
+                self.assertNotEqual(recorder["state"], "unwired")
+                self.assertNotIn("not on disk", recorder["note"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows drops a trailing dot")
+    def test_a_checkout_wired_with_a_trailing_dot_reads_clean(self):
+        # #589 item 8, review: the file the notice asks git about is the
+        # one Windows runs, `loxodonta.py`, never `loxodonta.py.`, which
+        # git holds no blob of, so a clean checkout read as dirty.
+        _, script = self.make_checkout(autocrlf="false")
+        install_witness_hook(
+            self.witness, command=f'python "{script.as_posix()}." hook')
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "tracked")
+        self.assertFalse(recorder["dirty"])
+        self.assertIn("clean", recorder["note"])
+        self.assertEqual(recorder["path"], script.as_posix())
 
     def test_no_wired_hook_means_no_recorder_to_report_on(self):
         self.witness.mkdir(parents=True, exist_ok=True)
@@ -5443,6 +5920,22 @@ class UsageExitTest(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(result.stdout, "")
 
+    def test_a_port_no_socket_takes_exits_64_naming_it(self):
+        # #589: a port past 65535, or below 0, reached the socket
+        # unchecked and raised OverflowError there, exit 70.
+        for port in ("70000", "65536", "-1", "eighty"):
+            with self.subTest(port=port):
+                result = run_supervisor(self.home, "serve", "--root",
+                                        str(temp_folder(self)),
+                                        "--port", port)
+
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                self.assertIn("argument --port: a port is a whole number "
+                              "from 0 to 65535", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.stdout, "")
+
     def test_malformed_cadence_exits_64_not_a_verdict_number(self):
         # parse_cadence raises ArgumentTypeError inside the scan subparser;
         # the subparser must speak 64 too, or scan's own exits collide.
@@ -5461,10 +5954,12 @@ class UsageExitTest(unittest.TestCase):
                        "SUPERVISOR_WANING_SECONDS": True,
                        "SUPERVISOR_DORMANT_SECONDS": True,
                        "SUPERVISOR_SETTLE_SECONDS": True,
+                       "SUPERVISOR_LATE_RECEIPT_SECONDS": True,
                        "SUPERVISOR_HOT_TIMES": True,
                        "SUPERVISOR_HOT_FLOOR": True,
                        "SUPERVISOR_SCAN_TTL_SECONDS": False,
-                       "SUPERVISOR_KEEPER_TICK_SECONDS": False}
+                       "SUPERVISOR_KEEPER_TICK_SECONDS": False,
+                       "SUPERVISOR_WATCH_TICK_SECONDS": False}
 
     def version_with(self, name, value):
         return run(SUPERVISOR, "--version", timeout=60,
@@ -5499,13 +5994,116 @@ class UsageExitTest(unittest.TestCase):
 
     def test_a_number_setting_it_can_use_is_taken(self):
         for name, value in (("SUPERVISOR_SETTLE_SECONDS", "0"),
-                            ("SUPERVISOR_KEEPER_TICK_SECONDS", "0.5")):
+                            ("SUPERVISOR_KEEPER_TICK_SECONDS", "0.5"),
+                            # 0 is the watch's off (#281), not a spin.
+                            ("SUPERVISOR_WATCH_TICK_SECONDS", "0"),
+                            # Never waited on, so no wait's bound is its.
+                            ("SUPERVISOR_SCAN_TTL_SECONDS", "1e10")):
             with self.subTest(name=name):
                 result = self.version_with(name, value)
 
                 self.assertEqual(result.returncode, 0,
                                  result.stdout + result.stderr)
                 self.assertIn("supervisor", result.stdout)
+
+    def test_a_wait_longer_than_a_wait_can_take_exits_64_naming_it(self):
+        # #589 item 17: the keeper's tick is waited on, and a wait past
+        # threading.TIMEOUT_MAX raised OverflowError on the keeper's
+        # first turn, long after the start said nothing was wrong. 1e10
+        # seconds is past the bound on every platform. The watch's tick
+        # (#281) is waited on the same way.
+        for name in ("SUPERVISOR_KEEPER_TICK_SECONDS",
+                     "SUPERVISOR_WATCH_TICK_SECONDS"):
+            with self.subTest(name=name):
+                result = self.version_with(name, "1e10")
+
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                self.assertRegex(result.stderr,
+                                 rf"\Aerror: {name}='1e10' is more seconds "
+                                 r"than a wait can take \(at most \d+ "
+                                 r"here\)\n\Z")
+                self.assertEqual(result.stdout, "")
+
+
+def run_into_read_only(tool, sink, *args, env):
+    """`tool` run with its stdout `sink`, a file opened for reading only,
+    so a write the tool makes fails with EBADF: the tool's own failure,
+    and no reader gone, since no pipe is there to leave. A lever for the
+    crash exit that no fix to the tools' input checks takes away (#449).
+    Returns (exit, stderr as text)."""
+    sink.write_bytes(b"")
+    with open(sink, "rb") as read_only:
+        done = subprocess.run([sys.executable, str(tool), *args],
+                              stdout=read_only, stderr=subprocess.PIPE,
+                              env={**env, "PYTHONIOENCODING": "utf-8"},
+                              timeout=120)
+    return done.returncode, done.stderr.decode("utf-8", "replace")
+
+
+class CrashExitTest(unittest.TestCase):
+    """The supervisor ends through the recorder's `run_main` (#449,
+    ADR-0037): a crash is 70 with its traceback, never 1, which
+    `supervisor verify` and the scan's ladder say for BROKEN, and a
+    reader that hangs up is a quiet 141."""
+
+    def setUp(self):
+        self.home = temp_folder(self)
+
+    def many_hits(self):
+        """A repo whose chain holds more `search step` hits than a pipe's
+        buffer, or stdout's own, holds: the search is still printing
+        when its first write fails."""
+        repo = temp_folder(self)
+        log = repo / "receipts" / "receipts-hangup.jsonl"
+        log.parent.mkdir()
+        log.write_text("".join(
+            json.dumps({"n": n, "ts": "2026-11-12T10:00:00Z",
+                        "actor": "claude-code",
+                        "action": f"Bash: step {n} " + "x" * 80,
+                        "entry_hash": f"{n:064x}"}) + "\n"
+            for n in range(1, 1500)), encoding="utf-8")
+        return repo
+
+    def test_a_failed_write_exits_70_with_its_traceback(self):
+        code, stderr = run_into_read_only(
+            SUPERVISOR, temp_folder(self) / "stdout", "search", "step",
+            "--limit", "5000", "--repo", str(self.many_hits()),
+            env=isolated_env(self.home))
+
+        self.assertEqual(code, 70, stderr)
+        self.assertIn("Traceback (most recent call last)", stderr)
+
+    def test_a_reader_that_hangs_up_gets_a_quiet_141(self):
+        # As under `| head`: the reader leaves while the search prints.
+        repo = self.many_hits()
+        process = subprocess.Popen(
+            [sys.executable, str(SUPERVISOR), "search", "step", "--limit",
+             "5000", "--repo", str(repo)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding="utf-8", env=isolated_env(self.home))
+        process.stdout.close()
+        # stderr read on a thread of its own: communicate() would start a
+        # reader on the stdout just closed, which dies with its own
+        # traceback on Windows, and a plain read would hang the suite on
+        # a child that never ends.
+        said = []
+        reader = threading.Thread(
+            target=lambda: said.append(process.stderr.read()), daemon=True)
+        reader.start()
+        try:
+            process.wait(timeout=60)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=30)
+            reader.join(30)
+            process.stderr.close()
+        stderr = said[0] if said else ""
+
+        self.assertNotIn("Traceback", stderr)
+        # 128 + SIGPIPE: never 0, VALID, and never 1, BROKEN (ADR-0037).
+        self.assertEqual(process.returncode, 141, stderr)
 
 
 # Straight to 127.0.0.1, never through a proxy someone's shell configured.
@@ -6208,6 +6806,28 @@ def restamp_events(data, received, day=FIXTURE_DAY):
                     encoding="utf-8")
 
 
+# Every flag only a keeper reads, with a value it takes, and the
+# sentence `scan` and `serve` refuse it with beside --receiver, where no
+# keeper runs (#487 item 11, #486 item 10).
+KEEPER_FLAGS = (("--anchor-every", "1h"),
+                ("--calendar", "http://127.0.0.1:9"),
+                ("--publish-every", "1h"),
+                ("--publish-url", "http://127.0.0.1:9/hook"),
+                ("--publish-chain", "http://127.0.0.1:9/chain"))
+NO_KEEPER_THERE = ("--receiver reads a receiver's data directory, and no "
+                   "keeper runs over a receiver's folder: drop ")
+
+
+def keeper_flag_cases():
+    """(the arguments, the flags the refusal names): each keeper flag
+    alone, then the three a cadence beside a receiver is typed with."""
+    cases = [([flag, value], flag) for flag, value in KEEPER_FLAGS]
+    cases.append((["--anchor-every", "1h", "--publish-every", "1h",
+                   "--publish-url", "http://127.0.0.1:9/hook"],
+                  "--anchor-every, --publish-every and --publish-url"))
+    return cases
+
+
 def chain_copy(data, session, actions=FIXTURE_RECEIPTS, epoch=None,
                notes=(), settled=True):
     """A chain copy in the receiver's folder: written by the recorder
@@ -6298,6 +6918,22 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(list(chains), [("receiver", FIXTURE_SESSION)])
         self.assertEqual(chains[("receiver", FIXTURE_SESSION)][0]["verdict"],
                          "VALID")
+
+    def test_a_keeper_flag_beside_receiver_is_refused_by_name(self):
+        # #487 item 11: a cadence here was taken and ignored. Refused as
+        # --root beside --receiver is, before the keeper's own rule of
+        # which flag goes with which can answer in its place, and with
+        # nothing written in the folder.
+        chain_copy(self.data, FIXTURE_SESSION)
+        for asked, named in keeper_flag_cases():
+            with self.subTest(asked=asked):
+                result = self.scan(*asked)
+
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                self.assertIn(NO_KEEPER_THERE + named + "\n", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse((self.data / "supervisor").exists())
 
     def test_a_copy_with_the_two_extra_receipts_taken_out_reads_clean(self):
         chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:2])
@@ -6405,6 +7041,21 @@ class ReceiverReadingTest(unittest.TestCase):
                       "window ago", row["words"])
         self.assertIn("cannot be acknowledged", row["words"])
 
+    def test_the_help_tells_a_settled_finding_from_one_still_arriving(self):
+        # #617: a settled finding stands until it is accepted; one still
+        # arriving cannot be accepted, and stands until it settles or its
+        # receipts arrive (ADR-0046 ruling 6).
+        result = run(SUPERVISOR, "scan", "--help", timeout=60, env=self.env)
+
+        said = " ".join(result.stdout.split())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("A settled session short of receipts, or of events, "
+                      "raises the exit until `acknowledge --receiver DIR "
+                      "--session` accepts it", said)
+        self.assertIn("one still arriving with a call or a counter number "
+                      "overdue raises it until the receipts arrive or it "
+                      "settles", said)
+
     def test_a_newest_call_without_its_receipt_yet_is_only_pending(self):
         # The calls reported long ago have their receipts; the one
         # reported just now has none yet, and is not overdue.
@@ -6509,8 +7160,10 @@ class ReceiverReadingTest(unittest.TestCase):
     def test_two_receipts_of_one_call_pay_it_once_and_read_as_surplus(self):
         # The fixture's session as a recorder with the suffix writes it:
         # two receipts for the failed call and one for the refused call
-        # (#476). Joined on the id, every call is paid, and the extra
-        # receipts are the surplus #476 makes, no alarm.
+        # (#476). Joined on the id, every call is paid. The failed call's
+        # second receipt is neither surplus nor deficit, and the row
+        # counts it; the refused call's receipt is still the surplus
+        # #476 makes, no alarm.
         chain_copy(self.data, FIXTURE_SESSION, actions=(
             f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
             f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]",
@@ -6525,6 +7178,241 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual((row["deficit"], row["tools"]), (0, 2))
         self.assertNotIn("missing_calls", row)
         self.assertNotIn("raises", row)
+        self.assertIn("1 receipt(s) repeat a call id already paid",
+                      row["note"])
+
+    def test_a_failed_call_s_second_receipt_alone_reads_clean(self):
+        # #476, the reader's half: a failed call fired two hooks, so two
+        # receipts carry its id. At most one pays; the other is no
+        # surplus, so the session reads clean, and the row says why.
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]",
+            f"Bash: false [call={FIXTURE_CALLS[1]} input=unhashed]"))
+
+        row = self.rows(self.report())[FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "ENDED-CLEAN")
+        self.assertEqual(row["receipts"], 3)
+        self.assertIn("1 receipt(s) repeat a call id already paid",
+                      row["note"])
+
+    def test_a_repeated_id_pays_once_where_the_count_by_tool_stands(self):
+        # The events name no call, so the count by tool judges: a receipt
+        # repeating an id another receipt carries pays no second call.
+        path = self.data / f"events-{FIXTURE_DAY}.jsonl"
+        lines = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            arrival = json.loads(line)
+            for resource in arrival["logs"]["resourceLogs"]:
+                for scope in resource["scopeLogs"]:
+                    for record in scope["logRecords"]:
+                        record["attributes"] = [
+                            pair for pair in record["attributes"]
+                            if pair["key"] != "tool_use_id"]
+            lines.append(json.dumps(arrival))
+        path.write_text("".join(line + "\n" for line in lines),
+                        encoding="utf-8")
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]"))
+
+        row = self.rows(self.report(expect=6))[FIXTURE_SESSION]
+
+        self.assertEqual((row["state"], row["paired_by"], row["deficit"]),
+                         ("ENDED-DEFICIT", "count by tool", 1))
+        self.assertIn("1 receipt(s) repeat a call id already paid",
+                      row["note"])
+
+    def test_a_receipt_naming_another_tool_pays_nothing_and_is_named(self):
+        # #620: the second call's id in a receipt whose action line names
+        # Read, where the harness's event names Bash for that id. The
+        # call stays unpaid, and the row says which id and which tools.
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            f"Bash: git status [call={FIXTURE_CALLS[0]} input=unhashed]",
+            f"Read: notes.md [call={FIXTURE_CALLS[1]} input=unhashed]"))
+
+        report = self.report(expect=6)
+
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["paired_by"], "call id")
+        self.assertEqual(row["missing_calls"],
+                         {"count": 1, "calls": [FIXTURE_CALLS[1]]})
+        self.assertTrue(row["raises"])
+        self.assertIn(f"{FIXTURE_CALLS[1]} names Read where the harness's "
+                      "event names Bash", row["note"])
+        self.assertIn("1 receipt(s) carry the id of a call", row["note"])
+
+    def test_an_event_naming_no_tool_pairs_on_the_id_alone(self):
+        # #487 item 7: a tool_result with no tool_name. There is no tool
+        # to compare, so the id pays as it did.
+        data = receiver_folder(self.base / "own", events=False)
+        chain_copy(data, "toolless-session-0001", actions=(
+            "Read: notes.md [call=toolu_toolless_1 input=unhashed]",))
+        post_event(data, 0, "tool_result", received_ago(7200),
+                   call="toolu_toolless_1", session="toolless-session-0001")
+
+        row = self.rows(self.report(data=data))["toolless-session-0001"]
+
+        self.assertEqual((row["state"], row["paired_by"]),
+                         ("ENDED-CLEAN", "call id"))
+        self.assertNotIn("note", row)
+
+    def test_a_tool_the_harness_names_mcp_tool_is_paid_by_an_mcp_receipt(self):
+        # The harness's events name a call to a user's MCP server by the
+        # literal `mcp_tool`; the hook's receipt names the server's tool,
+        # `mcp__<server>__<tool>`. Honest, so no mismatch; a receipt of
+        # a tool outside MCP is one.
+        data = receiver_folder(self.base / "own", events=False)
+        chain_copy(data, "mcp-session-0001", actions=(
+            "mcp__notes__search: albatross [call=toolu_mcp_1 input=unhashed]",
+            "Bash: true [call=toolu_mcp_2 input=unhashed]"))
+        post_event(data, 0, "tool_result", received_ago(7200),
+                   tool="mcp_tool", call="toolu_mcp_1",
+                   session="mcp-session-0001")
+        post_event(data, 1, "tool_result", received_ago(7200),
+                   tool="mcp_tool", call="toolu_mcp_2",
+                   session="mcp-session-0001")
+
+        row = self.rows(self.report(expect=6, data=data))["mcp-session-0001"]
+
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["missing_calls"],
+                         {"count": 1, "calls": ["toolu_mcp_2"]})
+        self.assertIn("toolu_mcp_2 names Bash where the harness's event "
+                      "names mcp_tool", row["note"])
+
+    # #620's second case, the issue comment's four steps: two calls
+    # reported, one receipt; a settled look names the second missing;
+    # a sibling chain then brings a hand-written receipt carrying its id.
+    LATE_SESSION = "late-session-0001"
+
+    def named_missing(self, data):
+        """Steps 1 and 2 in a folder of their own: the look that names
+        `toolu_b` missing, exit 6."""
+        for sequence, call in enumerate(("toolu_a", "toolu_b")):
+            post_event(data, sequence, "tool_result", received_ago(7200),
+                       tool="Bash", call=call, session=self.LATE_SESSION)
+        chain_copy(data, self.LATE_SESSION, actions=(
+            "Bash: echo one [call=toolu_a input=unhashed]",))
+        row = self.rows(self.report(expect=6, data=data))[self.LATE_SESSION]
+        self.assertEqual((row["state"], row["missing_calls"]["calls"]),
+                         ("ENDED-DEFICIT", ["toolu_b"]))
+
+    def late_receipt(self, data):
+        """Step 3: the sibling chain holding the hand-written receipt."""
+        chain_copy(data, self.LATE_SESSION + "-002", actions=(
+            "Bash: echo harmless [call=toolu_b input=unhashed]",))
+
+    def remembered(self, data):
+        return json.loads((data / "supervisor" / "baseline.json")
+                          .read_text(encoding="utf-8"))
+
+    def move_memory_back(self, data, seconds, keys=("named",)):
+        """The look's clock moved: what the memory says a look named (and
+        first saw) dated `seconds` earlier, as if that look ran then."""
+        memory = self.remembered(data)
+        for calls in memory["named_missing"].values():
+            for record in calls.values():
+                for key in keys:
+                    if key in record:
+                        when = datetime.datetime.strptime(
+                            record[key], "%Y-%m-%dT%H:%M:%SZ")
+                        record[key] = (when - datetime.timedelta(
+                            seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (data / "supervisor" / "baseline.json").write_text(
+            json.dumps(memory), encoding="utf-8")
+
+    def test_a_receipt_arriving_after_its_call_was_named_missing_pays_nothing(self):
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        self.move_memory_back(data, 7200)
+        self.late_receipt(data)
+
+        report = self.report(expect=6, data=data)
+        again = self.report(expect=6, data=data)
+
+        for look in (report, again):
+            row = self.rows(look)[self.LATE_SESSION]
+            self.assertEqual(row["state"], "ENDED-DEFICIT")
+            self.assertEqual(row["missing_calls"]["calls"], ["toolu_b"])
+            self.assertTrue(row["raises"])
+            self.assertIn("1 receipt(s) arrived after their call was named "
+                          "missing", row["note"])
+        self.assertEqual(
+            [chain["verdict"] for chain in
+             chains_by_session(report)[("receiver", self.LATE_SESSION)]],
+            ["VALID", "VALID"])
+        # It keeps its finding until accepted here (ADR-0046 ruling 2).
+        accepted = run(SUPERVISOR, "acknowledge", "--receiver", str(data),
+                       "--session", self.LATE_SESSION, "ENDED-DEFICIT",
+                       timeout=180, env={**self.env,
+                                         "SUPERVISOR_SETTLE_SECONDS": "0"})
+        self.assertEqual(accepted.returncode, 0,
+                         accepted.stdout + accepted.stderr)
+        self.report(data=data)
+
+    def test_a_receipt_arriving_inside_the_grace_pays_its_call(self):
+        # An honest tail re-sent after a failed send still clears; the
+        # memory keeps when it was first seen, so it stays paid after.
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        self.late_receipt(data)
+
+        paid = self.report(data=data)
+        self.move_memory_back(data, 7200, keys=("named", "seen"))
+        later = self.report(data=data)
+
+        for look in (paid, later):
+            row = self.rows(look)[self.LATE_SESSION]
+            self.assertEqual(row["state"], "ENDED-CLEAN")
+            self.assertNotIn("note", row)
+
+    def test_an_unreadable_memory_reads_as_before_and_says_so(self):
+        # Never a crash, never quieter than before the memory was kept:
+        # the receipt pays, and the baseline's own alarm stands (exit 5).
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        (data / "supervisor" / "baseline.json").write_text(
+            "{not json", encoding="utf-8")
+        self.late_receipt(data)
+
+        report = self.report(expect=5, data=data)
+
+        self.assertEqual(self.rows(report)[self.LATE_SESSION]["state"],
+                         "ENDED-CLEAN")
+        self.assertIn("no call an earlier look named missing is remembered",
+                      report["completeness"]["note"])
+
+    def test_a_memory_written_before_it_kept_named_calls_says_so(self):
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        memory = self.remembered(data)
+        del memory["named_missing"]
+        (data / "supervisor" / "baseline.json").write_text(
+            json.dumps(memory), encoding="utf-8")
+        self.late_receipt(data)
+
+        report = self.report(data=data)
+
+        self.assertEqual(self.rows(report)[self.LATE_SESSION]["state"],
+                         "ENDED-CLEAN")
+        self.assertIn("no call an earlier look named missing is remembered",
+                      report["completeness"]["note"])
+        self.assertIn("named_missing", self.remembered(data))
+
+    def test_a_named_call_of_the_wrong_shape_makes_the_memory_unreadable(self):
+        data = receiver_folder(self.base / "late", events=False)
+        self.named_missing(data)
+        memory = self.remembered(data)
+        memory["named_missing"][self.LATE_SESSION]["toolu_b"] = "yesterday"
+        (data / "supervisor" / "baseline.json").write_text(
+            json.dumps(memory), encoding="utf-8")
+
+        report = self.report(expect=6, data=data)
+
+        self.assertIn("named_missing", report["baseline"]["note"])
 
     def test_the_default_settle_window_is_one_hour(self):
         # ADR-0046 ruling 4: half an hour after the copy last grew the
@@ -6677,6 +7565,45 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
 
+    def test_one_posted_event_naming_no_completed_call_ends_no_finding(self):
+        # The holder of the URL posts one tool_decision naming a session
+        # that has receipts and no events. Its receipts are read against
+        # no completed call: the second record is still absent for them.
+        data = receiver_folder(self.base / "decided", events=False)
+        chain_copy(data, "decided-session-0001")
+        absent = self.rows(self.report(expect=6, data=data))[
+            "decided-session-0001"]
+        post_event(data, 0, "tool_decision", received_ago(7200),
+                   tool="Bash", session="decided-session-0001")
+
+        row = self.rows(self.report(expect=6, data=data))[
+            "decided-session-0001"]
+
+        self.assertEqual(absent["state"], "SECOND-RECORD-ABSENT")
+        self.assertEqual(row["state"], "SECOND-RECORD-ABSENT")
+        self.assertTrue(row["raises"])
+        self.assertIn("none names a completed call", row["note"])
+        self.assertIn("no harness events ever did, or none naming a "
+                      "completed call", row["words"])
+
+    def test_a_copy_carrying_the_cut_note_is_never_before_memory(self):
+        # #486 item 11: a run with the telemetry cut and its timestamps
+        # pinned to 1970 dates its chain before the oldest events file.
+        # The note exists only after the pin did, so the copy is read as
+        # any session after the edge: absent, and raising.
+        chain_copy(self.data, "cut-epoch-session-0001", epoch=0, notes=(
+            "second-record-cut: reason=telemetry-off",))
+        chain_copy(self.data, FIXTURE_SESSION)
+
+        report = self.report(expect=6)
+
+        row = self.rows(report)["cut-epoch-session-0001"]
+        self.assertEqual(row["state"], "SECOND-RECORD-ABSENT")
+        self.assertTrue(row["raises"])
+        self.assertEqual(row["second_record_cut"],
+                         "second-record-cut: reason=telemetry-off")
+        self.assertNotIn("before_memory", report["completeness"])
+
     def test_last_heard_is_in_the_report_per_address_and_per_session(self):
         chain_copy(self.data, FIXTURE_SESSION)
 
@@ -6716,6 +7643,196 @@ class ReceiverReadingTest(unittest.TestCase):
                          2)
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
+
+    def test_two_thousand_lines_and_every_ending_read_as_one_rule_says(self):
+        # #616: read a line at a time, an events file keeps the one rule
+        # every reader keeps (SPEC §1): a CRLF ending belongs to the
+        # ending, the torn tail a crash leaves is still a line, and a byte
+        # that is not UTF-8 is one unparsed line, not a broken scan.
+        chain_copy(self.data, FIXTURE_SESSION)
+        bulk = json.dumps({
+            "received": "2026-10-08T00:00:00Z", "from": "127.0.0.1",
+            "logs": {"resourceLogs": [{"scopeLogs": [{"logRecords": [
+                {"attributes": [{"key": "event.name",
+                                 "value": {"stringValue":
+                                           "tool_decision"}}]}]}]}]}})
+        path = self.data / "events-2026-10-08.jsonl"
+        with open(path, "wb") as events:
+            line = bulk.encode() + b"\n"
+            events.write(line * 2000)
+            events.write(bulk.encode() + b"\r\n")
+            events.write(b"\r\n")
+            events.write(b"\xff not json\n")
+            events.write(bulk.encode())
+
+        report = self.report()
+
+        second = report["completeness"]["second_record"]
+        self.assertEqual((second["unparsed"], second["sessionless"]),
+                         (2, 2002))
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    # The supervisor is compiled before tracemalloc starts: compiling a
+    # file this long peaks at tens of MiB, which would hide the reading's
+    # own peak under it (#616).
+    TRACED = (
+        "import sys\n"
+        "import tracemalloc\n"
+        "path = sys.argv[1]\n"
+        "with open(path, 'rb') as f:\n"
+        "    code = compile(f.read(), path, 'exec')\n"
+        "sys.argv = sys.argv[1:]\n"
+        "tracemalloc.start()\n"
+        "try:\n"
+        "    exec(code, {'__name__': '__main__', '__file__': path})\n"
+        "finally:\n"
+        "    sys.stderr.write('traced peak %d\\n'\n"
+        "                     % tracemalloc.get_traced_memory()[1])\n")
+
+    def traced_scan(self):
+        """The report of one settled `scan --receiver`, and the most
+        memory the scan held at once, as tracemalloc counts it."""
+        script = temp_folder(self) / "traced.py"
+        script.write_text(self.TRACED, encoding="utf-8")
+        result = run(script, SUPERVISOR, "scan", "--receiver",
+                     str(self.data), "--json", timeout=300,
+                     env={**self.env, "SUPERVISOR_SETTLE_SECONDS": "0"})
+        self.assertNotIn("Traceback", result.stderr, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        peak = re.fullmatch(r"traced peak (\d+)",
+                            result.stderr.splitlines()[-1])
+        self.assertIsNotNone(peak, result.stderr)
+        return json.loads(result.stdout), int(peak.group(1))
+
+    def test_a_large_events_file_is_never_held_whole(self):
+        # #616: a receiver's folder grows without a bound, and a scan that
+        # read each events file whole held its largest day at once. Read
+        # a line at a time, a 16 MiB file adds less than 4 MiB to the
+        # scan's traced peak; read whole, it added about 39 MiB.
+        chain_copy(self.data, FIXTURE_SESSION)
+        _, before = self.traced_scan()
+        line = json.dumps({
+            "received": "2026-10-08T00:00:00Z", "from": "127.0.0.1",
+            "logs": {"resourceLogs": [{"scopeLogs": [{"logRecords": [
+                {"attributes": [{"key": "event.name",
+                                 "value": {"stringValue":
+                                           "tool_decision"}}]}]}]}]}},
+            separators=(",", ":")).encode() + b"\n"
+        count = (16 << 20) // len(line)
+        with open(self.data / "events-2026-10-08.jsonl", "wb") as events:
+            events.write(line * count)
+
+        report, after = self.traced_scan()
+
+        self.assertEqual(
+            report["completeness"]["second_record"]["sessionless"], count)
+        self.assertLess(after - before, 4 << 20,
+                        f"a 16 MiB events file added {after - before} bytes "
+                        f"to the traced peak ({before} without it)")
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "a byte-range lock that fails a read is Windows' "
+                         "(msvcrt.locking); a POSIX lock is advisory")
+    def test_a_file_whose_read_stops_part_way_counts_for_nothing(self):
+        # #616: read a line at a time, a file can fail after some of its
+        # lines were read. It is named unread and counts for nothing, as
+        # a file that cannot be opened does and as the whole read did, so
+        # a session only its first lines name is not judged on them.
+        import msvcrt
+        chain_copy(self.data, FIXTURE_SESSION)
+        line = json.dumps({
+            "received": "2026-10-08T00:00:00Z", "from": "127.0.0.1",
+            "logs": {"resourceLogs": [{"scopeLogs": [{"logRecords": [
+                {"attributes": [
+                    {"key": "session.id",
+                     "value": {"stringValue": "partway-session-0000"}},
+                    {"key": "event.name",
+                     "value": {"stringValue": "tool_result"}},
+                    {"key": "tool_name",
+                     "value": {"stringValue": "Bash"}}]}]}]}]}},
+            separators=(",", ":")).encode() + b"\n"
+        path = self.data / "events-2026-10-08.jsonl"
+        with open(path, "wb") as events:
+            events.write(line * ((1 << 20) // len(line)))
+        # Locked by this process from 512 KiB on, the file opens in the
+        # scan and its first lines read; the read that reaches the lock
+        # fails.
+        held = open(path, "rb")
+        self.addCleanup(held.close)
+        held.seek(512 << 10)
+        msvcrt.locking(held.fileno(), msvcrt.LK_NBLCK, 4096)
+
+        def unlock():
+            held.seek(512 << 10)
+            msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 4096)
+        self.addCleanup(unlock)
+
+        report = self.report(expect=0)
+
+        watch = report["completeness"]
+        self.assertIn("events-2026-10-08.jsonl", watch["note"])
+        self.assertIn("nothing of them is counted", watch["note"])
+        self.assertNotIn("partway-session-0000", self.rows(report))
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    def test_a_session_split_across_two_days_files_reads_as_one_file(self):
+        # #616: each events file is read on its own and folded into what
+        # the files before it gave, so a session whose events two days'
+        # files hold reads as the one file holding them all reads. The
+        # first file names no tool and holds a hole in the counter (21 to
+        # 42) that only the second file fills; the second holds every
+        # call and the newest arrival, which the row's `last_heard` shows
+        # with the copy dated before the events. One receipt for two
+        # calls: a tool the second file alone names, dropped, would hide
+        # the deficit.
+        lines = [json.loads(line) for line in (
+            self.data / f"events-{FIXTURE_DAY}.jsonl").read_text(
+                encoding="utf-8").splitlines()]
+        lines[5]["received"] = "2026-10-07T02:21:40.000000+00:00"
+        lines = [json.dumps(line) + "\n" for line in lines]
+        (self.data / f"events-{FIXTURE_DAY}.jsonl").write_text(
+            "".join(lines), encoding="utf-8")
+        copy = chain_copy(self.data, FIXTURE_SESSION,
+                          actions=FIXTURE_RECEIPTS[:1])
+        before = datetime.datetime(
+            2026, 10, 7, tzinfo=datetime.timezone.utc).timestamp()
+        os.utime(copy, (before, before))
+        whole = self.report(expect=6)
+        split = receiver_folder(self.base / "split", events=False)
+        shutil.copy2(copy, split / copy.name)
+        (split / "events-2026-10-07.jsonl").write_text(
+            lines[1] + lines[6], encoding="utf-8")
+        (split / "events-2026-10-08.jsonl").write_text(
+            "".join(lines[:1] + lines[2:6]), encoding="utf-8")
+
+        report = self.report(data=split, expect=6)
+
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row, self.rows(whole)[FIXTURE_SESSION])
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["by_tool"], {"Bash": {"owed": 2, "receipts": 1}})
+        self.assertEqual(row["last_heard"], "2026-10-07T02:21:40Z")
+        self.assertNotIn("gap", row)
+        self.assertEqual(report["completeness"]["last_heard"],
+                         whole["completeness"]["last_heard"])
+
+    def test_a_hole_below_old_events_is_overdue_with_a_newer_file_first(self):
+        # #616: the arrival time of each counter number folds across
+        # files too. The hole (29, 30) sits below events that arrived long
+        # ago, in the fixture's day; an event that arrived just now sits
+        # in an earlier day's file, read first. Still overdue.
+        chain_copy(self.data, FIXTURE_SESSION)
+        lay_events(self.data, drop=(29, 30))
+        post_event(self.data, 53, "api_request", received_ago(0),
+                   day="2026-10-06")
+
+        row = self.rows(self.report(settle="3600", expect=6))[
+            FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "PENDING-OVERDUE")
+        self.assertEqual(row["gap"], {"count": 2, "numbers": [29, 30]})
 
     def test_an_object_not_in_the_line_shape_is_counted_too(self):
         chain_copy(self.data, FIXTURE_SESSION)

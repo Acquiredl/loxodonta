@@ -69,8 +69,10 @@ def main(argv):
     text = build()
     # Text mode on both sides, so a checkout's line endings are not a
     # difference. A current copy is left alone rather than rewritten: a
-    # Windows checkout holds it with CRLF, and the same text written back
-    # as LF reads as modified to git status with an empty diff (#389).
+    # Windows checkout made before .gitattributes held the tool files as
+    # LF (#622) still holds it with CRLF until it is checked out again,
+    # and the same text written back as LF reads as modified to git
+    # status with an empty diff (#389).
     current = (VERIFIER.read_text(encoding="utf-8")
                if VERIFIER.exists() else None)
     if current == text:

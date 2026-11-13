@@ -977,9 +977,11 @@ class HeadlessKeeperTest(ReceiverFixture):
 
         # A publish cadence in force, so the clock turns, and a day's
         # cadence, so no head in this fresh root is ripe: what reaches
-        # the calendar reaches it on the anchor keeper's upgrade alone.
+        # the calendar reaches it on the anchor keeper's upgrade alone,
+        # which asks a calendar `serve --calendar` names (#415).
         self.serve("--publish-every", "1d", "--publish-url",
-                   self.receiver.url, SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
+                   self.receiver.url, "--calendar", calendar.url,
+                   SUPERVISOR_KEEPER_TICK_SECONDS="0.5",
                    SUPERVISOR_SCAN_TTL_SECONDS="0")
         self.wait_for(lambda: bool(calendar.polled),
                       missing="the calendar was never asked")
@@ -1182,14 +1184,39 @@ class HeadlessKeeperTest(ReceiverFixture):
         self.assertEqual(rest, "", "the same failure said on every tick")
         self.assertEqual(self.receiver.received, [])
 
-    def test_with_no_cadence_in_force_no_tick_turns_at_all(self):
-        # No flag, and a store whose marker names no profile: nothing is
-        # sent, and the baseline is never written, which is the proof
-        # that no scan ran — a `serve` nobody polls does what it always
-        # did, exactly nothing.
+    def test_a_watch_look_that_cannot_finish_is_said_once_and_it_runs_on(self):
+        # #281: the watch's clock is the keeper's, on a slower tick, and
+        # fails the same way: one line naming whose clock, no traceback,
+        # and the server alive.
+        home = self.root / "storehome"
+        home.write_text("not a folder\n", encoding="utf-8")
+
+        self.serve(store=True, LOXODONTA_HOME=str(home),
+                   SUPERVISOR_WATCH_TICK_SECONDS="0.1",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0")
+        said = read_line_within(self.proc.stderr)
+        time.sleep(2)  # many more turns, each failing the same way
+        alive = self.proc.poll() is None
+        self.proc.kill()
+        _, rest = self.proc.communicate(timeout=30)
+
+        self.assertRegex(
+            said, r"^error: the watch's scan did not finish: \w*Error")
+        self.assertNotIn("Traceback", said)
+        self.assertNotIn(str(self.root), said)
+        self.assertTrue(alive, "the failure took the server down")
+        self.assertEqual(rest, "", "the same failure said on every tick")
+
+    def test_with_no_cadence_and_the_watch_off_no_tick_turns_at_all(self):
+        # No flag, a store whose marker names no profile, and the watch's
+        # clock turned off (#281): nothing is sent, and the baseline is
+        # never written, which is the proof that no scan ran — `serve`
+        # as it was before the watch had a clock, a page waiting to be
+        # opened.
         log = make_chain(self.root / "alpha" / "receipts", "sess-quiet")
 
-        self.serve(SUPERVISOR_KEEPER_TICK_SECONDS="0.2")
+        self.serve(SUPERVISOR_KEEPER_TICK_SECONDS="0.2",
+                   SUPERVISOR_WATCH_TICK_SECONDS="0")
         quiet_until = time.monotonic() + 3
         while time.monotonic() < quiet_until:
             self.assertEqual(self.receiver.received, [])
@@ -1197,9 +1224,42 @@ class HeadlessKeeperTest(ReceiverFixture):
 
         self.assertIn("anchor off", self.said)
         self.assertIn("publish off", self.said)
+        self.assertIn("watch: none of its own "
+                      "(SUPERVISOR_WATCH_TICK_SECONDS=0)", self.said)
         self.assertEqual(memo_of(log), [])
         self.assertFalse((self.root / BASELINE_NAME).exists(),
-                         "a scan ran with no keeper cadence to run it for")
+                         "a scan ran with no clock to run it for")
+
+    def test_with_no_cadence_the_watch_looks_and_sends_nothing(self):
+        # #281: the watch's clock looks as a request does, and a request
+        # sends nothing no flag or profile asked for. The head here is
+        # the bait: `--publish-every 0s` would send it on the first turn.
+        log = make_chain(self.root / "alpha" / "receipts", "sess-watched")
+        baseline = self.root / BASELINE_NAME
+
+        def scanned():
+            try:
+                return json.loads(baseline.read_text(
+                    encoding="utf-8"))["scanned"]
+            except (OSError, ValueError, KeyError):
+                return None
+
+        self.serve(SUPERVISOR_WATCH_TICK_SECONDS="0.2",
+                   SUPERVISOR_SCAN_TTL_SECONDS="0")
+        self.wait_for(lambda: scanned() is not None,
+                      missing="the watch never looked")
+        first = scanned()
+        # A later look too, so this is the clock and not one turn.
+        self.wait_for(lambda: scanned() not in (None, first),
+                      missing="the watch looked once and stopped")
+        self._stop()
+
+        self.assertIn("anchor off", self.said)
+        self.assertIn("publish off", self.said)
+        self.assertIn("watch: a look of its own every 0.2s", self.said)
+        self.assertEqual(self.receiver.received, [])
+        self.assertEqual(memo_of(log), [])
+        self.assertFalse(Path(str(log) + ".anchors.jsonl").exists())
 
 
 class ProfileKeeperTest(unittest.TestCase):
@@ -1386,6 +1446,71 @@ class ProfileKeeperTest(unittest.TestCase):
                          "the same turn anchored the ripe head")
         self.assertEqual(len(authority.received), 1)
         self.assertEqual([row["head"] for row in self.tokens_of(log)], [head])
+
+    def stamp_note(self, session, url, torn=False, folder=False):
+        """The anchor row's note after one tick of `serve` following a
+        marker that names `url` as the authority (#589 item 9): a ripe
+        head, `torn` with a half-written line after it, or with a
+        `folder` at the stamps sidecar's name. The keeper's own clock
+        takes the first turn, and its scan answers no request, so the
+        request's look is made a turn too: the note is said on a turn's
+        row and nowhere else."""
+        self.install("--profile", "timestamped", "--authority", url)
+        log = self.aged_chain(session, age=7 * 3600)
+        if torn:
+            with open(log, "a", encoding="utf-8", newline="\n") as f:
+                f.write('{"n":2,"half-written')
+        if folder:
+            Path(str(log) + ".stamps.jsonl").mkdir()
+        self.serve(SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+        status = self.tick()
+        self.said_at_startup()
+        (chain,) = chains_by_session(status)[("alpha", session)]
+        return chain["anchors"].get("note", "")
+
+    def test_a_granted_token_leaves_no_stamp_note(self):
+        authority = self.authority()
+
+        note = self.stamp_note("sess-granted", authority.url)
+
+        self.assertEqual(len(authority.received), 1)
+        self.assertNotIn("stamp", note)
+
+    def test_an_authority_that_refuses_is_said_to_grant_no_token(self):
+        authority = self.authority()
+        authority.status_code = 500
+
+        note = self.stamp_note("sess-refused", authority.url)
+
+        self.assertTrue(authority.received)
+        self.assertIn("stamping failed — the authority did not grant a token "
+                      "for this head; it stays unstamped and the keeper will "
+                      "try again", note)
+
+    def test_an_unreachable_authority_is_said_to_grant_no_token(self):
+        note = self.stamp_note("sess-unreached", "http://127.0.0.1:1/tsr")
+
+        self.assertIn("stamping failed — the authority did not grant a token",
+                      note)
+
+    def test_a_token_that_cannot_be_written_is_said_so(self):
+        authority = self.authority()
+
+        note = self.stamp_note("sess-unwritten", authority.url, folder=True)
+
+        self.assertTrue(authority.received)
+        self.assertIn("stamping failed — the token could not be written "
+                      "beside the chain", note)
+        self.assertNotIn("did not grant", note)
+
+    def test_a_head_the_recorder_refuses_to_stamp_is_its_refusal(self):
+        authority = self.authority()
+
+        note = self.stamp_note("sess-torn", authority.url, torn=True)
+
+        self.assertEqual(authority.received, [])
+        self.assertIn("the recorder refused to stamp this head", note)
+        self.assertNotIn("authority", note.lower())
 
     def test_a_head_that_already_holds_a_token_is_not_asked_about_again(self):
         # One head, one token: the keeper skips a head the sidecar

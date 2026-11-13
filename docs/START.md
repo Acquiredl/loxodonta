@@ -89,7 +89,7 @@ since Codex caps its session-end hook):
 
 ```
   local        receipts stay on this machine. Edits to history are caught; a regenerated chain only against a head you keep (`head`, then `verify --expect-head`).
-  timestamped  --profile timestamped   a 32-byte digest leaves at each session end; regeneration is caught once the anchor matures.
+  timestamped  --profile timestamped   a 32-byte digest leaves at each session end; regeneration is caught once the anchor matures, for the entries up to the anchored head.
   full         --profile full --remote URL   head and receipts go to a remote you name; a wiped log survives there as of the last send.
 ```
 

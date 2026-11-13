@@ -16,7 +16,10 @@ verdict the copy reached differently from the recorder fails there.
 
 import ast
 import builtins
+import hashlib
 import importlib
+import json
+import shutil
 import symtable
 import sys
 import unittest
@@ -134,6 +137,144 @@ class TheBuildTest(unittest.TestCase):
         checked = run(self.root / "tools" / "build_verifier.py", "--check")
         self.assertEqual(checked.returncode, 0,
                          checked.stdout + checked.stderr)
+
+
+class RecipientHintTest(unittest.TestCase):
+    """#588: a recipient runs verifier.py alone, so a line that names a
+    recorder verb says whose step it is, one wording in both files: the
+    operator's, on the machine that holds the chain, or, for a package's
+    manifest, whoever holds the recorder. `head` sends the reader to
+    `verify`, which both files have."""
+
+    VECTORS = REPO_ROOT / "tests" / "vectors"
+    OPERATOR = "on the machine that holds the chain, the operator can run "
+
+    def setUp(self):
+        self.work = temp_folder(self)
+
+    def verifier(self, *args):
+        return run(VERIFIER, *args, cwd=self.work, timeout=60)
+
+    def copied(self, *names):
+        for name in names:
+            shutil.copyfile(self.VECTORS / name, self.work / name)
+
+    def pending_row(self, head, calendar=True):
+        """The vectors' pending proof, which replays from any digest,
+        over `head`, with its calendar or without one."""
+        row = json.loads((self.VECTORS / "anchor-pending.jsonl.anchors.jsonl")
+                         .read_text(encoding="utf-8"))
+        row["head"] = head
+        if not calendar:
+            del row["calendar"]
+        return json.dumps(row) + "\n"
+
+    def assert_no_bare_recorder_verb(self, line):
+        # Every recorder verb the line names is the operator's or the
+        # recorder holder's to run, never an instruction to the reader.
+        for verb in ("init", "anchor", "stamp", "verify"):
+            bare = f"run `loxodonta {verb}"
+            if bare in line:
+                self.assertTrue(
+                    f"the operator can {bare}" in line
+                    or "whoever holds the recorder can" in line, line)
+
+    def test_a_missing_chain_names_init_as_the_operators_step(self):
+        said = self.verifier("verify", "--log", "nowhere.jsonl")
+
+        self.assertEqual(said.returncode, 66, said.stderr)
+        self.assertEqual(said.stderr.strip(), "error: nowhere.jsonl not found "
+                         "— on the machine that will hold the chain, the "
+                         "operator can run `loxodonta init` first")
+
+    def test_a_missing_sidecar_names_anchor_and_stamp_as_the_operators(self):
+        self.copied("valid-chain.jsonl")
+
+        anchors = self.verifier("verify", "--anchors", "--log", "valid-chain.jsonl")
+        stamps = self.verifier("verify", "--stamps", "--log", "valid-chain.jsonl")
+
+        self.assertIn("NO-ANCHORS: valid-chain.jsonl.anchors.jsonl not found — "
+                      f"anchoring is optional; {self.OPERATOR}`loxodonta "
+                      "anchor` to add one", anchors.stdout.splitlines())
+        self.assertIn("NO-STAMPS: valid-chain.jsonl.stamps.jsonl not found — "
+                      "the authority timestamp is optional; "
+                      f"{self.OPERATOR}`loxodonta stamp --authority URL` to "
+                      "add one", stamps.stdout.splitlines())
+        for line in anchors.stdout.splitlines() + stamps.stdout.splitlines():
+            self.assert_no_bare_recorder_verb(line)
+
+    def test_a_pending_proof_names_the_upgrade_as_the_operators(self):
+        self.copied("anchor-pending.jsonl")
+        head = (self.VECTORS / "anchor-pending.jsonl").read_text(
+            encoding="utf-8").splitlines()[-1]
+        head = json.loads(head)["entry_hash"]
+        sidecar = self.work / "anchor-pending.jsonl.anchors.jsonl"
+        for calendar, advice in (
+                (True, f"{self.OPERATOR}`loxodonta anchor --upgrade`"),
+                (False, "`loxodonta anchor --upgrade` cannot complete it; "
+                        f"{self.OPERATOR}`loxodonta anchor --force` to submit "
+                        "the head again")):
+            with self.subTest(calendar=calendar):
+                sidecar.write_text(self.pending_row(head, calendar),
+                                   encoding="utf-8")
+
+                said = self.verifier("verify", "--anchors", "--log",
+                                     "anchor-pending.jsonl")
+
+                self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
+                (line,) = [line for line in said.stdout.splitlines()
+                           if line.startswith("ANCHOR-PENDING: ")]
+                self.assertTrue(line.endswith(f" — {advice}"), line)
+                self.assert_no_bare_recorder_verb(line)
+
+    def test_a_pending_manifest_anchor_names_whoever_holds_the_recorder(self):
+        package = self.work / "package"
+        shutil.copytree(self.VECTORS / "package-anchored", package)
+        digest = hashlib.sha256(
+            (package / "manifest.json").read_bytes()).hexdigest()
+        sidecar = package / "manifest.json.anchors.jsonl"
+        for calendar, advice in (
+                (True, "whoever holds the recorder can unpack the package and "
+                       "run `loxodonta anchor --upgrade --manifest=<its "
+                       "manifest.json>` after a few hours"),
+                (False, "`loxodonta anchor --upgrade` cannot complete it; "
+                        "whoever holds the recorder can run `loxodonta anchor "
+                        "--force --manifest=<its manifest.json>` to submit "
+                        "the manifest again")):
+            with self.subTest(calendar=calendar):
+                sidecar.write_text(self.pending_row(digest, calendar),
+                                   encoding="utf-8")
+
+                said = self.verifier("verify-package", str(package))
+
+                self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
+                (line,) = [line for line in said.stdout.splitlines()
+                           if line.startswith("seal anchor: ANCHOR-PENDING: ")]
+                self.assertIn(f" — {advice}; the rung is not earned", line)
+                self.assert_no_bare_recorder_verb(line)
+
+    def test_head_on_a_chain_with_no_head_sends_the_reader_to_verify(self):
+        self.copied("tail-torn.jsonl", "valid-chain.jsonl")
+        lines = (self.work / "valid-chain.jsonl").read_text(
+            encoding="utf-8").splitlines()
+        last = json.loads(lines[-1])
+        last["entry_hash"] = last["entry_hash"].upper()
+        lines[-1] = json.dumps(last)
+        (self.work / "not-hex.jsonl").write_text(
+            "".join(line + "\n" for line in lines), encoding="utf-8")
+        for log, why in (
+                ("tail-torn.jsonl", "has a damaged tail — run `verify` on it "
+                                    "for the verdict (a damaged tail has no "
+                                    "head to record)"),
+                ("not-hex.jsonl", "ends in an entry whose entry_hash is not "
+                                  "a chain head — run `verify` on it for the "
+                                  "verdict")):
+            with self.subTest(log=log):
+                said = self.verifier("head", "--log", log)
+
+                self.assertEqual(said.returncode, 1, said.stderr)
+                self.assertEqual(said.stdout, "")
+                self.assertEqual(said.stderr.strip(), f"error: {log} {why}")
 
 
 # The classes that exercise `head`, `verify` and `verify-package`, by

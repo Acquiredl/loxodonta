@@ -406,3 +406,28 @@ quiet.
   2026-09-19; #212 holds ruling 7; #379 (the worktree guard's
   refusal, ruled 2026-09-30, the addendum above; its option (c) held
   for its own grill).
+
+## Addendum, 2026-11-12: on 2.1.287 a failed call fires both events, and the witness does not read the hook's attachments
+
+*Drafted for the author to confirm (#476, #212).* This ADR wired
+`PostToolUseFailure` on the reading that `PostToolUse` does not fire
+for a call that failed. #476 measured otherwise on 2026-10-06 (Claude
+Code 2.1.287, Windows, loxodonta 0.13.0, the hook in the managed file),
+one headless session running three commands: one that succeeded left
+one receipt; one that ran and exited 3 left two, `PostToolUseFailure`
+and then `PostToolUse` for the same call; and one a deny rule refused,
+which never ran, left one, `PostToolUse`. Whether a hook fires, and
+how many times, depends on the harness version. Nothing is hidden by
+it: an extra receipt is a surplus, never a deficit.
+
+Since ADR-0047 a receipt carries its call's id, and since pull
+request #635 the reading at the receiver pays at most one receipt per id: a
+second receipt repeating an id already paid, as a failed call's two
+hooks leave, is counted apart, neither surplus nor deficit (ADR-0046,
+its addendum of this date, ruling 2). A refused call's receipt still
+reads as a surplus there, and on the agent's machine receipts are
+still paired by count within each tool (ruling 2).
+
+Ruling 7's hold ends with the author's ruling on #212: the witness
+does not read the transcript's `hook_success` attachments. `may_owe`,
+and ruling 2's price, stand.

@@ -646,6 +646,17 @@ class HookTest(unittest.TestCase):
             (vault / "receipts-sess-1234abcd.jsonl").exists()
         )
 
+    def test_the_help_names_the_stores_drawer_as_the_default(self):
+        # The default moved to the store with ADR-0011; the help still
+        # named $CLAUDE_PROJECT_DIR/receipts.
+        said = " ".join(run(LOXODONTA, "hook", "--help", env=isolated_env(
+            temp_folder(self))).stdout.split())
+
+        self.assertNotIn("$CLAUDE_PROJECT_DIR/receipts", said)
+        self.assertIn("the store's drawer for the project in "
+                      "$CLAUDE_PROJECT_DIR, or in the payload's cwd when "
+                      "that is unset", said)
+
 
 class HookWorktreeTest(unittest.TestCase):
     """A session run in a git worktree must leave its chain in its main
@@ -822,6 +833,30 @@ class HookWorktreeTest(unittest.TestCase):
         self.assertIn("could not be written", said)
         self.assertIn("no entry was written", said)
 
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs folders this user may not list or write")
+    def test_an_unlistable_store_and_a_closed_drawer_print_the_refusal_alone(
+            self):
+        # #589 item 7: two faults at once. The drawer the session falls
+        # back to exists and takes no new file, so the receipt goes
+        # nowhere, and "this receipt goes to" that drawer must not be said.
+        receipts, elsewhere = self.unlistable_store()
+        os.chmod(receipts, 0o755)
+        run_hook(payload(session="sess-other"), self.workdir,
+                 extra_env=self.env_for(elsewhere))
+        drawer = drawer_of(self.store, "beta")
+        os.chmod(drawer, 0o500)
+        self.addCleanup(os.chmod, drawer, 0o755)
+        os.chmod(receipts, 0o300)
+
+        result = run_hook(
+            payload(session="sess-split", tool="Bash",
+                    tool_input={"command": "ls"}),
+            self.workdir, extra_env=self.env_for(elsewhere))
+
+        self.assert_refused_by_name(result)
+        self.assertNotIn("this receipt goes to", result.stderr)
+
     def test_a_file_at_a_store_folders_name_is_refused_by_name(self):
         # #555: the first receipt of a session whose drawer does not
         # exist yet makes the drawer, and a file in the way of it, at the
@@ -838,6 +873,9 @@ class HookWorktreeTest(unittest.TestCase):
                 self.workdir, extra_env=self.env_for(project))
 
             self.assert_refused_by_name(result)
+            # #589 item 6: Windows said "cannot find the path specified".
+            self.assertIn(f"a file stands at {receipts}, where a folder "
+                          "should be", result.stderr)
             self.assertEqual(receipts.read_text(encoding="utf-8"),
                              "in the way\n")
         receipts.unlink()
@@ -853,6 +891,8 @@ class HookWorktreeTest(unittest.TestCase):
                 self.workdir, extra_env=self.env_for(project))
 
             self.assert_refused_by_name(result)
+            self.assertIn(f"a file stands at {drawer}, where a folder "
+                          "should be", result.stderr)
             self.assertEqual(drawer.read_text(encoding="utf-8"),
                              "in the way\n")
 
@@ -1787,19 +1827,59 @@ class ReceiptSuffixTest(unittest.TestCase):
             "path": "good.ipynb",
             "sha256": hashlib.sha256(good.read_bytes()).hexdigest()}])
 
-    def test_report_folds_the_suffix_and_the_chain_keeps_it(self):
-        # A listing for a person leaves the suffix out; the line in the
-        # chain is whole (ADR-0047).
-        self.hook(self.call(tool_input=self.INPUT, call="toolu_5"))
+    FOLDED_NOTE = "a line ending [...] is listed without its last group"
 
+    def report(self):
         report = run(LOXODONTA, "report", "--log",
                      "receipts-sess-1234abcd.jsonl", cwd=self.workdir)
-
         self.assertEqual(report.returncode, 0, report.stderr)
-        (row,) = [line for line in report.stdout.splitlines()
+        return report.stdout
+
+    def test_report_folds_the_suffix_and_the_chain_keeps_it(self):
+        # A listing for a person leaves the suffix out and marks the line
+        # it shortened; the line in the chain is whole (ADR-0047, #619).
+        self.hook(self.call(tool_input=self.INPUT, call="toolu_5"))
+
+        out = self.report()
+
+        (row,) = [line for line in out.splitlines()
                   if "claude-code:" in line]
-        self.assertTrue(row.endswith("  claude-code: Bash: echo hi"), row)
+        self.assertTrue(row.endswith("  claude-code: Bash: echo hi [...]"),
+                        row)
+        self.assertIn(self.FOLDED_NOTE, out)
         self.assertTrue(self.actions()[1].endswith(" bytes=47]"))
+
+    def test_report_marks_a_hand_written_line_ending_in_a_suffix(self):
+        # #619: nothing in an entry the writer cannot set tells a hook's
+        # receipt from a line logged by hand, the actor included, so a
+        # hand-written group is folded and marked like the hook's.
+        self.hook(self.call(tool_input=self.INPUT, call="toolu_5"))
+        group = f"[call=toolu_x input sha256={self.DIGEST} bytes=72]"
+        logged = run(LOXODONTA, "log", "--log", "receipts-sess-1234abcd.jsonl",
+                     "--actor", "claude-code", "--action",
+                     f"Bash: rm -rf build {group}", cwd=self.workdir)
+        self.assertEqual(logged.returncode, 0, logged.stderr)
+
+        out = self.report()
+
+        self.assertIn("  claude-code: Bash: rm -rf build [...]\n", out)
+        self.assertIn(self.FOLDED_NOTE, out)
+        self.assertEqual(self.actions()[2], f"Bash: rm -rf build {group}")
+
+    def test_report_of_lines_without_a_suffix_has_no_mark(self):
+        made = run(LOXODONTA, "init", "--log", "receipts-sess-1234abcd.jsonl",
+                   cwd=self.workdir)
+        self.assertEqual(made.returncode, 0, made.stderr)
+        logged = run(LOXODONTA, "log", "--log", "receipts-sess-1234abcd.jsonl",
+                     "--actor", "agent", "--action", "wrote [notes]",
+                     cwd=self.workdir)
+        self.assertEqual(logged.returncode, 0, logged.stderr)
+
+        out = self.report()
+
+        self.assertIn("  agent: wrote [notes]\n", out)
+        self.assertNotIn("[...]", out)
+        self.assertNotIn(self.FOLDED_NOTE, out)
 
     @unittest.skipIf(sys.platform == "win32",
                      "Windows cannot name a file with a colon in it")

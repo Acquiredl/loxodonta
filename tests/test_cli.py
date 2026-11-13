@@ -780,6 +780,42 @@ class HeadTest(ReceiptsCliTest):
                 self.assertNotIn("VALID", result.stderr)
                 self.assertEqual(verify.returncode, 1, verify.stdout)
 
+    def test_a_tail_whose_n_is_not_its_integer_line_number_has_no_head(self):
+        # #587 (review of #634): `head` prints only when the final line's n
+        # is an integer, never a boolean or a float, equal to its line
+        # number. 2.0 == 2 and True == 1 in Python, so such a tail printed
+        # a head on a chain the walk calls BROKEN; no n was refused, and
+        # stays refused. Each line is rehashed, so only n is wrong.
+        run(LOXODONTA, "init", cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1",
+            cwd=self.workdir)
+        run(LOXODONTA, "log", "--actor", "agent", "--action", "step 2",
+            cwd=self.workdir)
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        # (what the tail is, the line count, the change to the last line)
+        for name, count, change in (
+                ("no n", 3, lambda e: e.pop("n")),
+                ("n 2.0", 3, lambda e: e.update(n=2.0)),
+                ("n true on line 1", 2, lambda e: e.update(n=True))):
+            with self.subTest(tail=name):
+                last = json.loads(lines[count - 1])
+                change(last)
+                last.pop("entry_hash")
+                last["entry_hash"] = spec_hash(last)
+                chain = lines[:count - 1] + [json.dumps(last)]
+                self.log_path.write_text("\n".join(chain) + "\n",
+                                         encoding="utf-8")
+
+                for tool in (LOXODONTA, VERIFIER):
+                    head = run(tool, "head", cwd=self.workdir)
+                    verify = run(tool, "verify", cwd=self.workdir)
+
+                    self.assertEqual(head.returncode, 1,
+                                     head.stdout + head.stderr)
+                    self.assertEqual(head.stdout, "")
+                    self.assertIn("has a damaged tail", head.stderr)
+                    self.assertEqual(verify.returncode, 1, verify.stdout)
+
     def test_verify_expect_head_with_true_head_is_valid(self):
         run(LOXODONTA, "init", cwd=self.workdir)
         run(LOXODONTA, "log", "--actor", "agent", "--action", "step 1", cwd=self.workdir)
@@ -1296,6 +1332,22 @@ class TornTailTest(ReceiptsCliTest):
         self.assertIn("torn tail at line 3", result.stdout)
         self.assertIn("intact", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_torn_genesis_says_no_entry_is_intact(self):
+        # #589: the count was printed as a range, "entries 0..-1 intact",
+        # which names nothing. The verdict word and the exit stay.
+        genesis = self.log_path.read_text(encoding="utf-8").splitlines()[0]
+        self.log_path.write_text(genesis[:40], encoding="utf-8")
+
+        for tool in (LOXODONTA, VERIFIER):
+            with self.subTest(tool=tool.name):
+                result = run(tool, "verify", cwd=self.workdir)
+
+                self.assertEqual(result.returncode, 1,
+                                 result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip().splitlines()[-1],
+                                 "BROKEN: torn tail at line 0 (crash-"
+                                 "truncated append; no entry intact)")
 
     def test_torn_middle_line_is_ordinary_broken(self):
         self.truncate_line(2)
@@ -2376,6 +2428,35 @@ class TypedPathIsEscapedTest(ReceiptsCliTest):
         self.assert_escaped(result.stdout, "drawer\\u202e")
         self.assertIn("cannot be read as a project record: it is not JSON",
                       result.stdout)
+
+    def test_a_transcript_or_chain_file_the_reader_typed_is_named_escaped(self):
+        # #589: the TRANSCRIPT-UNRESOLVED lines and the note for a chain
+        # file that is not there printed the typed path raw. Shown with
+        # DEL, a control character every system takes in a file name.
+        vectors = REPO_ROOT / "tests" / "vectors"
+        (self.workdir / "folder\x7f").mkdir()
+        cases = [
+            (["--log", str(vectors / "transcript-commitment.jsonl"),
+              "--transcript", "gone\x7f.txt"],
+             "TRANSCRIPT-UNRESOLVED: no transcript at gone\\x7f.txt — "),
+            (["--log", str(vectors / "transcript-commitment.jsonl"),
+              "--transcript", "folder\x7f"],
+             "TRANSCRIPT-UNRESOLVED: folder\\x7f cannot be read as a "
+             "transcript: "),
+            (["--log", str(vectors / "stamp-kindless.jsonl"), "--stamps",
+              "--authority-chain", "gone\x7f.pem"],
+             "stamp not judged: --authority-chain gone\\x7f.pem not "
+             "found — "),
+        ]
+        for tool in (LOXODONTA, VERIFIER):
+            for args, words in cases:
+                with self.subTest(tool=tool.name, args=args[-1]):
+                    result = run(tool, "verify", *args, cwd=self.workdir)
+
+                    self.assertEqual(result.returncode, 0,
+                                     result.stdout + result.stderr)
+                    self.assertIn(words, result.stdout)
+                    self.assertNotIn("\x7f", result.stdout)
 
 
 class WriterExitTest(ReceiptsCliTest):

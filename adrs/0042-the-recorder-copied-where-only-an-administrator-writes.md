@@ -287,3 +287,15 @@ after an install from an administrator one:
   and its addendum (what single-file does and does not buy; `-I`),
   ADR-0037 (exit codes), ADR-0040 and its addendum of this date
 - `docs/CLAIMS.md`, `docs/HOOK.md`, `docs/DIRECTION.md` section 6
+
+## Addendum, 2026-11-12: the check follows each link, holds at the write, and names its places
+
+Drafted for the author to confirm (#574). Ruled by the author on 2026-11-12, on #576 and #574; the restatement is still the author's to give.
+
+Ruling 3 is narrowed and made to hold in three ways.
+
+1. **Each link, at every hop (#576).** On POSIX the check walked the path as written and the path resolved, so a link whose target folder held a second link escaped it: that folder was in neither walk. The check now follows the path one component and one link at a time, as the system resolves it, and judges every folder it enters, at every hop, and the file at the end. A link is judged by the folder that holds it. A path through more than 40 links, the kernel's own limit, fails.
+2. **At the write, not only before it (#574).** The installer judged the copy's folder and wrote into it about seventy lines later. On a path the check passes correctly nothing can change between the two, and on one a hole let through, a link put in place after the check redirected the copy. On POSIX the write now walks the folder as the check does, each folder held open from the moment it is judged and the next step taken inside it, and writes the copy through the folder it ended in, so what was judged is what is written. Where a system takes no folder for those calls, Windows among them, the check is asked again just before each write: the window is narrowed there, not closed.
+3. **Which Windows places pass (#574).** Under `Program Files`, `Program Files (x86)` and `Windows\System32` passes, each as the machine's registry names it and never as the environment does, since an account sets a user variable that an elevated shell inherits. Nothing else under the Windows folder passes. Under `System32` the folders an ordinary account may write by default are refused by name, as a public list of them names them: `Tasks`, `Tasks_Migrated`, `spool\drivers\color`, `spool\PRINTERS`, `spool\SERVERS`, `Microsoft\Crypto\RSA\MachineKeys`, `com\dmp`, `FxsTmp`, and `LogFiles\WMI`, which that list does not name and whose access list gives full control to Performance Log Users, a group an ordinary account can be in. A path spelled through a device or network prefix is under no place and fails, the loud side, since spelled back it could name a folder any account may make at a drive's root, and so does a colon after the drive, which names a stream (`Tasks:python.exe`) and never a folder of its own.
+
+*What it does not claim* gains one line: **a Mac's usual Pythons.** The python.org and Xcode Pythons sit under folders the `admin` group may write, so the check refuses them, and the fix the refusal names leads nowhere there. Not yet measured on a Mac (#574).

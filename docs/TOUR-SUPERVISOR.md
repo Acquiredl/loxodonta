@@ -32,7 +32,7 @@ One pass of the watchman's round, for one chain:
 
 **Roll call.** The default census is a single glob over the store's
 drawers (`~/.loxodonta/receipts/<slug>/receipts-*.jsonl`, ADR-0011),
-inline in `scan_root`. `find_chains` is the *legacy* roll call — three
+in `take_census`. `find_chains` is the *legacy* roll call — three
 glob shapes over a `--root` folder of repos, kept because old layouts
 still exist in the field. Identity is read from where a log lies and
 what it is named: `split_seq` peels a `-002`/`-003` suffix into a
@@ -282,19 +282,29 @@ rule as the notice: it reports and never updates.
 ## 3. The tick — `scan_root`, `adopt`, the exit ladder
 
 `scan_root` is where the patrol and the specialists assemble into one
-look. Per chain: keeper's turn, verify's verdict, the stand-down check,
-the baseline diff, and the head remembered for next look (with its
-verdict — testimony for the digest's last-scan line, never the verdict
-itself). Per session: the receipt tally for the completeness watch,
-genesis entries excluded — each genesis is administrative, so witnessed
-count equals receipts owed.
+look. Per chain, in `read_chain`: the anchor and publish keepers' turn
+(`keepers_turn`, ADR-0025 ruling 3), verify's verdict, the stand-down
+check, and the row beside them (`chain_row`: the anchors panel, `left`,
+`last_failed`, `head_published`); the baseline diff, the lifecycle clock
+and any reawakening (ADR-0018), and the head remembered for next look
+(`baseline_row`, with its verdict — testimony for the digest's
+last-scan line, never the verdict itself); and what the chain adds to
+its family (`family_facts`, at a receiver the copy's own facts too,
+ADR-0041). Per session: the receipt tally for the completeness watch,
+every entry in the recorder's own voice excluded (actor `receipts`:
+genesis, transcript commitments, the `second-record-cut:` note) — each is
+administrative, so witnessed count equals receipts owed. Then the
+look's own steps: `absent_rows` for remembered chains the census did
+not meet, `write_memory` for the baseline, and `fold_day` for the day
+book.
 
 The exit ladder is a `max()`, worst wins: 1–4 the gravest verify exit
 (a stood-down tear contributes nothing — ADR-0004 already handled it;
 a chain verify could not judge at all counts as 4, ADR-0037),
 5 a baseline event appends cannot explain, or a baseline that cannot be
-read or kept, 6 a *live* completeness
-alarm. On the agent's machine only live alarms raise the exit: an ended
+read or kept, or a folder the census could not list, 6 a *live* completeness
+alarm, 7 a chain's transcript commitments contradict each other (verify's
+5, renamed, since the scan's 5 is the baseline's). On the agent's machine only live alarms raise the exit: an ended
 deficit is evidence, and a siren that never stops sounding trains the
 operator to ignore the band (the dogfood's lesson). At the receiver a
 settled deficit, an absent or a gapped second record raises it too,

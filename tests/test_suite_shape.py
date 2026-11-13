@@ -9,6 +9,7 @@ while fixing one thing — dies on an import error before a test ever runs.
 That test imports every `tests/test_*.py` the way that loop does, as
 `tests.<name>` from the repo root, each in its own subprocess so a broken
 module names itself instead of taking the parent interpreter with it.
+And every module runs in exactly one of CI's shards (#453).
 
 The home guard is armed and says where a start came from (#242). The
 guard itself lives in tests/home_guard.py, which says what it covers;
@@ -108,6 +109,35 @@ class EveryModuleRunsAlone(unittest.TestCase):
                     "tests/%s.py does not import on its own — a contributor "
                     "cannot run `python -m unittest tests.%s`:\n%s"
                     % (name, name, done.stderr))
+
+
+SHARDS_TOOL = REPO_ROOT / "tools" / "shards.py"
+
+
+class EveryModuleRunsInOneShard(unittest.TestCase):
+    """CI splits the modules by tools/shards.py (#453), weighed by the
+    seconds its table holds or by test count where it holds none: at
+    each tier's shard count, every module runs, and runs once."""
+
+    def test_the_workflow_splits_by_the_tool(self):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "tests.yml"
+                    ).read_text(encoding="utf-8")
+        self.assertIn('"tools/shards.py", os.environ["SHARD"]', workflow)
+
+    def test_every_module_is_in_exactly_one_shard(self):
+        modules = sorted(p.stem for p in TESTS_DIR.glob("test_*.py"))
+        for shards in (3, 6):  # the full tier's count, the fast tier's
+            for flags in ((), ("--by-count",)):
+                with self.subTest(shards=shards, flags=flags):
+                    found = []
+                    for shard in range(1, shards + 1):
+                        done = run(SHARDS_TOOL, str(shard), str(shards),
+                                   *flags, timeout=BOUND)
+                        self.assertEqual(done.returncode, 0, done.stderr)
+                        mine = done.stdout.split()
+                        self.assertTrue(mine, f"shard {shard} runs nothing")
+                        found += mine
+                    self.assertEqual(sorted(found), modules)
 
 
 def named_homes(refusal):
@@ -797,9 +827,15 @@ ALLOWED_OPENS = {
            "never the name"),
     ("loxodonta.py", "judge_stamp"): (
         1, "writes the token into a temporary folder of its own"),
+    ("loxodonta.py", "walk_path"): (
+        2, "opens folders only, O_DIRECTORY, the next one O_NOFOLLOW inside "
+           "the last: a file, a pipe or a link at the name is refused, "
+           "never read or waited on (#574)"),
     ("loxodonta.py", "judge_manifest_signature"): (
         1, "writes the allowed-signers line into a temporary folder of "
            "its own"),
+    ("supervisor.py", "run_main"): (
+        1, "the null device, a sink for a reader that has gone"),
     ("supervisor.py", "open_regular"): (1, NEVER_WAITS),
     ("supervisor.py", "copy_regular"): (
         1, "copies between two files already open: the source by "
@@ -826,6 +862,8 @@ ALLOWED_OPENS = {
            "named pipe put there after the question"),
     ("supervisor.py", "Face.answer_get"): (
         1, "serves docs/FIRE-DRILL.md from the supervisor's own checkout"),
+    ("receiver.py", "run_main"): (
+        1, "the null device, a sink for a reader that has gone"),
     ("receiver.py", "mint_token"): (1, RECEIVER_DATA),
     ("receiver.py", "current_token"): (1, RECEIVER_DATA),
     ("receiver.py", "ends_mid_line"): (1, RECEIVER_DATA),

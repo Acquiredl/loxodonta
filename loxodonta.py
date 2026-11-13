@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.20.0"
+TOOL_VERSION = "0.21.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -122,7 +122,9 @@ def read_log(path):
 
 
 def missing_log(path):
-    print(f"error: {visible(path)} not found — run `loxodonta init` first", file=sys.stderr)
+    print(f"error: {visible(path)} not found — on the machine that will "
+          "hold the chain, the operator can run `loxodonta init` first",
+          file=sys.stderr)
     return EX_NOINPUT
 
 
@@ -136,14 +138,17 @@ def unreadable_log(path, error):
     return EX_NOINPUT
 
 
-def tail_entry(lines):
-    """The chain's final entry, or None if the tail is damaged: torn (a
-    line left partial by a crash or an overlapping append, or holding a
-    byte that is not UTF-8) or forked (a well-formed entry whose `n` is
-    not its line number, left by a lock taken from a paused holder).
-    Neither can be built on: a new entry laid over a fork would bury an
-    innocent race under later receipts until it read as tampering in
-    the middle of the file, so damage stays at the tail (SPEC §6, §8)."""
+def is_chain_head(value):
+    """A SHA256 in lowercase hex and nothing else: the only form an
+    entry_hash takes, so any other is BROKEN to the walk (SPEC §6)."""
+    return (isinstance(value, str) and len(value) == 64
+            and all(c in "0123456789abcdef" for c in value))
+
+
+def tail_line(lines):
+    """The final line as an entry whose `n` is its line number, whatever
+    its `entry_hash` holds, or None; `head` asks the hash's form itself,
+    so it can name that refusal apart."""
     if not lines:
         return None
     try:
@@ -155,9 +160,13 @@ def tail_entry(lines):
         last = json.loads(lines[-1])
     except (ValueError, RecursionError):
         return None
-    if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
+    if not isinstance(last, dict) or "entry_hash" not in last:
         return None
-    if last["n"] != len(lines) - 1:
+    # An integer, never a boolean or a float, since Python takes 2.0 and
+    # True as equal to 2 and 1, and the walk calls such an n BROKEN; no
+    # n at all is refused alike (#587).
+    n = last.get("n")
+    if type(n) is not int or n != len(lines) - 1:
         return None
     return last
 
@@ -200,15 +209,18 @@ def files_base(log):
         # Valid JSON with no path in it, `[]` say (#406).
         return None, f"{unread}: it holds no JSON object"
     path = held.get("path")
-    if isinstance(path, str) and not (posixpath.isabs(path)
-                                      or ntpath.isabs(path)):
+    if not isinstance(path, str):
+        # `{}` or `{"path": 5}` names no project at all, so it is not a
+        # missing one (#589).
+        return None, f"{unread}: it names no project path"
+    if not (posixpath.isabs(path) or ntpath.isabs(path)):
         # The record holds the project's absolute path; a relative one
         # would resolve against wherever the verifier happens to run.
         # Absolute is asked of both systems' paths, so a record written
         # on one and read on the other is a missing project, not this.
         return None, f"{unread}: the path it holds is not absolute " \
             f"({visible(path)})"
-    if isinstance(path, str) and os.path.isdir(path):
+    if os.path.isdir(path):
         return path, None
     return None, (f"{visible(record)} points at a missing project "
                   f"({visible(path)})")
@@ -398,8 +410,9 @@ def walk(lines, field_rules=True):
             if n == len(lines) - 1:
                 # The one honest damage signature: a crash mid-append can
                 # truncate the final line and nothing else (SPEC §6).
+                intact = f"entries 0..{n - 1} intact" if n else "no entry intact"
                 breaks.append((n, f"BROKEN: torn tail at line {n} (crash-"
-                                  f"truncated append; entries 0..{n - 1} intact)"))
+                                  f"truncated append; {intact})"))
             else:
                 breaks.append((n, f"BROKEN at entry {n}: line is not valid JSON"))
             entries.append(None)
@@ -534,13 +547,13 @@ def judge_prefixes(marks, transcript_path):
     except FileNotFoundError:
         # Absence is a note, never a verdict: the harness cleans
         # transcripts on a retention cycle (ADR-0017).
-        print(f"TRANSCRIPT-UNRESOLVED: no transcript at {transcript_path} "
+        print(f"TRANSCRIPT-UNRESOLVED: no transcript at {visible(transcript_path)} "
               "— commitments unjudgeable; chain verdict unaffected")
         return False
     except OSError as error:
         # A folder, a pipe or a device in its place is named and never
         # waited on or read (#386); a note like absence, never a verdict.
-        print(f"TRANSCRIPT-UNRESOLVED: {transcript_path} cannot be read as "
+        print(f"TRANSCRIPT-UNRESOLVED: {visible(transcript_path)} cannot be read as "
               f"a transcript: {error.strerror or error} — commitments "
               "unjudgeable; chain verdict unaffected")
         return False
@@ -1132,8 +1145,11 @@ def check_anchors(log, entries, headers, used, packaged=False):
             print(f"NO-ANCHORS: {visible(name)} is not in this package — "
                   "anchoring is optional")
         else:
+            # A recipient holds verifier.py alone, so a step only the
+            # recorder takes is named as the operator's (#588).
             print(f"NO-ANCHORS: {visible(name)} not found — anchoring is "
-                  "optional; run `loxodonta anchor` to add one")
+                  "optional; on the machine that holds the chain, the "
+                  "operator can run `loxodonta anchor` to add one")
         return False
     unreadable = unreadable_sidecar(anchors_path(log))
     if unreadable is not None:
@@ -1197,11 +1213,14 @@ def check_anchors(log, entries, headers, used, packaged=False):
                       "settled this head — no upgrade is owed")
                 continue
             if "calendar" in record:
-                advice = "run `loxodonta anchor --upgrade`"
+                advice = ("on the machine that holds the chain, the "
+                          "operator can run `loxodonta anchor --upgrade`")
             else:
                 # The upgrade asks the calendar a proof names (SPEC 9.4).
                 advice = ("`loxodonta anchor --upgrade` cannot complete it; "
-                          "`loxodonta anchor --force` submits the head again")
+                          "on the machine that holds the chain, the operator "
+                          "can run `loxodonta anchor --force` to submit the "
+                          "head again")
             print(f"ANCHOR-PENDING: head {head}… submitted {ts} via "
                   f"{calendar} — {advice}")
         elif kind == "mismatch":
@@ -1490,7 +1509,7 @@ def judge_stamp(head, reply, chain_file):
     if chain_file is None:
         return "not judged", "no --authority-chain FILE given"
     if not os.path.isfile(chain_file):
-        return "not judged", f"--authority-chain {chain_file} not found"
+        return "not judged", f"--authority-chain {visible(chain_file)} not found"
     try:
         with tempfile.TemporaryDirectory() as scratch:
             token = os.path.join(scratch, "stamp.tsr")
@@ -1548,8 +1567,9 @@ def check_stamps(log, entries, chain_file, packaged=False):
                   "authority timestamp is optional")
         else:
             print(f"NO-STAMPS: {visible(name)} not found — the authority "
-                  "timestamp is optional; run `loxodonta stamp --authority "
-                  "URL` to add one")
+                  "timestamp is optional; on the machine that holds the "
+                  "chain, the operator can run `loxodonta stamp "
+                  "--authority URL` to add one")
         return False
     unreadable = unreadable_sidecar(stamps_path(log))
     if unreadable is not None:
@@ -1606,7 +1626,7 @@ def check_stamps(log, entries, chain_file, packaged=False):
             # named as testimony and never as the signer (the trap
             # ADR-0008 ruling 4 closes for the signature).
             print(f"STAMPED: entries 0..{n} existed when a key certified "
-                  f"by {chain_file} signed this head under its own clock "
+                  f"by {visible(chain_file)} signed this head under its own clock "
                   f"({authority_words(record)}) — the time inside the token "
                   "is that key's word, not this machine's (`openssl ts "
                   "-reply -text` prints it)")
@@ -1818,20 +1838,22 @@ def cmd_head(args):
     if not lines:
         print(f"error: {visible(args.log)} is empty — no chain head to print", file=sys.stderr)
         return EX_NOINPUT
-    last = tail_entry(lines)
+    last = tail_line(lines)
     if last is None:
+        # `verify`, not `loxodonta verify`: the recorder and verifier.py
+        # both have it.
         print(f"error: {visible(args.log)} has a damaged tail — run "
-              "`loxodonta verify` (a torn tail has no head to record)",
-              file=sys.stderr)
+              "`verify` on it for the verdict (a damaged tail has no head "
+              "to record)", file=sys.stderr)
         return 1
     head = last["entry_hash"]
-    # A head is a SHA256 in lowercase hex and nothing else, so anything
-    # else is refused unprinted: the line is the writer's text, and the
-    # walk calls it BROKEN, since no such value matches a canonical form.
-    if not (isinstance(head, str) and len(head) == 64
-            and all(c in "0123456789abcdef" for c in head)):
+    # Anything but a head is refused unprinted: the line is the writer's
+    # text, and the walk calls it BROKEN, since no such value matches a
+    # canonical form.
+    if not is_chain_head(head):
         print(f"error: {visible(args.log)} ends in an entry whose entry_hash is not "
-              "a chain head — run `loxodonta verify`", file=sys.stderr)
+              "a chain head — run `verify` on it for the verdict",
+              file=sys.stderr)
         return 1
     print(head)
     return 0
@@ -2318,13 +2340,17 @@ def judge_manifest_anchor(folder, headers, used):
                   f"submitted {ts} via {calendar}, which never came back; "
                   "another calendar settled it, so no upgrade is owed")
             continue
+        # The upgrade is the recorder's verb, which a recipient holding
+        # verifier.py alone does not have, so the line says whose it is.
         if "calendar" in record:
-            advice = ("unpack the package and run `loxodonta anchor --upgrade "
-                      "--manifest=<its manifest.json>` after a few hours")
+            advice = ("whoever holds the recorder can unpack the package "
+                      "and run `loxodonta anchor --upgrade --manifest=<its "
+                      "manifest.json>` after a few hours")
         else:
             advice = ("`loxodonta anchor --upgrade` cannot complete it; "
-                      "`loxodonta anchor --force --manifest=<its "
-                      "manifest.json>` submits the manifest again")
+                      "whoever holds the recorder can run `loxodonta anchor "
+                      "--force --manifest=<its manifest.json>` to submit the "
+                      "manifest again")
         print(f"seal anchor: ANCHOR-PENDING: the manifest was submitted "
               f"{ts} via {calendar} — {advice}; the rung is not earned until "
               "the proof completes and a block header checks its block")
@@ -2396,7 +2422,7 @@ def judge_manifest_stamp(folder, chain_file):
                     # certifies; the name in the record sits in a file
                     # the manifest does not list, so it is testimony.
                     print(f"seal stamp: STAMPED: a key certified by "
-                          f"{chain_file} signed this manifest's sha256 under "
+                          f"{visible(chain_file)} signed this manifest's sha256 under "
                           f"its own clock ({authority_words(record)}) — "
                           "the time inside the token is that key's word, not "
                           "this machine's (`openssl ts -reply -text` prints "
@@ -3101,14 +3127,17 @@ def reader_gone(error):
     report | head`). POSIX raises BrokenPipeError (EPIPE); Windows
     reports a plain EINVAL from the closed handle instead, so match on
     both or the quiet death is a traceback on half the platforms. EINVAL
-    means nothing about pipes off Windows."""
+    means nothing about pipes off Windows, and on Windows it counts only
+    when it names no file: a write to stdout never does, and a file
+    refused for not being a regular one always does, so that refusal is
+    never taken for a reader that left."""
     return isinstance(error, BrokenPipeError) or (
         os.name == "nt" and isinstance(error, OSError)
-        and error.errno == errno.EINVAL)
+        and error.errno == errno.EINVAL and error.filename is None)
 
 
 def run_main(main):
-    """Run a command line to its exit code, as both files' entry point.
+    """Run a command line to its exit code, as every tool's entry point.
     Two endings are not the command's own (ADR-0037). A reader that hung
     up gets a quiet 141, what a shell reports for that: never 0 (VALID)
     or 1 (BROKEN), since the unread lines were never judged. A crash
@@ -3188,6 +3217,49 @@ def environment(name, default=None):
     if MANAGED_RUN and name not in MANAGED_READS:
         return default
     return os.environ.get(name, default)
+
+
+# Never called here: held so the supervisor and the receiver read their
+# numbers by one rule; the recorder's own knobs fall back quietly (#449).
+def number_setting(name, raw, kind=int, waited=False):
+    """The number the text `raw` of environment variable `name` says,
+    read as `kind` (int or float). A value that is not such a number,
+    or is negative or infinite, is refused by name: one line on stderr
+    and exit 64, never a traceback (#487). When the number is a wait,
+    one past threading.TIMEOUT_MAX is refused the same way, since no
+    wait can take it (#589); a number only compared has no such
+    bound."""
+    try:
+        value = kind(raw)
+    except ValueError:
+        value = None
+    if value is None or not 0 <= value < float("inf"):
+        print(f"error: {name}={ascii(raw)} is not a "
+              f"{'whole' if kind is int else 'finite'} number 0 or more",
+              file=sys.stderr)
+        sys.exit(EX_USAGE)
+    if waited and value > threading.TIMEOUT_MAX:
+        print(f"error: {name}={ascii(raw)} is more seconds than a wait "
+              f"can take (at most {int(threading.TIMEOUT_MAX)} here)",
+              file=sys.stderr)
+        sys.exit(EX_USAGE)
+    return value
+
+
+def port_number(text):
+    """A port to listen on, as typed on the command line: a whole number
+    from 0 to 65535, 0 asking for a free one. Anything else is a usage
+    error naming the flag, never the OverflowError a socket raises at
+    bind (#589). The recorder listens on no port; it holds the original
+    as it holds every twin's."""
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
+    if not 0 <= value <= 65535:
+        raise argparse.ArgumentTypeError(
+            "a port is a whole number from 0 to 65535")
+    return value
 
 
 # --- Writing a line -----------------------------------------------------------
@@ -3707,6 +3779,59 @@ DEFAULT_CALENDARS = [
     "https://a.pool.eternitywall.com",
     "https://ots.btc.catallaxy.com",
 ]
+DEFAULT_PORTS = {"http": 80, "https": 443}
+SHOWN_CALENDAR = 200   # characters of a row's address a skip line prints
+
+
+def calendar_key(url):
+    """What an upgrade compares to tell whether an address is a calendar
+    it was told to ask (#415): the scheme and the host in either case,
+    the port written or left to its default, the path with or without a
+    trailing slash, so `HTTPS://A.example:443/` is `https://a.example`.
+    Anything else that differs, a path included, is another calendar,
+    since the address is the door every request goes through. No name
+    is looked up. An address urllib cannot take apart is its own text."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return url
+    if port is None:
+        port = DEFAULT_PORTS.get(parts.scheme)
+    return (parts.scheme, parts.username, parts.password, parts.hostname,
+            port, parts.path.rstrip("/"), parts.query, parts.fragment)
+
+
+def calendars_asked(calendars):
+    """The keys of the calendars an upgrade may ask: the defaults this
+    recorder submits to, and `calendars`, those the operator named on the
+    command line. A sidecar row is the writer's text, or the text of
+    whoever handed the sidecar over, so the address it names is asked
+    only when it is one of these (#415)."""
+    return {calendar_key(calendar)
+            for calendar in [*DEFAULT_CALENDARS, *(calendars or [])]}
+
+
+def unnamed_calendar(url, asked):
+    """True for an http or https address whose key is not in `asked`:
+    one an upgrade passes by and never asks (#415). Any other address
+    is left to `calendar_request`, which refuses it before it asks."""
+    try:
+        scheme = urllib.parse.urlsplit(url).scheme
+    except ValueError:
+        return False
+    return scheme in PUBLISH_SCHEMES and calendar_key(url) not in asked
+
+
+def shown_address(url):
+    """A row's address as a line prints it: escaped, and cut past
+    SHOWN_CALENDAR characters with the count of those cut, so a planted
+    address of a megabyte prints as some two hundred characters, more
+    only where escapes lengthen them."""
+    if len(url) <= SHOWN_CALENDAR:
+        return visible(url)
+    return (f"{visible(url[:SHOWN_CALENDAR])}… "
+            f"(+{len(url) - SHOWN_CALENDAR})")
 
 
 def write_varint(n):
@@ -3745,16 +3870,25 @@ def append_sidecar_record(path, record):
     shape every sidecar record has. The sidecar is opened without
     waiting and written only when it is a regular file: an ordinary open
     of a pipe with no reader never returns, so one at the sidecar's name
-    would hang every writer (#364). Here a pipe with no reader fails at
-    once, and anything else that is not a file is refused before a byte
-    is written, as an OSError the caller already answers."""
+    would hang every writer (#364). Here anything that is not a file, a
+    pipe included, is refused before a byte is written, as an OSError the
+    caller already answers. A sidecar whose last line has no line end, a
+    torn line a crash or a full disk left, gets one before the record, so
+    the record starts on a line of its own and only the torn line, left
+    as it lies, is unreadable (#610). The file is opened for reading too,
+    to see how it ends."""
     line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT
                  | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0),
                  0o644)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
             raise OSError(errno.EINVAL, NOT_REGULAR, path)
+        if opened.st_size > 0:
+            os.lseek(fd, -1, os.SEEK_END)
+            if os.read(fd, 1) != b"\n":
+                line = "\n" + line
         with os.fdopen(os.dup(fd), "ab") as f:
             f.write(line.encode("utf-8"))
     finally:
@@ -3765,7 +3899,11 @@ def unwritable_why(path, error):
     """Why a write to the chain or a sidecar at `path` failed, in words: what
     `file_problem` says of the path, a folder in its place say, which
     Windows reports as a denied permission (#364); else the system's
-    reason."""
+    reason. A file where a folder above `path` should be is named first:
+    Windows reports it as a path it cannot find (#589)."""
+    above = nearest_standing(path)
+    if not os.path.isdir(above):
+        return f"a file stands at {visible(above)}, where a folder should be"
     return file_problem(path) or error.strerror or str(error)
 
 
@@ -4038,14 +4176,15 @@ def anchor_and_upgrade(log, calendars, budget):
         if submitted:
             changed.append(log)
     upgrade_pending_proofs(os.path.dirname(os.path.abspath(log)), remaining,
-                           deadline, changed)
+                           deadline, changed, calendars_asked(calendars))
     return changed
 
 
-def upgrade_pending_proofs(folder, remaining, deadline, changed):
+def upgrade_pending_proofs(folder, remaining, deadline, changed, asked):
     """Every pending proof in the folder's sidecars, oldest first, one
-    request each, until the deadline. A settled head is skipped. Each
-    chain whose sidecar gains a row is added to `changed`, once."""
+    request each, until the deadline. A settled head is skipped, and so
+    is a row naming a calendar not in `asked` (#415). Each chain whose
+    sidecar gains a row is added to `changed`, once."""
     for name in sorted(os.listdir(folder)):
         if not name.endswith(".anchors.jsonl"):
             continue
@@ -4058,6 +4197,8 @@ def upgrade_pending_proofs(folder, remaining, deadline, changed):
             if record["head"] in settled:
                 continue
             url = record["calendar"].rstrip("/")
+            if unnamed_calendar(url, asked):
+                continue
             try:
                 continuation = calendar_request(
                     f"{url}/timestamp/{commitment_hex}", timeout=remaining())
@@ -5705,7 +5846,11 @@ def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
         print("error: no calendar accepted the digest — not anchored",
               file=sys.stderr)
         return EX_UNAVAILABLE
-    print(f"proof is pending — run `loxodonta anchor {upgrade_flags}` "
+    # The upgrade asks only the calendars it is told to (#415), so the
+    # command names the ones given here.
+    named = "".join(f" --calendar {visible(calendar)}"
+                    for calendar in calendars or [])
+    print(f"proof is pending — run `loxodonta anchor {upgrade_flags}{named}` "
           "after a few hours to complete it")
     return 0
 
@@ -5726,6 +5871,8 @@ def upgrade_anchors(args):
         return EX_NOINPUT
     # verify --anchors reports the rows this leaves out; upgrade skips them.
     pending, completed, settled_heads = pending_upgrades(records)
+    asked = calendars_asked(args.calendar)
+    passed_by = set()   # one line per address, however many rows name it
     failures = 0
     for record, commitment_hex in pending:
         key = (record["head"], record["calendar"])
@@ -5739,6 +5886,21 @@ def upgrade_anchors(args):
         if record["head"] in settled_heads:
             print(f"skipped {label} at {shown}: another calendar already "
                   "settled this head")
+            continue
+        if unnamed_calendar(url, asked):
+            # Asked, it would be a request to an address the row chose,
+            # from the network of whoever upgrades: a recipient's, for a
+            # sidecar handed over with a package (#415).
+            if calendar_key(url) not in passed_by:
+                passed_by.add(calendar_key(url))
+                cut = shown_address(url)
+                # Named once, as data: the address is the row's, and a
+                # flag built from it would hand a reader the row's words
+                # to paste into a shell.
+                print(f"warning: skipped calendar {cut}: it is not one "
+                      "this upgrade was told to ask (the default calendars "
+                      "and each --calendar given); add it with --calendar "
+                      "to ask it", file=sys.stderr)
             continue
         try:
             continuation = calendar_request(f"{url}/timestamp/{commitment_hex}")
@@ -5842,6 +6004,14 @@ def cmd_report(args):
     print()
     for line in timeline_lines(entries, breaks, warns):
         print(line)
+    # Printed here and not in the timeline: explain hands the timeline to
+    # a model as the observed agent's words, and this line is the tool's.
+    if any(entry is not None and split_suffix(entry.get("action"))[1]
+           for entry in entries):
+        print()
+        print(f"a line ending {FOLDED_MARK} is listed without its last "
+              "group, the call's id and input hash; the chain holds the "
+              "line whole")
     if breaks:
         print()
         print("chain integrity: BROKEN — this timeline is testimony only "
@@ -6227,12 +6397,19 @@ def split_suffix(action):
     return action[:at], fields
 
 
+# Ends every line a listing shows without its suffix. Nothing in an
+# entry the writer cannot set tells a hook's receipt from a line logged
+# by hand, the actor included, so every folded line is marked (#619).
+FOLDED_MARK = "[...]"
+
+
 def listed_action(action):
-    """An action line as a listing shows it, without its suffix: the
-    suffix is for a reader that checks, and a listing for a person
-    scanning (ADR-0047). A whole line is in the chain, in `show` and in
-    every JSON output."""
-    return split_suffix(action)[0]
+    """An action line as a listing shows it, its suffix folded to
+    `FOLDED_MARK`: the suffix is for a reader that checks, and a listing
+    for a person scanning (ADR-0047). A whole line is in the chain, in
+    `show` and in every JSON output."""
+    head, fields = split_suffix(action)
+    return head if fields is None else f"{head} {FOLDED_MARK}"
 
 
 def main_repo_root(project):
@@ -6296,9 +6473,9 @@ def drawer_of_session(log_dir, session):
     costs nothing: the resolved drawer already has the chain. Returns
     the drawer and a warning, None unless a store folder cannot be
     listed, and the receipt then still goes to the resolved drawer,
-    never lost (#452). The caller prints the warning once that drawer
-    exists, so a receipt refused for want of it prints the refusal
-    alone (#555)."""
+    never lost (#452). The caller prints the warning once the chain in
+    that drawer stands, so a receipt refused for want of the drawer or
+    of the chain prints the refusal alone (#555, #589)."""
     name = f"receipts-{session}.jsonl"
     if os.path.exists(os.path.join(log_dir, name)):
         return log_dir, None
@@ -6362,6 +6539,21 @@ def record_project(log_dir, project):
             f.write("\n")
     except OSError:
         pass
+
+
+def tail_entry(lines):
+    """The chain's final entry, or None if the tail is damaged: torn (a
+    line left partial by a crash or an overlapping append, or holding a
+    byte that is not UTF-8), forked (a well-formed entry whose `n` is
+    not its line number, left by a lock taken from a paused holder), or
+    ending in an `entry_hash` that is no chain head. None can be built
+    on: a new entry laid over a fork would bury an innocent race under
+    later receipts until it read as tampering in the middle of the file,
+    so damage stays at the tail (SPEC §6, §8)."""
+    last = tail_line(lines)
+    if last is None or not is_chain_head(last["entry_hash"]):
+        return None
+    return last
 
 
 def chain_is_damaged(log):
@@ -6495,8 +6687,9 @@ def cmd_hook(args):
             publish_head(log, args.publish, session, timeout=bound,
                          window=window)
         if args.publish_chain:
-            # The entries after the cursor (ADR-0031 ruling 3); what
-            # does not fit the window is the keeper's.
+            # From the chain's last entry, and on from the remote's
+            # answer (ADR-0045 ruling 4); what does not fit the window
+            # is the keeper's.
             session_end_publish_chain(log, args.publish_chain, session,
                                       timeout=bound, window=window)
         if args.stamp:
@@ -6544,8 +6737,6 @@ def cmd_hook(args):
                 f.write("*\n!.gitignore\n")
         except FileExistsError:
             pass
-    if drawer_warning:
-        print(drawer_warning, file=sys.stderr)
     if project is not None:
         record_project(log_dir, project)
     # A damaged chain is not extended and not repaired — recording moves to
@@ -6557,6 +6748,10 @@ def cmd_hook(args):
         return locked_out(log)
     except OSError as e:
         return unwritable_log(log, e)
+    # Only once the chain stands: a receipt refused prints the refusal
+    # alone, never "this receipt goes to" a drawer it never reached (#589).
+    if drawer_warning:
+        print(drawer_warning, file=sys.stderr)
 
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
@@ -6868,6 +7063,12 @@ def owned_script(command, names):
     if not words or len(words) < 3:
         return None
     interpreter, script, verb = words[:3]
+    if os.name == "nt":
+        # Windows drops a name's trailing dots and spaces, so it runs
+        # `loxodonta.py.` as the recorder, and the path returned is the
+        # one it runs, which git and the notice ask about; on POSIX that
+        # is another file.
+        script = script.rstrip(". ")
     name = file_name(script)
     if not is_interpreter(interpreter) or name not in names \
             or WIRED_VERB[name] != verb:
@@ -7081,7 +7282,8 @@ def profile_notice(profile, matchers, codex=False):
         "caught; a regenerated chain only against a head you keep (`head`, "
         "then `verify --expect-head`).",
         f"  timestamped  --profile timestamped   {leaves}; regeneration is "
-        "caught once the anchor matures.",
+        "caught once the anchor matures, for the entries up to the "
+        "anchored head.",
         "  full         --profile full --remote URL   head and receipts "
         "go to a remote you name; a wiped log survives there as of the "
         "last send.",
@@ -7105,6 +7307,42 @@ def digest_command(payload=False, folder=None, managed=False):
     command = f'"{python}" -I "{script.replace(os.sep, "/")}" digest'
     command += " --managed" if managed else ""
     return command + (" --payload" if payload else "")
+
+
+# The marks PowerShell reads as a single quote inside a single-quoted
+# word: the straight one and the four curly ones. Each is written twice
+# there to stand for itself.
+POWERSHELL_QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+
+
+def shell_word(text):
+    """`text` as one literal word of the shell the next step is printed
+    for, whatever a folder's name holds: single quotes, in which neither
+    PowerShell nor sh expands `$`, `$(...)` or a backtick; each quote
+    mark inside written twice for PowerShell, and as `'\\''` for sh."""
+    if os.name == "nt":
+        for mark in POWERSHELL_QUOTES:
+            text = text.replace(mark, mark * 2)
+        return f"'{text}'"
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def next_step(folder=None):
+    """The two lines an install prints after its restart word (#147):
+    the README's next step, `supervisor.py scan`, the script the digest
+    is wired to, alone on the second line so a copy of the line is the
+    command. On Windows in PowerShell's form, its default shell, where a
+    quoted program runs only after `&`. Each path is one literal word
+    (shell_word), so a line copied as printed runs as printed. Printed,
+    never asked: the installer reads no stdin."""
+    python = sys.executable.replace(os.sep, "/")
+    script = (os.path.join(folder, "supervisor.py") if folder
+              else supervisor_path())
+    shell, run = (" in PowerShell", "& ") if os.name == "nt" else ("", "")
+    return (f"next: after a session, run this{shell} for every session so "
+            "far, one verdict each:\n"
+            f"  {run}{shell_word(python)} -I "
+            f"{shell_word(script.replace(os.sep, '/'))} scan")
 
 
 def same_path(one, other):
@@ -7399,9 +7637,27 @@ def managed_dir_said():
 # verb run again from newer files.
 
 COPIED = ("loxodonta.py", "supervisor.py")
-# Where Windows keeps what only an administrator writes, by name: the
-# standard library reads no access list (ADR-0042 ruling 3).
-SYSTEM_PLACES = ("C:\\Program Files", "C:\\Windows")
+# The folders under System32 an ordinary account may write by default,
+# refused by name (#574), from the list for Windows 10 1803 in
+# github.com/api0cradle/UltimateAppLockerByPassList,
+# Generic-AppLockerbypasses.md. That list names a folder inside Tasks;
+# Tasks itself gives Authenticated Users write in its own access list.
+# LogFiles\WMI is not on that list: its access list gives full control
+# to Performance Log Users, a group an ordinary account can be in.
+WRITABLE_IN_SYSTEM32 = ("Tasks", "Tasks_Migrated", "spool\\drivers\\color",
+                        "spool\\PRINTERS", "spool\\SERVERS",
+                        "Microsoft\\Crypto\\RSA\\MachineKeys", "com\\dmp",
+                        "FxsTmp", "LogFiles\\WMI")
+# The kernel follows at most this many links in one path (Linux's
+# MAXSYMLINKS), and the check follows no more (#576).
+LINK_HOPS = 40
+# Whether a path can be walked one folder descriptor at a time, each
+# folder held open as it is judged and the next step taken inside it
+# (#574). Not on Windows, where the check is by place, nor where one of
+# these calls takes no dir_fd (os.replace rides on os.rename's).
+HELD_WALK = (hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+             and {os.open, os.stat, os.readlink, os.mkdir, os.rename,
+                  os.unlink} <= os.supports_dir_fd)
 
 
 def system_program_folder():
@@ -7491,56 +7747,255 @@ def within(path, folder):
         return False
 
 
+def windows_places():
+    """(the folders a path passes under, the Windows folder) on Windows
+    (ADR-0042 ruling 3, as #574 narrowed it): Program Files, Program
+    Files (x86) where the system has one, and System32, as the machine's
+    own registry names them in its 64-bit view, which only an
+    administrator writes. Never the environment: an account sets a user
+    variable without rights, and an administrator's elevated shell
+    inherits it (stand_in). A value that cannot be read is left out, so
+    nothing passes under it."""
+    import winreg  # Windows alone has it
+    found = {}
+    for key, names in (("SOFTWARE\\Microsoft\\Windows\\CurrentVersion",
+                        ("ProgramFilesDir", "ProgramFilesDir (x86)")),
+                       ("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                        ("SystemRoot",))):
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key, 0,
+                                winreg.KEY_READ | winreg.KEY_WOW64_64KEY) \
+                    as opened:
+                for name in names:
+                    try:
+                        value, kind = winreg.QueryValueEx(opened, name)
+                    except OSError:
+                        continue
+                    # A plain absolute path, never one to expand.
+                    if kind == winreg.REG_SZ and ntpath.isabs(value):
+                        found[name] = value
+        except OSError:
+            pass
+    windows = found.get("SystemRoot")
+    places = [found[name] for name in ("ProgramFilesDir",
+                                       "ProgramFilesDir (x86)")
+              if name in found]
+    if windows:
+        places.append(os.path.join(windows, "System32"))
+    return places, windows
+
+
+def long_spelling(path):
+    """`path` with each 8.3 short name in the part of it that exists
+    spelled in full (GetLongPathNameW), which follows no link or
+    junction, so the path as written stays the path as written. As it
+    was when anything goes wrong, ctypes missing included: the path
+    resolved is checked beside it."""
+    standing, rest = path, ""
+    while not os.path.lexists(standing):
+        parent = os.path.dirname(standing)
+        if parent == standing:
+            return path
+        rest = os.path.join(os.path.basename(standing), rest)
+        standing = parent
+    try:
+        import ctypes  # Windows alone calls this
+        size = ctypes.windll.kernel32.GetLongPathNameW(standing, None, 0)
+        buffer = ctypes.create_unicode_buffer(size)
+        if not size or not ctypes.windll.kernel32.GetLongPathNameW(
+                standing, buffer, size):
+            return path
+    except (AttributeError, ImportError, OSError, ValueError):
+        return path
+    return os.path.join(buffer.value, rest) if rest else buffer.value
+
+
+def and_joined(words):
+    """`a`, `a and b`, `a, b and c`."""
+    return (", ".join(words[:-1]) + " and " + words[-1] if len(words) > 1
+            else "".join(words))
+
+
+def by_place(place, places, windows):
+    """Why `place` is within an ordinary account's reach by where it is
+    on Windows (windows_places), or None when it is under a place that
+    passes and outside every folder there that such an account may
+    write by default."""
+    system = os.path.join(windows, "System32") if windows else None
+    if system:
+        for name in WRITABLE_IN_SYSTEM32:
+            open_by_default = os.path.join(system, name)
+            if within(place, open_by_default):
+                return (f"is under {open_by_default}, which an ordinary "
+                        "account may write by default")
+    if any(within(place, passing) for passing in places):
+        return None
+    if windows and within(place, windows):
+        return (f"is under {windows} and not under {system}, the one "
+                f"folder there taken as out of reach: others under {windows} "
+                "an ordinary account may write by default")
+    if within(place, "C:\\Users") or within(place, os.path.expanduser("~")):
+        return "is under a user profile, which its account writes"
+    if not places:
+        return ("cannot be placed: this installer could not read from the "
+                "registry where the system keeps its program folders")
+    return (f"is outside {and_joined(places)}, and this installer cannot "
+            "read that folder's access list from here")
+
+
 def in_reach(path):
     """Why an ordinary account can reach `path`, as far as this tool can
-    see, or None when it cannot (ADR-0042 ruling 3). Asked of the path
-    as written, which is what the command names and what a link in a
-    folder the account owns could later be retargeted under, and of the
-    path resolved, which is what runs today. On POSIX, every component
-    from the root down that exists, of the path as written and of the
-    path and its folder resolved: owned by root, with no group or other
-    write bit, else the first that is not. A symbolic link is judged by
-    the folder that holds it, which is in the walk, never by its own
-    bits, which say nothing. A component not made yet is the
-    installer's to make. On Windows, by place, both spellings: the
-    standard library reads no access list."""
+    see, or None when it cannot (ADR-0042 ruling 3). On POSIX the walk
+    of walk_path. On Windows, by place (by_place), the standard library
+    reading no access list: asked of the path as written, which is what
+    the command names and what a junction in a folder the account owns
+    could later be retargeted under, with its 8.3 names spelled in full,
+    and of the path resolved, which is what runs today. A device or
+    network spelling (\\\\?\\, \\\\.\\, \\??\\, \\\\localhost\\C$\\) is
+    under no place and fails: the loud side, since spelled back it could
+    name a folder any account may make at a drive's root (C:\\Program
+    Files. under \\\\?\\ is not C:\\Program Files). A colon after the
+    drive names a stream (Tasks:python.exe) or a device, never a folder
+    of its own, and fails, as stand_in fails it (#638 review)."""
+    if sys.platform != "win32":
+        return walk_path(path)[0]
     written = os.path.abspath(path)
-    if sys.platform == "win32":
-        real = os.path.realpath(path)
-        for place, it in ((written, "it"),
-                          (real, f"it resolves to {real}, which")):
-            if any(within(place, system) for system in SYSTEM_PLACES):
-                continue
-            if within(place, "C:\\Users") \
-                    or within(place, os.path.expanduser("~")):
-                return (f"{it} is under a user profile, which its account "
-                        "writes")
-            return (f"{it} is outside {' and '.join(SYSTEM_PLACES)}, and "
-                    "this installer cannot read that folder's access list "
-                    "from here")
-        return None
-    places = set()
-    for start in (written, os.path.realpath(path),
-                  os.path.realpath(os.path.dirname(written))):
-        while start not in places:
-            places.add(start)
-            start = os.path.dirname(start)
-    for place in sorted(places, key=len):
-        try:
-            status = os.lstat(place)
-        except (FileNotFoundError, NotADirectoryError):
-            continue
-        except OSError as error:
-            return f"{place} cannot be looked at: {error.strerror or error}"
-        if stat.S_ISLNK(status.st_mode):
-            continue
+    if ":" in ntpath.splitdrive(written)[1]:
+        return ("it holds a colon after its drive, which names a stream or "
+                "a device and never a folder of its own")
+    places, windows = windows_places()
+    real = os.path.realpath(path)
+    for place, it in ((long_spelling(written), "it"),
+                      (real, f"it resolves to {real}, which")):
+        why = by_place(place, places, windows)
+        if why:
+            return f"{it} {why}"
+    return None
+
+
+def walk_path(path, made=None, judge=True):
+    """Walk the POSIX `path` from the root as the system resolves it,
+    one component and one link at a time (#576), and judge each step:
+    every folder entered, and the last component, must be root's with
+    no group or other write bit. A symbolic link is judged by the folder
+    that holds it, which the walk has entered, never by its own bits,
+    which say nothing; its target is then walked from the root or from
+    that folder, so a link reached through another link is judged where
+    it lies. Past LINK_HOPS links the path is refused, as the kernel
+    refuses it. A component not made yet is the installer's to make.
+
+    Returns (why, held): why an ordinary account can reach the path, or
+    None, and None or a descriptor. Without `made` the walk ends where
+    the path stops existing. With a list as `made` the path is a folder
+    to write in: what is missing is made (0755) and appended there, top
+    first, an OSError is raised, and once nothing was found in reach
+    `held` is the descriptor of the folder the walk ended in, for the
+    caller to write through and close (None where HELD_WALK is false).
+    With HELD_WALK each folder is held open from the moment it is judged
+    and the next step is taken inside it, so no link put in place after
+    a step can redirect the rest (#574). `judge` false judges nothing,
+    for a check the stand-in waived."""
+    def judged(status, place):
+        if not judge:
+            return None
         if status.st_uid != 0:
             return f"{place} belongs to uid {status.st_uid}, not to root"
         if status.st_mode & 0o022:
             return (f"{place} can be written by "
                     + ("its group" if status.st_mode & 0o020
                        else "every account"))
-    return None
+        return None
+
+    def steps(text):
+        return [part for part in text.split("/") if part not in ("", ".")]
+
+    held, make = HELD_WALK, made is not None
+    directory = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    parts = steps(path if os.path.isabs(path)
+                  else os.path.join(os.getcwd(), path))
+    trail = [(os.open("/", directory) if held else None, "/")]
+    hops, place = 0, "/"
+    try:
+        why = judged(os.fstat(trail[0][0]) if held else os.stat("/"), "/")
+        while parts and not why:
+            name = parts.pop(0)
+            if name == "..":
+                if len(trail) > 1:
+                    gone = trail.pop()[0]
+                    if gone is not None:
+                        os.close(gone)
+                continue
+            fd, here = trail[-1]
+            place = os.path.join(here, name)
+            at = name if held else place
+            try:
+                status = os.stat(at, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                if not make:
+                    break
+                os.mkdir(at, 0o755, dir_fd=fd)
+                made.append(place)
+                status = None
+            if status is not None and stat.S_ISLNK(status.st_mode):
+                hops += 1
+                if hops > LINK_HOPS:
+                    why = (f"{path} goes through more than {LINK_HOPS} links, "
+                           "more than the system follows, so where it leads "
+                           "cannot be judged")
+                    break
+                target = os.readlink(at, dir_fd=fd)
+                if target.startswith("/"):
+                    for gone, _ in trail[1:]:
+                        if gone is not None:
+                            os.close(gone)
+                    del trail[1:]
+                parts = steps(target) + parts
+                continue
+            if status is not None and not stat.S_ISDIR(status.st_mode):
+                why = judged(status, place)
+                if make and not why:
+                    raise NotADirectoryError(
+                        errno.ENOTDIR, os.strerror(errno.ENOTDIR), place)
+                break
+            # A folder is judged as opened, never by its name again.
+            if held:
+                trail.append((os.open(name, directory | os.O_NOFOLLOW,
+                                      dir_fd=fd), place))
+                opened = os.fstat(trail[-1][0])
+            else:
+                trail.append((None, place))
+                opened = os.stat(place, follow_symlinks=False)
+            if status is None:
+                if held:
+                    os.fchmod(trail[-1][0], 0o755)
+                else:
+                    os.chmod(place, 0o755)
+            else:
+                why = judged(opened, place)
+        return why, (trail.pop()[0] if make and not why else None)
+    except OSError as error:
+        if make:
+            raise
+        return f"{place} cannot be looked at: {error.strerror or error}", None
+    finally:
+        for fd, _ in trail:
+            if fd is not None:
+                os.close(fd)
+
+
+def folder_refused(folder, why):
+    """The refusal's words for the copy's folder."""
+    return (f"the folder the recorder is copied to, {folder}, is not out "
+            f"of an ordinary account's reach: {why}. Only an administrator "
+            "may write there for the copy to hold: give it to one, or move "
+            "it away and let the installer make it.")
+
+
+def copy_refused(copy, why):
+    """The refusal's words for what stands at a copy's name."""
+    return (f"the file at the copy's name, {copy}, is not out of an "
+            f"ordinary account's reach: {why}. Move it away and let the "
+            "installer write it.")
 
 
 def reach_refusals():
@@ -7560,21 +8015,14 @@ def reach_refusals():
     folder = program_folder()
     why = in_reach(folder)
     if why:
-        refusals.append(
-            f"the folder the recorder is copied to, {folder}, is not out of "
-            f"an ordinary account's reach: {why}. Only an administrator may "
-            "write there for the copy to hold: give it to one, or move it "
-            "away and let the installer make it.")
+        refusals.append(folder_refused(folder, why))
     # What already stands at a copy's name: identical bytes are never
     # rewritten, so its owner, its bits and a link there are read here.
     for name in COPIED:
         copy = os.path.join(folder, name)
         why = in_reach(copy) if os.path.lexists(copy) else None
         if why:
-            refusals.append(
-                f"the file at the copy's name, {copy}, is not out of an "
-                f"ordinary account's reach: {why}. Move it away and let the "
-                "installer write it.")
+            refusals.append(copy_refused(copy, why))
     return refusals
 
 
@@ -7625,31 +8073,102 @@ def copy_plan(folder):
     return plan
 
 
-def write_copy(plan, folder):
+def write_copy(plan, folder, judged=True):
     """Write each copy in `plan` whose bytes differ, through a temporary
-    file beside it moved into place (replace_file), making the folders
-    above that are absent, readable by every account as the managed
-    file is. Returns (what was written, for put_copy_back; None), or
-    (None, (the path refused, the OSError)) with everything this wrote
-    taken back: without the right, nothing is written anywhere
-    (ADR-0042 ruling 2)."""
-    made, above = [], os.path.abspath(folder)
-    while not os.path.lexists(above) and os.path.dirname(above) != above:
-        made.append(above)
-        above = os.path.dirname(above)
-    written, target = ([], made), folder
+    file beside it moved into place, making the folders above that are
+    absent, readable by every account as the managed file is. The check
+    holds at the write, not only before it (#574). With HELD_WALK the
+    folder is walked as the check walks it, each folder held open from
+    the moment it is judged, and each copy is written through the
+    descriptor the walk ended in (replace_at): what was judged is what
+    is written. Elsewhere, Windows included, the check is asked again
+    just before each write, which narrows the window between the two
+    and does not close it. `judged` is false where the stand-in waived
+    the check, and nothing is judged then. Returns (what was written,
+    for put_copy_back; None); (None, (the path refused, the OSError));
+    or (None, the refusal's words) when the check now fails. Either
+    way everything this wrote is taken back: without the right, nothing
+    is written anywhere (ADR-0042 ruling 2)."""
+    written, target = ([], []), folder
     try:
-        for each in reversed(made):
+        if HELD_WALK:
+            made = []
+            try:
+                why, held = walk_path(folder, made, judge=judged)
+            finally:
+                written[1].extend(reversed(made))
+            if why:
+                put_copy_back(written)
+                return None, folder_refused(folder, why)
+            try:
+                for target, data, old, mode in plan:
+                    name = os.path.basename(target)
+                    if data != old or name_is_link(name, held):
+                        replace_at(held, name, data, 0o644)
+                        written[0].append((target, old, mode))
+            finally:
+                os.close(held)
+            return written, None
+        above = os.path.abspath(folder)
+        while not os.path.lexists(above) and os.path.dirname(above) != above:
+            written[1].append(above)
+            above = os.path.dirname(above)
+        for each in reversed(written[1]):
+            why = judged and in_reach(folder)
+            if why:
+                put_copy_back(written)
+                return None, folder_refused(folder, why)
             os.mkdir(each)
             os.chmod(each, 0o755)
         for target, data, old, mode in plan:
             if data != old or os.path.islink(target):
+                why = judged and in_reach(folder)
+                refusal = why and folder_refused(folder, why)
+                why = (judged and not refusal and os.path.lexists(target)
+                       and in_reach(target))
+                refusal = refusal or (why and copy_refused(target, why))
+                if refusal:
+                    put_copy_back(written)
+                    return None, refusal
                 replace_file(target, data, mode=0o644, through_links=False)
                 written[0].append((target, old, mode))
     except OSError as error:
         put_copy_back(written)
         return None, (target, error)
     return written, None
+
+
+def name_is_link(name, folder):
+    """Whether what stands at `name` in the folder held as `folder` is a
+    link, or is gone since the plan read it: either is written again."""
+    try:
+        return stat.S_ISLNK(os.stat(name, dir_fd=folder,
+                                    follow_symlinks=False).st_mode)
+    except FileNotFoundError:
+        return True
+
+
+def replace_at(folder, name, data, mode):
+    """replace_file inside the folder held open as the descriptor
+    `folder` (#574): a temporary file made there exclusively, never
+    through a link, flushed to disk and given `mode`, then moved over
+    `name` itself, a link at that name included."""
+    temp = f"{name}.{os.urandom(6).hex()}.tmp"
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                 0o600, dir_fd=folder)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+            os.fchmod(f.fileno(), mode)
+        os.replace(temp, name, src_dir_fd=folder, dst_dir_fd=folder)
+    except BaseException:
+        try:
+            os.unlink(temp, dir_fd=folder)
+        except OSError:
+            pass
+        raise
 
 
 def put_copy_back(written):
@@ -8452,6 +8971,8 @@ def cmd_install_hook(args):
     print("every NEW Claude Code session on this machine now leaves a chain")
     print(f"in the store ({os.path.join(store_home(), 'receipts')}), one")
     print("drawer per project. Restart open sessions.")
+    if os.path.isfile(supervisor_path()):
+        print(next_step())
     if tier:
         print(tier)
     return 0
@@ -8563,7 +9084,11 @@ def install_managed_hooks(args):
                    for block in our_hooks(settings)["hooks"].get(event, [])}
                   - {"*", wanted})
 
-    copied, refusal = write_copy(plan, folder)
+    copied, refusal = write_copy(plan, folder, judged=not waived)
+    if isinstance(refusal, str):
+        print(f"refusing: {refusal} Nothing was written (ADR-0042).",
+              file=sys.stderr)
+        return EX_USAGE
     if refusal:
         return cannot_write(*refusal)
     pinned, refused = settle_telemetry_pin(pin_path, wanted_pin, found_pin,
@@ -8671,6 +9196,9 @@ def install_managed_hooks(args):
     elif changed or pinned:
         print("Restart open sessions and a running `supervisor serve`: "
               "managed settings load at start.")
+    if (both or removed or changed or pinned) and any(
+            os.path.basename(copy[0]) == "supervisor.py" for copy in plan):
+        print(next_step(folder))
     tier = profile_notice(args.profile, wired)
     if tier:
         print(tier)
@@ -8855,7 +9383,10 @@ def main(argv=None):
     anchor_parser.add_argument("--calendar", action="append", default=[],
                                metavar="URL",
                                help="calendar server (repeatable; default: "
-                                    "public OpenTimestamps pools)")
+                                    "public OpenTimestamps pools); with "
+                                    "--upgrade, a calendar a pending row "
+                                    "may name and be asked, beside those "
+                                    "pools, which are always asked (#415)")
     anchor_parser.add_argument("--upgrade", action="store_true",
                                help="complete pending proofs once Bitcoin has them")
     anchor_parser.add_argument("--manifest", default=None, metavar="PATH",
@@ -8924,8 +9455,10 @@ def main(argv=None):
         help="append one entry from a Claude Code PostToolUse payload on stdin")
     hook_parser.add_argument("--log-dir", default=None, metavar="DIR",
                              help="directory for per-session receipt logs "
-                                  "(default: $CLAUDE_PROJECT_DIR/receipts, "
-                                  "else the working directory)")
+                                  "(default: the store's drawer for the "
+                                  "project in $CLAUDE_PROJECT_DIR, or in "
+                                  "the payload's cwd when that is unset, "
+                                  "else the working directory; ADR-0011)")
     hook_parser.add_argument("--actor", default=CLAUDE_CODE_ACTOR,
                              help="actor recorded for hook entries")
     hook_parser.add_argument("--anchor", action="store_true",
@@ -9042,10 +9575,11 @@ def main(argv=None):
              "name, or action line leaves")
     install_parser.add_argument(
         "--publish-chain", default=None, metavar="URL", type=publish_url,
-        help="opt in: every session end POSTs the chain's entries since "
-             "the last acknowledged one to this URL, after the head and "
-             "before the stamp and the anchor, quietly and best-effort "
-             "(ADR-0031). Pick a remote that can only add, never delete, "
+        help="opt in: each entry is POSTed to this URL as it is written, "
+             "within a second, and every session end sends what the "
+             "remote does not hold, after the head and before the stamp "
+             "and the anchor, quietly and best-effort (ADR-0031, "
+             "ADR-0045). Pick a remote that can only add, never delete, "
              "such as the receiver (docs/RECEIVER.md). Every entry "
              "leaves: action lines are command lines, and the installer "
              "says so")

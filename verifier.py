@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 # recorder is running; FORMAT_VERSION says which chains it can read. The
 # format is frozen (SPEC §2.1); the tool is tagged at every promotion,
 # together with supervisor.py — the two constants must agree.
-TOOL_VERSION = "0.20.0"
+TOOL_VERSION = "0.21.0"
 FORMAT_VERSION = "0.1"
 DEFAULT_LOG = "receipts.jsonl"
 
@@ -129,7 +129,9 @@ def read_log(path):
 
 
 def missing_log(path):
-    print(f"error: {visible(path)} not found — run `loxodonta init` first", file=sys.stderr)
+    print(f"error: {visible(path)} not found — on the machine that will "
+          "hold the chain, the operator can run `loxodonta init` first",
+          file=sys.stderr)
     return EX_NOINPUT
 
 
@@ -143,14 +145,17 @@ def unreadable_log(path, error):
     return EX_NOINPUT
 
 
-def tail_entry(lines):
-    """The chain's final entry, or None if the tail is damaged: torn (a
-    line left partial by a crash or an overlapping append, or holding a
-    byte that is not UTF-8) or forked (a well-formed entry whose `n` is
-    not its line number, left by a lock taken from a paused holder).
-    Neither can be built on: a new entry laid over a fork would bury an
-    innocent race under later receipts until it read as tampering in
-    the middle of the file, so damage stays at the tail (SPEC §6, §8)."""
+def is_chain_head(value):
+    """A SHA256 in lowercase hex and nothing else: the only form an
+    entry_hash takes, so any other is BROKEN to the walk (SPEC §6)."""
+    return (isinstance(value, str) and len(value) == 64
+            and all(c in "0123456789abcdef" for c in value))
+
+
+def tail_line(lines):
+    """The final line as an entry whose `n` is its line number, whatever
+    its `entry_hash` holds, or None; `head` asks the hash's form itself,
+    so it can name that refusal apart."""
     if not lines:
         return None
     try:
@@ -162,9 +167,13 @@ def tail_entry(lines):
         last = json.loads(lines[-1])
     except (ValueError, RecursionError):
         return None
-    if not isinstance(last, dict) or "entry_hash" not in last or "n" not in last:
+    if not isinstance(last, dict) or "entry_hash" not in last:
         return None
-    if last["n"] != len(lines) - 1:
+    # An integer, never a boolean or a float, since Python takes 2.0 and
+    # True as equal to 2 and 1, and the walk calls such an n BROKEN; no
+    # n at all is refused alike (#587).
+    n = last.get("n")
+    if type(n) is not int or n != len(lines) - 1:
         return None
     return last
 
@@ -207,15 +216,18 @@ def files_base(log):
         # Valid JSON with no path in it, `[]` say (#406).
         return None, f"{unread}: it holds no JSON object"
     path = held.get("path")
-    if isinstance(path, str) and not (posixpath.isabs(path)
-                                      or ntpath.isabs(path)):
+    if not isinstance(path, str):
+        # `{}` or `{"path": 5}` names no project at all, so it is not a
+        # missing one (#589).
+        return None, f"{unread}: it names no project path"
+    if not (posixpath.isabs(path) or ntpath.isabs(path)):
         # The record holds the project's absolute path; a relative one
         # would resolve against wherever the verifier happens to run.
         # Absolute is asked of both systems' paths, so a record written
         # on one and read on the other is a missing project, not this.
         return None, f"{unread}: the path it holds is not absolute " \
             f"({visible(path)})"
-    if isinstance(path, str) and os.path.isdir(path):
+    if os.path.isdir(path):
         return path, None
     return None, (f"{visible(record)} points at a missing project "
                   f"({visible(path)})")
@@ -405,8 +417,9 @@ def walk(lines, field_rules=True):
             if n == len(lines) - 1:
                 # The one honest damage signature: a crash mid-append can
                 # truncate the final line and nothing else (SPEC §6).
+                intact = f"entries 0..{n - 1} intact" if n else "no entry intact"
                 breaks.append((n, f"BROKEN: torn tail at line {n} (crash-"
-                                  f"truncated append; entries 0..{n - 1} intact)"))
+                                  f"truncated append; {intact})"))
             else:
                 breaks.append((n, f"BROKEN at entry {n}: line is not valid JSON"))
             entries.append(None)
@@ -541,13 +554,13 @@ def judge_prefixes(marks, transcript_path):
     except FileNotFoundError:
         # Absence is a note, never a verdict: the harness cleans
         # transcripts on a retention cycle (ADR-0017).
-        print(f"TRANSCRIPT-UNRESOLVED: no transcript at {transcript_path} "
+        print(f"TRANSCRIPT-UNRESOLVED: no transcript at {visible(transcript_path)} "
               "— commitments unjudgeable; chain verdict unaffected")
         return False
     except OSError as error:
         # A folder, a pipe or a device in its place is named and never
         # waited on or read (#386); a note like absence, never a verdict.
-        print(f"TRANSCRIPT-UNRESOLVED: {transcript_path} cannot be read as "
+        print(f"TRANSCRIPT-UNRESOLVED: {visible(transcript_path)} cannot be read as "
               f"a transcript: {error.strerror or error} — commitments "
               "unjudgeable; chain verdict unaffected")
         return False
@@ -1139,8 +1152,11 @@ def check_anchors(log, entries, headers, used, packaged=False):
             print(f"NO-ANCHORS: {visible(name)} is not in this package — "
                   "anchoring is optional")
         else:
+            # A recipient holds verifier.py alone, so a step only the
+            # recorder takes is named as the operator's (#588).
             print(f"NO-ANCHORS: {visible(name)} not found — anchoring is "
-                  "optional; run `loxodonta anchor` to add one")
+                  "optional; on the machine that holds the chain, the "
+                  "operator can run `loxodonta anchor` to add one")
         return False
     unreadable = unreadable_sidecar(anchors_path(log))
     if unreadable is not None:
@@ -1204,11 +1220,14 @@ def check_anchors(log, entries, headers, used, packaged=False):
                       "settled this head — no upgrade is owed")
                 continue
             if "calendar" in record:
-                advice = "run `loxodonta anchor --upgrade`"
+                advice = ("on the machine that holds the chain, the "
+                          "operator can run `loxodonta anchor --upgrade`")
             else:
                 # The upgrade asks the calendar a proof names (SPEC 9.4).
                 advice = ("`loxodonta anchor --upgrade` cannot complete it; "
-                          "`loxodonta anchor --force` submits the head again")
+                          "on the machine that holds the chain, the operator "
+                          "can run `loxodonta anchor --force` to submit the "
+                          "head again")
             print(f"ANCHOR-PENDING: head {head}… submitted {ts} via "
                   f"{calendar} — {advice}")
         elif kind == "mismatch":
@@ -1497,7 +1516,7 @@ def judge_stamp(head, reply, chain_file):
     if chain_file is None:
         return "not judged", "no --authority-chain FILE given"
     if not os.path.isfile(chain_file):
-        return "not judged", f"--authority-chain {chain_file} not found"
+        return "not judged", f"--authority-chain {visible(chain_file)} not found"
     try:
         with tempfile.TemporaryDirectory() as scratch:
             token = os.path.join(scratch, "stamp.tsr")
@@ -1555,8 +1574,9 @@ def check_stamps(log, entries, chain_file, packaged=False):
                   "authority timestamp is optional")
         else:
             print(f"NO-STAMPS: {visible(name)} not found — the authority "
-                  "timestamp is optional; run `loxodonta stamp --authority "
-                  "URL` to add one")
+                  "timestamp is optional; on the machine that holds the "
+                  "chain, the operator can run `loxodonta stamp "
+                  "--authority URL` to add one")
         return False
     unreadable = unreadable_sidecar(stamps_path(log))
     if unreadable is not None:
@@ -1613,7 +1633,7 @@ def check_stamps(log, entries, chain_file, packaged=False):
             # named as testimony and never as the signer (the trap
             # ADR-0008 ruling 4 closes for the signature).
             print(f"STAMPED: entries 0..{n} existed when a key certified "
-                  f"by {chain_file} signed this head under its own clock "
+                  f"by {visible(chain_file)} signed this head under its own clock "
                   f"({authority_words(record)}) — the time inside the token "
                   "is that key's word, not this machine's (`openssl ts "
                   "-reply -text` prints it)")
@@ -1825,20 +1845,22 @@ def cmd_head(args):
     if not lines:
         print(f"error: {visible(args.log)} is empty — no chain head to print", file=sys.stderr)
         return EX_NOINPUT
-    last = tail_entry(lines)
+    last = tail_line(lines)
     if last is None:
+        # `verify`, not `loxodonta verify`: the recorder and verifier.py
+        # both have it.
         print(f"error: {visible(args.log)} has a damaged tail — run "
-              "`loxodonta verify` (a torn tail has no head to record)",
-              file=sys.stderr)
+              "`verify` on it for the verdict (a damaged tail has no head "
+              "to record)", file=sys.stderr)
         return 1
     head = last["entry_hash"]
-    # A head is a SHA256 in lowercase hex and nothing else, so anything
-    # else is refused unprinted: the line is the writer's text, and the
-    # walk calls it BROKEN, since no such value matches a canonical form.
-    if not (isinstance(head, str) and len(head) == 64
-            and all(c in "0123456789abcdef" for c in head)):
+    # Anything but a head is refused unprinted: the line is the writer's
+    # text, and the walk calls it BROKEN, since no such value matches a
+    # canonical form.
+    if not is_chain_head(head):
         print(f"error: {visible(args.log)} ends in an entry whose entry_hash is not "
-              "a chain head — run `loxodonta verify`", file=sys.stderr)
+              "a chain head — run `verify` on it for the verdict",
+              file=sys.stderr)
         return 1
     print(head)
     return 0
@@ -2325,13 +2347,17 @@ def judge_manifest_anchor(folder, headers, used):
                   f"submitted {ts} via {calendar}, which never came back; "
                   "another calendar settled it, so no upgrade is owed")
             continue
+        # The upgrade is the recorder's verb, which a recipient holding
+        # verifier.py alone does not have, so the line says whose it is.
         if "calendar" in record:
-            advice = ("unpack the package and run `loxodonta anchor --upgrade "
-                      "--manifest=<its manifest.json>` after a few hours")
+            advice = ("whoever holds the recorder can unpack the package "
+                      "and run `loxodonta anchor --upgrade --manifest=<its "
+                      "manifest.json>` after a few hours")
         else:
             advice = ("`loxodonta anchor --upgrade` cannot complete it; "
-                      "`loxodonta anchor --force --manifest=<its "
-                      "manifest.json>` submits the manifest again")
+                      "whoever holds the recorder can run `loxodonta anchor "
+                      "--force --manifest=<its manifest.json>` to submit the "
+                      "manifest again")
         print(f"seal anchor: ANCHOR-PENDING: the manifest was submitted "
               f"{ts} via {calendar} — {advice}; the rung is not earned until "
               "the proof completes and a block header checks its block")
@@ -2403,7 +2429,7 @@ def judge_manifest_stamp(folder, chain_file):
                     # certifies; the name in the record sits in a file
                     # the manifest does not list, so it is testimony.
                     print(f"seal stamp: STAMPED: a key certified by "
-                          f"{chain_file} signed this manifest's sha256 under "
+                          f"{visible(chain_file)} signed this manifest's sha256 under "
                           f"its own clock ({authority_words(record)}) — "
                           "the time inside the token is that key's word, not "
                           "this machine's (`openssl ts -reply -text` prints "
@@ -3108,14 +3134,17 @@ def reader_gone(error):
     report | head`). POSIX raises BrokenPipeError (EPIPE); Windows
     reports a plain EINVAL from the closed handle instead, so match on
     both or the quiet death is a traceback on half the platforms. EINVAL
-    means nothing about pipes off Windows."""
+    means nothing about pipes off Windows, and on Windows it counts only
+    when it names no file: a write to stdout never does, and a file
+    refused for not being a regular one always does, so that refusal is
+    never taken for a reader that left."""
     return isinstance(error, BrokenPipeError) or (
         os.name == "nt" and isinstance(error, OSError)
-        and error.errno == errno.EINVAL)
+        and error.errno == errno.EINVAL and error.filename is None)
 
 
 def run_main(main):
-    """Run a command line to its exit code, as both files' entry point.
+    """Run a command line to its exit code, as every tool's entry point.
     Two endings are not the command's own (ADR-0037). A reader that hung
     up gets a quiet 141, what a shell reports for that: never 0 (VALID)
     or 1 (BROKEN), since the unread lines were never judged. A crash

@@ -150,3 +150,19 @@ The ratified shape, recorded because the trade-offs were argued:
 - **An ADR before building** — not taken. The operator chose to build
   first and ratify after; recorded here so the order is on the record
   rather than implied.
+
+## Addendum, 2026-11-12: an unasked look writes a live alarm the book does not show
+
+*Drafted for the author to confirm (#281).* `serve` with no keeper
+cadence now looks on a clock of its own (`SUPERVISOR_WATCH_TICK_SECONDS`,
+ten minutes by default). Its looks are unasked turns, as the keeper's
+are: they stay out of the book while they have nothing new to report.
+The list of what an unasked turn writes its row for, in the #271
+addendum a baseline event or a reawakening, is longer now: a blind
+memory or more folders the census could not list than the book's
+newest row shows (#448), and a live alarm it does not show yet (#281).
+A live alarm reads as evidence once its session ends or goes idle, so
+a look at night may be the only one that sees it. A live alarm already
+shown does not mark every later day as watched, as ADR-0039 ruled for
+a standing baseline event; the day its row is written reads as
+watched, the price the #271 addendum names.
