@@ -420,8 +420,8 @@ which never ran, left one, `PostToolUse`. Whether a hook fires, and
 how many times, depends on the harness version. Nothing is hidden by
 it: an extra receipt is a surplus, never a deficit.
 
-Since ADR-0047 a receipt carries its call's id, and since pull request
-#635 the reading at the receiver pays at most one receipt per id: a
+Since ADR-0047 a receipt carries its call's id, and since pull
+request #635 the reading at the receiver pays at most one receipt per id: a
 second receipt repeating an id already paid, as a failed call's two
 hooks leave, is counted apart, neither surplus nor deficit (ADR-0046,
 its addendum of this date, ruling 2). A refused call's receipt still
