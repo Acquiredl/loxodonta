@@ -7607,13 +7607,11 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
 
-    def test_a_thousand_lines_are_read_a_line_at_a_time_and_the_same(self):
-        # #616: the reading holds a line, never the whole file, and the
-        # one rule every reader keeps holds on the way through: a CRLF
-        # ending belongs to the ending, the torn tail a crash leaves is
-        # still a line, and a byte that is not UTF-8 is one unparsed
-        # line, not a broken scan. The bulk pushes the read past one
-        # chunk, so a line cut across two chunks is still one line.
+    def test_two_thousand_lines_and_every_ending_read_as_one_rule_says(self):
+        # #616: read a line at a time, an events file keeps the one rule
+        # every reader keeps (SPEC §1): a CRLF ending belongs to the
+        # ending, the torn tail a crash leaves is still a line, and a byte
+        # that is not UTF-8 is one unparsed line, not a broken scan.
         chain_copy(self.data, FIXTURE_SESSION)
         bulk = json.dumps({
             "received": "2026-10-08T00:00:00Z", "from": "127.0.0.1",
@@ -7635,6 +7633,110 @@ class ReceiverReadingTest(unittest.TestCase):
         second = report["completeness"]["second_record"]
         self.assertEqual((second["unparsed"], second["sessionless"]),
                          (2, 2002))
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    # The supervisor is compiled before tracemalloc starts: compiling a
+    # file this long peaks at about 20 MiB, which would hide the reading's
+    # own peak under it (#616).
+    TRACED = (
+        "import sys\n"
+        "import tracemalloc\n"
+        "path = sys.argv[1]\n"
+        "with open(path, 'rb') as f:\n"
+        "    code = compile(f.read(), path, 'exec')\n"
+        "sys.argv = sys.argv[1:]\n"
+        "tracemalloc.start()\n"
+        "try:\n"
+        "    exec(code, {'__name__': '__main__', '__file__': path})\n"
+        "finally:\n"
+        "    sys.stderr.write('traced peak %d\\n'\n"
+        "                     % tracemalloc.get_traced_memory()[1])\n")
+
+    def traced_scan(self):
+        """The report of one settled `scan --receiver`, and the most
+        memory the scan held at once, as tracemalloc counts it."""
+        script = temp_folder(self) / "traced.py"
+        script.write_text(self.TRACED, encoding="utf-8")
+        result = run(script, SUPERVISOR, "scan", "--receiver",
+                     str(self.data), "--json", timeout=300,
+                     env={**self.env, "SUPERVISOR_SETTLE_SECONDS": "0"})
+        self.assertNotIn("Traceback", result.stderr, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        peak = re.fullmatch(r"traced peak (\d+)",
+                            result.stderr.splitlines()[-1])
+        self.assertIsNotNone(peak, result.stderr)
+        return json.loads(result.stdout), int(peak.group(1))
+
+    def test_a_large_events_file_is_never_held_whole(self):
+        # #616: a receiver's folder grows without a bound, and a scan that
+        # read each events file whole held its largest day at once. Read
+        # a line at a time, a 16 MiB file adds less than 4 MiB to the
+        # scan's traced peak; read whole, it added about 40 MiB.
+        chain_copy(self.data, FIXTURE_SESSION)
+        _, before = self.traced_scan()
+        line = json.dumps({
+            "received": "2026-10-08T00:00:00Z", "from": "127.0.0.1",
+            "logs": {"resourceLogs": [{"scopeLogs": [{"logRecords": [
+                {"attributes": [{"key": "event.name",
+                                 "value": {"stringValue":
+                                           "tool_decision"}}]}]}]}]}},
+            separators=(",", ":")).encode() + b"\n"
+        count = (16 << 20) // len(line)
+        with open(self.data / "events-2026-10-08.jsonl", "wb") as events:
+            events.write(line * count)
+
+        report, after = self.traced_scan()
+
+        self.assertEqual(
+            report["completeness"]["second_record"]["sessionless"], count)
+        self.assertLess(after - before, 4 << 20,
+                        f"a 16 MiB events file added {after - before} bytes "
+                        f"to the traced peak ({before} without it)")
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "a byte-range lock that fails a read is Windows' "
+                         "(msvcrt.locking); a POSIX lock is advisory")
+    def test_a_file_whose_read_stops_part_way_counts_for_nothing(self):
+        # #616: read a line at a time, a file can fail after some of its
+        # lines were read. It is named unread and counts for nothing, as
+        # a file that cannot be opened does and as the whole read did, so
+        # a session only its first lines name is not judged on them.
+        import msvcrt
+        chain_copy(self.data, FIXTURE_SESSION)
+        line = json.dumps({
+            "received": "2026-10-08T00:00:00Z", "from": "127.0.0.1",
+            "logs": {"resourceLogs": [{"scopeLogs": [{"logRecords": [
+                {"attributes": [
+                    {"key": "session.id",
+                     "value": {"stringValue": "partway-session-0000"}},
+                    {"key": "event.name",
+                     "value": {"stringValue": "tool_result"}},
+                    {"key": "tool_name",
+                     "value": {"stringValue": "Bash"}}]}]}]}]}},
+            separators=(",", ":")).encode() + b"\n"
+        path = self.data / "events-2026-10-08.jsonl"
+        with open(path, "wb") as events:
+            events.write(line * ((1 << 20) // len(line)))
+        # Locked by this process from 512 KiB on, the file opens in the
+        # scan and its first lines read; the read that reaches the lock
+        # fails.
+        held = open(path, "rb")
+        self.addCleanup(held.close)
+        held.seek(512 << 10)
+        msvcrt.locking(held.fileno(), msvcrt.LK_NBLCK, 4096)
+
+        def unlock():
+            held.seek(512 << 10)
+            msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 4096)
+        self.addCleanup(unlock)
+
+        report = json.loads(self.scan().stdout)
+
+        watch = report["completeness"]
+        self.assertIn("events-2026-10-08.jsonl", watch["note"])
+        self.assertIn("nothing of them is counted", watch["note"])
+        self.assertNotIn("partway-session-0000", self.rows(report))
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
 
