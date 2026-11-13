@@ -23,7 +23,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - At the receiver, a chain copy carrying the hook's `second-record-cut:` note is never counted as before the second record's memory, whatever dates its entries carry: it reads `SECOND-RECORD-ABSENT` and raises (#486).
 - `anchor --upgrade` asks only the default calendars and each `--calendar` given; a row naming another address is named, skipped and never asked, so upgrading a handed sidecar sends nothing where its issuer chose. The keeper passes its `--calendar` (#415).
 - A git checkout holds the four tool files with LF line endings on every platform, so on Windows their sums match the release's `SHA256SUMS` and a managed install made from a checkout carries the release's bytes (#622).
-- `install-hook`, plain or `--managed`, ends its restart line with the next step: the supervisor's `scan`, spelled as the wired commands are, naming the managed copy on a managed install (#147).
+- `install-hook`, plain or `--managed`, names the next step after its restart line: the supervisor's `scan`, alone on a line of its own, spelled as the wired commands are, in PowerShell's form on Windows, naming a managed install's copy (#147).
 - `supervisor serve` with no keeper cadence looks on a clock of its own, every `SUPERVISOR_WATCH_TICK_SECONDS` (ten minutes; 0 turns it off), `--receiver` included, and a live alarm such a look finds goes in the day book (#281).
 - `docs/SPEC.md` v0.1.7 states `head`'s rule: a final line whose `n` is not an integer equal to its line number (`3.0` or `true`), or whose `entry_hash` is not 64 lowercase hex, has no head; no writer appends after it (#587).
 - Each vector names the SPEC revision it was written against, `since`; the frozen clean-room verifier runs only the rows of the spec it was written from (#587).
@@ -56,7 +56,9 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The help of `scan --receiver` no longer says every session short of receipts raises the exit until acknowledged: a settled one stands until accepted, and one still arriving with a call overdue until the receipts arrive or it settles (#617).
 - The hook's refusal names a file standing where its drawer's path needs a folder, where Windows said it could not find the path; the unlistable store's warning is printed only once the receipt's chain stands (#589).
 - On Windows a hook command naming `loxodonta.py.`, which Windows runs as the recorder, reads as the recorder's: the supervisor no longer says no recorder hook is wired, and `install-hook` wires no second entry beside it (#589).
-- `serve`, in the supervisor and the receiver, refuses a `--port` no socket takes with 64 by name, where it crashed; `hook --help` names the store's drawer as `--log-dir`'s default; the dashboard says `loxodonta verify` (#589).
+- `serve`, in the supervisor and the receiver, refuses a `--port` no socket takes, past 65535 or below 0, with 64 by name, where it crashed with `OverflowError` (#449).
+- `hook --help` names the store's drawer for the project as `--log-dir`'s default, where it still named `$CLAUDE_PROJECT_DIR/receipts` (#611).
+- The dashboard names the command `loxodonta verify`, where it said `receipts verify`, the tool's old name (#241).
 - `verify` on a chain whose only line is torn says `no entry intact`, where it printed `entries 0..-1 intact`. The verdict and the exit are unchanged (#589).
 - A project record that is an object naming no string `path` (`{}`, `{"path": 5}`) cannot be read as a project record, `it names no project path`, where it read as a missing project named `(None)` or `(5)` (#589).
 - `verify` prints the `--transcript` path and the `--authority-chain` file with control characters escaped, in `TRANSCRIPT-UNRESOLVED`, `STAMPED` and the not-found note, where they printed raw (#589).
