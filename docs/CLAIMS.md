@@ -52,7 +52,7 @@ The full setup is what the two promises are made for, and it is the one to run w
 |---|---|
 | 1, the managed install | One flag on a run's command line, or an edit to your own settings file, stops the record. The witness reports the silence only while the transcript survives, and a hook taken out of your settings file reads to it as coverage ended, a note and not an alarm. And the recorder and its interpreter sit at paths the operator owns: the hook fires after the call it records, so a session that edits either writes that edit's receipt with the edited code, and the chain stays `VALID`; what is then left is the count at the receiver, never the content of the receipts |
 | 2, an agent without administrator rights | The managed file is as easy to rewrite as any other, and condition 1 is worth nothing |
-| 3, a copy off the machine | At `local`, a chain regenerated whole or a store wiped does not show. At `timestamped`, a regeneration shows once the anchor matures, if a copy of its proof was kept off the machine, since nothing sends it there (#524); and a wiped store is gone |
+| 3, a copy off the machine | At `local`, a chain regenerated whole or a store wiped does not show. At `timestamped`, a regeneration of the entries up to the anchored head shows once the anchor matures, if a copy of its proof was kept off the machine, since at that tier the proof stays on the machine; and a wiped store is gone |
 | 4, somebody reading it | Nothing is detected until someone looks |
 
 The full setup does not make the record complete. Whether anything is missing is the reading at the receiver's question, and the witness on the agent's machine catches faults; the limits of both are above.
@@ -62,7 +62,7 @@ The full setup does not make the record complete. Whether anything is missing is
 | What happened to the chain | `local` | `timestamped` | `full` |
 |---|---|---|---|
 | One entry edited, deleted or moved | shows | shows | shows |
-| Regenerated whole | only against a head you kept by hand | shows once the anchor matures, if its proof was kept off the machine | shows at once, at the remote |
+| Regenerated whole | only against a head you kept by hand | shows once the anchor matures, for the entries up to the anchored head, if its proof was kept off the machine | shows at once, at the remote |
 | The store wiped | gone | gone, and a copy of the anchor's proof kept off the machine says a chain existed | survives at the remote as of the last send |
 | The tail since the last send rewritten | does not show | does not show | does not show: the rewritten tail reaches the remote as the only version |
 
@@ -101,7 +101,7 @@ Stated here once, so that none of them is a discovery.
 
 - The baseline, the day book and the coverage marker are files on the agent's machine. A baseline deleted alone is an alarm. The baseline and the day book deleted together read as a new install, and a session the scan had already reported as silent is then never judged again (ADR-0039, ADR-0029).
 - An edit in place to the baseline or the day book is not detected either, and `acknowledge`, which stands an alarm down, can be run by the account the agent runs as.
-- What holds against the writer is what is kept off the machine: the anchor, the published head and the published chain. Nothing the supervisor on the agent's machine remembers about sessions is kept there, so a machine that keeps its only memory beside the agent is at risk of losing it to the agent. The reading at the receiver keeps its own memory, and the acknowledgements that stand its findings down, on the receiver's machine (ADR-0046).
+- What holds against the writer is what is kept off the machine: the anchor, whose proof leaves the machine only with a published chain, as at `full`, the published head and the published chain. Nothing the supervisor on the agent's machine remembers about sessions is kept there, so a machine that keeps its only memory beside the agent is at risk of losing it to the agent. The reading at the receiver keeps its own memory, and the acknowledgements that stand its findings down, on the receiver's machine (ADR-0046).
 
 **Limits of what a receipt holds:**
 
