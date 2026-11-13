@@ -40,7 +40,7 @@ A vantage point is a place with a clear view that the watched party cannot get t
 2. In the harness, `/status` lists `Enterprise managed settings (drop-ins)` on its `Setting sources` line. On a machine whose organization delivers settings another way, the file may not be the one in use, and that line says which source is.
 3. The proof: start a session with `{"disableAllHooks": true}` passed through `--settings`, run one tool call, and see that its drawer and its receipt are written.
 
-**Condition 2 has no check on this page.** An elevated shell, or `sudo` that asks for no password, breaks it. The supervisor runs as the same account as the agent, and where a managed install is in place its scan's settings note says when the account it runs as can write the managed file or the copy (#469).
+**Condition 2 has no check on this page.** An elevated shell, or `sudo` that asks for no password, breaks it. The supervisor runs as the same account as the agent, and where a managed install is in place its scan's settings note says when the account it runs as, without raising its rights, can write the managed file or the copy (#469).
 
 **The pin on the harness's events is not a condition.** A managed install at `full` writes it as a second managed file of its own (ADR-0041). It holds against the settings files and the command line, and not against the environment a run is launched with. On Claude Code 2.1.294 the hook sees a run launched with its telemetry off and notes it in the chain; a run launched with its events sent elsewhere leaves no note, and reads at the receiver as one whose events never arrived (HOOK.md).
 

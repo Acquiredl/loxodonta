@@ -2041,14 +2041,18 @@ class FootingNoteTest(ManagedBase):
 
     def marked_on_windows(self, how):
         """The managed file and the copies marked read-only (`attrib`) or
-        denied write to this account (`icacls`), each undone at cleanup."""
+        denied write to this account (`icacls`), each undone at cleanup.
+        The managed file is denied its data and attributes alone, so the
+        scan can still read it; the copies every write right, (W), whose
+        SYNCHRONIZE refuses every open, so only their owner shows."""
         account = os.environ.get("USERNAME")
         for path in (self.managed_file, self.copy, self.copy_supervisor):
+            rights = "(WD,AD,WA,WEA)" if path == self.managed_file else "(W)"
             if how == "attrib":
                 mark, undo = (["attrib", "+r", str(path)],
                               ["attrib", "-r", str(path)])
             else:
-                mark = ["icacls", str(path), "/deny", f"{account}:(W)"]
+                mark = ["icacls", str(path), "/deny", f"{account}:{rights}"]
                 undo = ["icacls", str(path), "/remove:d", account]
             done = subprocess.run(mark, capture_output=True,
                                   encoding="utf-8", timeout=60)
@@ -2076,7 +2080,8 @@ class FootingNoteTest(ManagedBase):
         said = " ".join(self.scan().split())
 
         self.assertIn(FOOTING, said)
-        self.assertIn(self.managed_file.as_posix(), said)
+        for path in (self.managed_file, self.copy, self.copy_supervisor):
+            self.assertIn(path.as_posix(), said)
 
     @unittest.skipIf(sys.platform == "win32", "permission bits are POSIX")
     def test_files_the_account_owns_marked_unwritable_still_say_can(self):

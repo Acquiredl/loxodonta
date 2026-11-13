@@ -2824,29 +2824,84 @@ def token_elevated():
         return None
 
 
+def owned_by_this_account(path):
+    """Whether the Windows file at `path` is owned by the user this
+    process runs as, read from its security descriptor, which its owner
+    may always read; False when that cannot be read."""
+    import ctypes
+    from ctypes import wintypes
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.GetNamedSecurityInfoW.argtypes = (
+        wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+    advapi.OpenProcessToken.argtypes = (wintypes.HANDLE, wintypes.DWORD,
+                                        ctypes.POINTER(wintypes.HANDLE))
+    advapi.GetTokenInformation.argtypes = (
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD))
+    advapi.EqualSid.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+    owner, described = ctypes.c_void_p(), ctypes.c_void_p()
+    # SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION.
+    if advapi.GetNamedSecurityInfoW(str(path), 1, 1, ctypes.byref(owner),
+                                    None, None, None,
+                                    ctypes.byref(described)) != 0:
+        return False
+    token = wintypes.HANDLE()
+    try:
+        # TOKEN_QUERY, then TokenUser: a SID_AND_ATTRIBUTES, SID first.
+        if not advapi.OpenProcessToken(kernel32.GetCurrentProcess(), 0x8,
+                                       ctypes.byref(token)):
+            return False
+        buffer, size = ctypes.create_string_buffer(256), wintypes.DWORD()
+        if not advapi.GetTokenInformation(token, 1, buffer, 256,
+                                          ctypes.byref(size)):
+            return False
+        user = ctypes.c_void_p.from_buffer(buffer).value
+        return bool(advapi.EqualSid(owner, user))
+    finally:
+        if token:
+            kernel32.CloseHandle(token)
+        kernel32.LocalFree(described)
+
+
 def could_write(path, folder=False):
     """Whether the account this process runs as could write the file at
-    `path`, or make a file in the folder at `path` (`folder`): True,
-    False, or None when it cannot be told. Nothing is written. On POSIX,
-    the effective ids' access, and root can. On Windows a file is opened
-    for appending, by CreateFileW so the system's own answer is read,
-    and closed: only access denied (5) is "cannot", since a sharing
-    violation (32) refuses an account that may write. A folder is asked
-    by the token: an elevated one can, and any other is read as cannot,
-    the quieter question than making a file there."""
+    `path`, or make a file in the folder at `path` (`folder`), as
+    (True, None), (False, None), or (None, why) when it cannot be told.
+    Nothing is written. On POSIX root can, and so does the owner of what
+    stands there, who may give the write bits back (#638 review); else
+    the effective ids' access. On Windows a file is opened, by
+    CreateFileW so the system's own answer is read, and closed, asking
+    in turn to append, to change its attributes (a read-only mark), its
+    access list or its owner: any one granted is "can", since each
+    leads to a write; only access denied (5) to all four is "cannot". A
+    sharing violation (32) refuses an account that may write, and says
+    nothing. A folder is asked of the token: an elevated one can, and
+    any other is read as cannot, the quieter question than making a
+    file there."""
     if sys.platform != "win32":
         if os.geteuid() == 0:
-            return True
-        mode = os.W_OK | (os.X_OK if folder else 0)
+            return True, None
         try:
+            if os.lstat(path).st_uid == os.geteuid():
+                return True, None
+            mode = os.W_OK | (os.X_OK if folder else 0)
             if os.access in os.supports_effective_ids:
-                return os.access(path, mode, effective_ids=True)
-            return os.access(path, mode)
-        except OSError:
-            return None
+                return os.access(path, mode, effective_ids=True), None
+            return os.access(path, mode), None
+        except FileNotFoundError:
+            return False, None
+        except OSError as error:
+            return None, error.strerror or str(error)
     if folder:
         elevated = token_elevated()
-        return None if elevated is None else elevated
+        return ((None, "the token could not be asked") if elevated is None
+                else (elevated, None))
     try:
         import ctypes
         from ctypes import wintypes
@@ -2855,14 +2910,29 @@ def could_write(path, folder=False):
         kernel32.CreateFileW.argtypes = (
             wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
             wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
-        # FILE_APPEND_DATA, every share mode, OPEN_EXISTING: never made.
-        handle = kernel32.CreateFileW(str(path), 0x4, 0x7, None, 3, 0, None)
-        if handle in (None, wintypes.HANDLE(-1).value):
-            return False if ctypes.get_last_error() == 5 else None
-        kernel32.CloseHandle(wintypes.HANDLE(handle))
-        return True
-    except (AttributeError, ImportError, OSError):
-        return None
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        why = None
+        # FILE_APPEND_DATA, FILE_WRITE_ATTRIBUTES, WRITE_DAC, WRITE_OWNER;
+        # every share mode, OPEN_EXISTING: never made.
+        for access in (0x4, 0x100, 0x40000, 0x80000):
+            handle = kernel32.CreateFileW(str(path), access, 0x7, None, 3, 0,
+                                          None)
+            if handle not in (None, wintypes.HANDLE(-1).value):
+                kernel32.CloseHandle(handle)
+                return True, None
+            code = ctypes.get_last_error()
+            if code in (2, 3):  # nothing there to write
+                return False, None
+            if code != 5:
+                why = why or (f"{ctypes.FormatError(code).strip()} "
+                              f"(Windows error {code})")
+        if owned_by_this_account(path):
+            # A deny entry, even on SYNCHRONIZE, which every open asks
+            # for: its owner may still rewrite the access list.
+            return True, None
+        return (None, why) if why else (False, None)
+    except (AttributeError, ImportError, OSError) as error:
+        return None, str(error)
 
 
 def footing_said():
@@ -2887,9 +2957,17 @@ def footing_said():
         asked.append((copy, False))
         if (copy.parent, True) not in asked:
             asked.append((copy.parent, True))
-    writable = [path.as_posix() + (" (a file can be made there)" if folder
+    writable, untold = [], []
+    for path, folder in asked:
+        answer, why = could_write(path, folder)
+        named = path.as_posix() + (" (a file can be made there)" if folder
                                    else "")
-                for path, folder in asked if could_write(path, folder)]
+        if answer:
+            writable.append(named)
+        elif answer is None:
+            # Never read as cannot: a file held open by another program
+            # would then silence the note (#638 review).
+            untold.append(f"{named}: {why}")
     if writable:
         lines.append(
             "the account this supervisor runs as can write what the managed "
@@ -2899,6 +2977,11 @@ def footing_said():
             "runs. This asks of the account the supervisor runs as, not of a "
             "session: one started elevated beside a scan that is not reads "
             "here as one that cannot")
+    if untold:
+        lines.append(
+            "this scan could not tell whether the account it runs as can "
+            f"write what the managed install rests on: {'; '.join(untold)}. "
+            "Read it as an account that may")
     return lines
 
 
