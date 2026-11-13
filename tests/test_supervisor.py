@@ -5356,6 +5356,22 @@ class RecorderDriftTest(unittest.TestCase):
                 self.assertNotEqual(recorder["state"], "unwired")
                 self.assertNotIn("not on disk", recorder["note"])
 
+    @unittest.skipUnless(os.name == "nt", "Windows drops a trailing dot")
+    def test_a_checkout_wired_with_a_trailing_dot_reads_clean(self):
+        # #589 item 8, review: the file the notice asks git about is the
+        # one Windows runs, `loxodonta.py`, never `loxodonta.py.`, which
+        # git holds no blob of, so a clean checkout read as dirty.
+        _, script = self.make_checkout(autocrlf="false")
+        install_witness_hook(
+            self.witness, command=f'python "{script.as_posix()}." hook')
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "tracked")
+        self.assertFalse(recorder["dirty"])
+        self.assertIn("clean", recorder["note"])
+        self.assertEqual(recorder["path"], script.as_posix())
+
     def test_no_wired_hook_means_no_recorder_to_report_on(self):
         self.witness.mkdir(parents=True, exist_ok=True)
         (self.witness.parent / "settings.json").write_text(

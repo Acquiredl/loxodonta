@@ -3075,11 +3075,13 @@ def owned_script(command, names):
     if not words or len(words) < 3:
         return None
     interpreter, script, verb = words[:3]
-    name = file_name(script)
     if os.name == "nt":
         # Windows drops a name's trailing dots and spaces, so it runs
-        # `loxodonta.py.` as the recorder; on POSIX that is another file.
-        name = name.rstrip(". ")
+        # `loxodonta.py.` as the recorder, and the path returned is the
+        # one it runs, which git and the notice ask about; on POSIX that
+        # is another file.
+        script = script.rstrip(". ")
+    name = file_name(script)
     if not is_interpreter(interpreter) or name not in names \
             or WIRED_VERB[name] != verb:
         return None
