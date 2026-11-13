@@ -10,6 +10,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-13
+
 ### Added
 
 - `supervisor scan` says on its settings note when the account it runs as can write a managed install's hook file or copy, and when `LOXODONTA_MANAGED_DIR` names the managed folder read. A note: no exit moves (#469, #466).
@@ -591,6 +593,7 @@ The first tagged release, cut from the promotion that lands the presentation arc
 - CONTRIBUTING: the one local check command, the voice rule, the release ritual. CLAUDE.md cut to a map, GLOSSARY given an entry-point preamble, the legacy root `receipts/` folder removed.
 
 [Unreleased]: https://github.com/Acquiredl/loxodonta/compare/v0.20.0...dev
+[0.21.0]: https://github.com/Acquiredl/loxodonta/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/Acquiredl/loxodonta/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/Acquiredl/loxodonta/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Acquiredl/loxodonta/compare/v0.17.0...v0.18.0
