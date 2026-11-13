@@ -7307,15 +7307,19 @@ def digest_command(payload=False, folder=None, managed=False):
 
 
 def next_step(folder=None):
-    """The line an install ends its restart word with (#147): the
-    README's next step, `supervisor.py scan`, spelled as the digest's
-    command is. Printed, never asked: the installer reads no stdin."""
+    """The two lines an install prints after its restart word (#147):
+    the README's next step, `supervisor.py scan`, spelled as the
+    digest's command is, alone on the second line so a copy of the line
+    is the command. On Windows in PowerShell's form, its default shell,
+    where a quoted program runs only after `&`. Printed, never asked:
+    the installer reads no stdin."""
     python = sys.executable.replace(os.sep, "/")
     script = (os.path.join(folder, "supervisor.py") if folder
               else supervisor_path())
-    return (f'next: after a session, run "{python}" -I '
-            f'"{script.replace(os.sep, "/")}" scan for every session so '
-            "far, one verdict each.")
+    shell, run = (" in PowerShell", "& ") if os.name == "nt" else ("", "")
+    return (f"next: after a session, run this{shell} for every session so "
+            "far, one verdict each:\n"
+            f'  {run}"{python}" -I "{script.replace(os.sep, "/")}" scan')
 
 
 def same_path(one, other):

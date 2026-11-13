@@ -400,10 +400,24 @@ class ManagedInstallTest(ManagedBase):
         self.assertIn("uninstall-hook --managed", done.stderr)
         self.assertEqual(self.everything(), before)
 
+    def next_step(self, done):
+        """The two lines an install names its next step in: the one that
+        introduces it, and the command, alone on the line after it."""
+        lines = done.stdout.splitlines()
+        said = [n for n, line in enumerate(lines) if line.startswith("next:")]
+        self.assertEqual(len(said), 1, done.stdout)
+        restart = max(n for n, line in enumerate(lines)
+                      if "Restart open" in line or "open sessions" in line)
+        self.assertGreater(said[0], restart, "after the restart line")
+        return lines[said[0]], lines[said[0] + 1]
+
     def test_each_install_names_the_next_step_as_its_commands_spell_it(self):
         # #147: the README's next step, `supervisor.py scan`, after the
         # restart line, naming the script the digest is wired to: the
         # copy on a managed install, the file beside it on a plain one.
+        # The command stands alone on its line, so a copy of the line is
+        # the command; on Windows in PowerShell's form, the default
+        # shell, where a quoted program needs `&` before it.
         for flags, wired in (((), self.operator_file),
                              (("--managed",), self.managed_file)):
             with self.subTest(flags=flags):
@@ -412,15 +426,34 @@ class ManagedInstallTest(ManagedBase):
                 digest, = self.commands(self.read(wired), "SessionStart")
                 scan = digest.replace(" --managed", "").replace(
                     "supervisor.py\" digest", "supervisor.py\" scan")
-                lines = done.stdout.splitlines()
-                said = [line for line in lines if line.startswith("next:")]
-                self.assertEqual(said, [
-                    f"next: after a session, run {scan} for every session "
-                    "so far, one verdict each."], done.stdout)
-                restart = max(n for n, line in enumerate(lines)
-                              if "Restart open" in line or "open sessions"
-                              in line)
-                self.assertGreater(lines.index(said[0]), restart)
+                windows = os.name == "nt"
+                self.assertEqual(self.next_step(done), (
+                    "next: after a session, run this"
+                    + (" in PowerShell" if windows else "")
+                    + " for every session so far, one verdict each:",
+                    "  " + ("& " if windows else "") + scan))
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell is Windows' shell")
+    def test_the_next_step_runs_in_powershell_as_printed(self):
+        # The line as printed, passed to PowerShell 5.1 whole, from a
+        # home and a copy whose paths hold a space.
+        spaced = self.work / "with space"
+        env = {**self.env, "LOXODONTA_PROGRAM_DIR": str(spaced / "program"),
+               "LOXODONTA_HOME": str(spaced / "store")}
+        for key in ("HOME", "USERPROFILE"):
+            env[key] = str(spaced / "home")
+        (spaced / "home" / ".claude" / "projects").mkdir(parents=True)
+        for flags in ((), ("--managed",)):
+            with self.subTest(flags=flags):
+                _, command = self.next_step(self.install(*flags, env=env))
+                done = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", command],
+                    capture_output=True, encoding="utf-8",
+                    errors="replace", env=env, timeout=120)
+
+                self.assertEqual(done.returncode, 0,
+                                 command + "\n" + done.stdout + done.stderr)
+                self.assertNotIn("Unexpected token", done.stderr)
 
     @unittest.skipUnless(os.name == "nt", "Windows drops a trailing dot")
     def test_a_name_windows_runs_as_the_recorder_is_already_installed(self):
