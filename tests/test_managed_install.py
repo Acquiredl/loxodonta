@@ -1105,6 +1105,253 @@ class ManagedCopyTest(ManagedBase):
         self.assertIn("no longer anchors at session end", done.stdout)
 
 
+class ChecksOnly:
+    """What a managed install's check says of a path, read without an
+    install: the operator's settings file is not JSON, so the installer
+    prints the check's warnings under the stand-in and refuses at that
+    file (65), before anything is written."""
+
+    def checked(self, program):
+        """The installer's stderr with the copy's stand-in naming
+        `program`, which may be a folder of the machine's own: nothing is
+        written there, or anywhere."""
+        self.operator_file.write_text("{not json", encoding="utf-8")
+        env = {**self.env, "LOXODONTA_PROGRAM_DIR": str(program)}
+        before = self.everything()
+
+        with home_guard.left_to_the_machine("LOXODONTA_PROGRAM_DIR"):
+            done = run(LOXODONTA, "install-hook", "--managed", env=env)
+
+        self.assertEqual(done.returncode, 65, done.stdout + done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assertEqual(self.everything(), before)
+        return done.stderr
+
+    def folder_said(self, stderr, program):
+        """The warning the check gave of the copy's folder `program`, or
+        None when it passed."""
+        said = [line for line in stderr.splitlines()
+                if f"the folder the recorder is copied to, {program}," in line]
+        self.assertLessEqual(len(said), 1, stderr)
+        return said[0] if said else None
+
+
+class LinkThroughLinkTest(ChecksOnly, ManagedBase):
+    """#576: the check resolves a path one link at a time, as the system
+    does, and judges every folder that holds a link, at every hop. A link
+    whose target folder holds a second link escaped it: that folder was
+    in neither the walk of the path as written nor of the path resolved.
+
+    Building the case needs a link made by root in a folder only root
+    writes, so the links are made through `sudo -n` in a folder of the
+    test's own there, removed after, and the test is skipped wherever
+    sudo asks for a password."""
+
+    def setUp(self):
+        super().setUp()
+        if sys.platform == "win32" or not hasattr(os, "geteuid") \
+                or os.geteuid() == 0:
+            self.skipTest("needs POSIX, an account that is not root, and sudo")
+        def roots_alone(place):
+            while True:
+                try:
+                    status = os.lstat(place)
+                except OSError:
+                    return False
+                if status.st_uid != 0 or status.st_mode & 0o022 \
+                        or not stat.S_ISDIR(status.st_mode):
+                    return False
+                if place == "/":
+                    return True
+                place = os.path.dirname(place)
+
+        # The first folder whose whole path only root writes. A runner's
+        # /opt can be the runner account's.
+        under = next((place for place in ("/opt", "/usr/local", "/srv", "/")
+                      if roots_alone(place)), None)
+        if under is None:
+            self.skipTest("no folder here that only root writes")
+        try:
+            made = subprocess.run(
+                ["sudo", "-n", "mktemp", "-d",
+                 os.path.join(under, "loxodonta-576.XXXXXX")],
+                capture_output=True, encoding="utf-8", timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("no sudo here")
+        if made.returncode != 0:
+            self.skipTest(f"sudo -n does not run here: {made.stderr.strip()}")
+        self.roots = made.stdout.strip()
+        self.addCleanup(subprocess.run, ["sudo", "-n", "rm", "-rf", self.roots],
+                        capture_output=True, timeout=60)
+        self.as_root("chmod", "0755", self.roots)
+
+    def as_root(self, *command):
+        done = subprocess.run(["sudo", "-n", *command], capture_output=True,
+                              encoding="utf-8", timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_a_second_link_is_judged_by_the_folder_that_holds_it(self):
+        # root's link -> an account's folder holding a link -> /usr/bin:
+        # the account retargets its link, and the command runs that.
+        system = "/usr/bin/python3"
+        if not os.path.isfile(system):
+            self.skipTest("needs a system Python")
+        writers = self.work / "writers"
+        writers.mkdir()
+        (writers / "python3").symlink_to(system)
+        link = os.path.join(self.roots, "python3")
+        self.as_root("ln", "-s", str(writers / "python3"), link)
+        said = subprocess.run(
+            [link, "-I", "-c", "import sys; print(sys.executable)"],
+            capture_output=True, encoding="utf-8", timeout=60)
+        if said.returncode != 0 or said.stdout.strip() != link:
+            self.skipTest(f"{system} does not name itself as run through "
+                          f"a link here: {said.stdout.strip()!r}")
+
+        done = subprocess.run(
+            [link, str(LOXODONTA), "install-hook", "--managed"],
+            capture_output=True, encoding="utf-8", env=self.env, timeout=120)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f"warning: the interpreter the hook command would "
+                      f"name, {link}", done.stderr)
+
+    def test_a_path_past_forty_links_is_refused(self):
+        # The kernel gives up past 40 links (ELOOP), and so does the check.
+        loop = os.path.join(self.roots, "loop")
+        self.as_root("ln", "-s", "loop", loop)
+
+        line = self.folder_said(self.checked(loop), loop)
+
+        self.assertIsNotNone(line, "a loop of links passed the check")
+        self.assertIn("more than 40 links", line)
+
+
+def short_spelling(path):
+    """The 8.3 spelling Windows gives an existing `path`, or None where
+    it gives none."""
+    import ctypes
+    buffer = ctypes.create_unicode_buffer(1024)
+    size = ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, 1024)
+    if not size or buffer.value.lower() == str(path).lower():
+        return None
+    return buffer.value
+
+
+@unittest.skipUnless(sys.platform == "win32", "the check by place is Windows's")
+class WindowsPlacesTest(ChecksOnly, ManagedBase):
+    """#574: on Windows a path passes under Program Files, Program Files
+    (x86) and System32, as the registry names them, and nowhere else
+    under the Windows folder; under System32 the folders an ordinary
+    account may write by default are refused by name. Each spelling of a
+    place gets that place's answer. Every case is read through the
+    installer's own warnings and refused at the operator's file before
+    anything is written (ChecksOnly): no case writes into a system
+    folder. A device or network spelling of the copy's folder never
+    reaches the check: the stand-in refuses it first (stand_in)."""
+
+    def system(self, *parts):
+        windows = os.environ.get("SystemRoot", "C:\\Windows")
+        return os.path.join(windows, *parts)
+
+    def unused(self, folder):
+        """A name under `folder` that nothing stands at."""
+        name = os.path.join(folder, f"loxodonta-574-{os.getpid()}")
+        self.assertFalse(os.path.lexists(name))
+        return name
+
+    def assert_refused(self, program, words=None):
+        line = self.folder_said(self.checked(program), program)
+        self.assertIsNotNone(line, f"{program} passed the check")
+        self.assertTrue(line.startswith("warning:"), line)
+        if words:
+            self.assertIn(words, line)
+        self.assertFalse(os.path.lexists(program))
+        return line
+
+    def assert_passes(self, program):
+        stderr = self.checked(program)
+        self.assertIsNone(self.folder_said(stderr, program), stderr)
+        self.assertFalse(os.path.lexists(program))
+
+    def test_the_three_places_pass(self):
+        places = [self.system("System32"),
+                  os.environ.get("ProgramFiles", "C:\\Program Files")]
+        x86 = os.environ.get("ProgramFiles(x86)")
+        if x86:
+            places.append(x86)
+        for place in places:
+            with self.subTest(place=place):
+                self.assert_passes(self.unused(place))
+
+    def test_the_rest_of_the_windows_folder_is_refused(self):
+        # Default-writable folders there passed the check (#574).
+        for parts in ((), ("Tasks",), ("Temp",), ("tracing",)):
+            program = self.unused(self.system(*parts))
+            with self.subTest(program=program):
+                line = self.assert_refused(program, "System32")
+                self.assertNotIn("cannot read that folder's access list",
+                                 line)
+
+    def test_the_folders_under_system32_any_account_writes_are_refused(self):
+        for parts in (("Tasks",), ("spool", "drivers", "color"),
+                      ("spool", "PRINTERS"), ("FxsTmp",), ("com", "dmp"),
+                      ("Microsoft", "Crypto", "RSA", "MachineKeys"),
+                      ("LogFiles", "WMI")):
+            program = self.unused(self.system("System32", *parts))
+            with self.subTest(program=program):
+                self.assert_refused(program, "may write by default")
+
+    def test_every_spelling_of_a_refused_folder_is_refused(self):
+        tasks = self.system("System32", "Tasks")
+        spellings = [self.unused(tasks.upper()), self.unused(tasks.lower()),
+                     tasks + "\\", tasks.replace("\\", "/")]
+        data = short_spelling(os.environ.get("ProgramData",
+                                             "C:\\ProgramData"))
+        if data:
+            spellings.append(self.unused(data))
+        # Beside the test's folder, never in it: everything() would walk
+        # through it into System32.
+        beside = Path(tempfile.mkdtemp())
+        self.addCleanup(os.rmdir, beside)
+        junction = beside / "junction"
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction),
+             self.system("System32")],
+            capture_output=True, encoding="utf-8", timeout=60)
+        if made.returncode == 0:
+            # Removed as a junction, never followed into System32.
+            self.addCleanup(os.rmdir, junction)
+            spellings.append(str(junction / "loxodonta-574"))
+        for program in spellings:
+            with self.subTest(program=program):
+                line = self.folder_said(self.checked(program), program)
+                self.assertIsNotNone(line, f"{program} passed the check")
+        # A stream of a refused folder (#638 review): the copy's stand-in
+        # refuses a second colon before the check, so through this verb
+        # it is refused there; the check refuses it too, for the
+        # interpreter's own path, which the suite cannot spell.
+        self.operator_file.unlink()
+        before = self.everything()
+        for program in (tasks + ":python.exe", tasks + ":python.exe:$DATA"):
+            with self.subTest(program=program):
+                env = {**self.env, "LOXODONTA_PROGRAM_DIR": program}
+                with home_guard.left_to_the_machine("LOXODONTA_PROGRAM_DIR"):
+                    done = run(LOXODONTA, "install-hook", "--managed",
+                               env=env)
+
+                self.assertEqual(done.returncode, 64,
+                                 done.stdout + done.stderr)
+                self.assertEqual(self.everything(), before)
+
+    def test_a_short_spelling_of_a_passing_place_passes(self):
+        x86 = os.environ.get("ProgramFiles(x86)")
+        short = x86 and short_spelling(x86)
+        if not short:
+            self.skipTest("no 8.3 spelling of Program Files (x86) here")
+        self.assert_passes(self.unused(short))
+
+
 class ManagedUninstallTest(ManagedBase):
 
     def test_it_deletes_that_one_file_and_nothing_else(self):
@@ -1701,6 +1948,223 @@ class SupervisorReadsBothHomesTest(ManagedBase):
 
         self.assertFalse(report["published"]["wired"])
         self.assertEqual(report["recorder"]["state"], "unwired")
+
+
+FOOTING = "the account this supervisor runs as can write"
+UNTOLD = "this scan could not tell whether the account it runs as can write"
+NAMED_BY_VARIABLE = "LOXODONTA_MANAGED_DIR is set where this scan runs"
+
+
+class FootingNoteTest(ManagedBase):
+    """#469 and #466 ruling 1: a managed install holds only while the
+    account the agent runs as cannot write the managed hook file or the
+    copy, and the supervisor runs as that account, so each scan asks and
+    says so on the settings note. A note about the setup, never a
+    verdict: no exit moves. The suite's managed folder is one this
+    account writes, which is the "can" side; the "cannot" side needs a
+    file this account cannot write."""
+
+    def setUp(self):
+        super().setUp()
+        self.witness = self.home / ".claude" / "projects"
+        self.witness.mkdir()
+        self.root = self.work / "repos"
+        self.root.mkdir()
+        prime_memory(self.root, matcher="*", failures="*")
+
+    def scan(self):
+        result = run_scan(self.root, "--witness", str(self.witness),
+                          env=self.env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(result.stdout).get("settings_note", "")
+
+    def managed_and_copy(self):
+        """Every file and folder of the managed folder and the copy's,
+        with its bytes and its mtime: what the probe must leave as it
+        found it."""
+        found = {}
+        for top in (self.managed, self.program):
+            for path in [top] + sorted(top.rglob("*")):
+                status = os.lstat(path)
+                found[str(path)] = (status.st_mtime_ns,
+                                    path.read_bytes() if path.is_file()
+                                    else None)
+        return found
+
+    def test_a_managed_install_this_account_can_write_is_said(self):
+        self.install("--managed")
+        before = self.managed_and_copy()
+
+        note = self.scan()
+
+        said = " ".join(note.split())
+        self.assertIn(FOOTING, said)
+        self.assertIn(self.managed_file.as_posix(), said)
+        self.assertIn(self.copy.as_posix(), said)
+        self.assertIn("not of a session", said)
+        self.assertEqual(self.managed_and_copy(), before,
+                         "the probe changed, made or left something")
+
+    def test_the_variable_naming_the_managed_folder_is_said(self):
+        self.install("--managed")
+
+        note = self.scan()
+
+        self.assertIn(NAMED_BY_VARIABLE, note)
+        self.assertIn(self.managed_file.as_posix(), note)
+        self.assertIn(HARNESS_FOLDER, note)
+
+    def test_a_plain_install_says_nothing_of_the_footing(self):
+        # The hook in the operator's own file: the account writes it by
+        # design, and the docs say so. The variable, which the suite
+        # always sets, is still named.
+        self.install()
+
+        note = self.scan()
+
+        self.assertNotIn(FOOTING, note)
+        self.assertIn(NAMED_BY_VARIABLE, note)
+
+    @unittest.skipIf(sys.platform == "win32",
+                     "an access list this account cannot write needs icacls")
+    def test_files_this_account_cannot_write_say_nothing(self):
+        # Root's files and folders, through sudo -n, skipped where sudo
+        # asks for a password.
+        if os.geteuid() == 0:
+            self.skipTest("root can write everything")
+        self.install("--managed")
+        try:
+            done = subprocess.run(
+                ["sudo", "-n", "chown", "-R", "0:0", str(self.managed),
+                 str(self.program)],
+                capture_output=True, encoding="utf-8", timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("no sudo here")
+        if done.returncode != 0:
+            self.skipTest(f"sudo -n does not run here: {done.stderr.strip()}")
+        self.addCleanup(subprocess.run, [
+            "sudo", "-n", "chown", "-R", f"{os.geteuid()}:{os.getegid()}",
+            str(self.managed), str(self.program)],
+            capture_output=True, timeout=60)
+
+        note = self.scan()
+
+        self.assertNotIn(FOOTING, note)
+        self.assertIn(NAMED_BY_VARIABLE, note)
+
+    def held_open(self, paths):
+        """Each of `paths` held open for reading by this process, sharing
+        reading alone, as a writer could hold the managed files while the
+        harness still reads them (#638 review); let go at cleanup."""
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = (
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        for path in paths:
+            # GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING.
+            handle = kernel32.CreateFileW(str(path), 0x80000000, 0x1, None,
+                                          3, 0, None)
+            self.assertNotIn(handle, (None, wintypes.HANDLE(-1).value),
+                             ctypes.get_last_error())
+            self.addCleanup(kernel32.CloseHandle, handle)
+
+    @unittest.skipUnless(sys.platform == "win32", "a share mode is Windows's")
+    def test_files_held_open_by_another_never_silence_the_note(self):
+        # A write refused for sharing says nothing of the account's
+        # rights: the note says what it found, or that it could not tell.
+        self.install("--managed")
+        self.held_open([self.managed_file, self.copy, self.copy_supervisor])
+
+        said = " ".join(self.scan().split())
+
+        self.assertTrue(FOOTING in said or UNTOLD in said, said)
+        self.assertIn(self.managed_file.as_posix(), said)
+
+    def marked_on_windows(self, how):
+        """The managed file and the copies marked read-only (`attrib`) or
+        denied write to this account (`icacls`), each undone at cleanup.
+        The managed file is denied its data and attributes alone, so the
+        scan can still read it; the copies every write right, (W), whose
+        SYNCHRONIZE refuses every open, so only their owner shows."""
+        account = os.environ.get("USERNAME")
+        for path in (self.managed_file, self.copy, self.copy_supervisor):
+            rights = "(WD,AD,WA,WEA)" if path == self.managed_file else "(W)"
+            if how == "attrib":
+                mark, undo = (["attrib", "+r", str(path)],
+                              ["attrib", "-r", str(path)])
+            else:
+                mark = ["icacls", str(path), "/deny", f"{account}:{rights}"]
+                undo = ["icacls", str(path), "/remove:d", account]
+            done = subprocess.run(mark, capture_output=True,
+                                  encoding="utf-8", timeout=60)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.addCleanup(subprocess.run, undo, capture_output=True,
+                            timeout=60)
+
+    @unittest.skipUnless(sys.platform == "win32", "attrib is Windows's")
+    def test_a_read_only_mark_still_says_can(self):
+        # The mark is the account's to take off (#638 review).
+        self.install("--managed")
+        self.marked_on_windows("attrib")
+
+        said = " ".join(self.scan().split())
+
+        self.assertIn(FOOTING, said)
+        self.assertIn(self.managed_file.as_posix(), said)
+
+    @unittest.skipUnless(sys.platform == "win32", "icacls is Windows's")
+    def test_a_deny_on_a_file_the_account_owns_still_says_can(self):
+        # Its owner may rewrite the access list (#638 review).
+        self.install("--managed")
+        self.marked_on_windows("icacls")
+
+        said = " ".join(self.scan().split())
+
+        self.assertIn(FOOTING, said)
+        for path in (self.managed_file, self.copy, self.copy_supervisor):
+            self.assertIn(path.as_posix(), said)
+
+    @unittest.skipIf(sys.platform == "win32", "permission bits are POSIX")
+    def test_files_the_account_owns_marked_unwritable_still_say_can(self):
+        # chmod a-w on a file or a folder the account owns is the
+        # account's to undo (#638 review).
+        if os.geteuid() == 0:
+            self.skipTest("root can write everything")
+        self.install("--managed")
+        for path in (self.managed_file, self.managed_file.parent, self.copy,
+                     self.copy_supervisor, self.program):
+            mode = os.stat(path).st_mode
+            os.chmod(path, mode & ~0o222)
+            self.addCleanup(os.chmod, path, mode)
+
+        said = " ".join(self.scan().split())
+
+        self.assertIn(FOOTING, said)
+        self.assertIn(self.managed_file.as_posix(), said)
+
+    def test_the_variable_unset_is_not_said(self):
+        # The scan then reads the harness's own managed folder, and only
+        # reads it: run only where nothing of the recorder's stands
+        # there, so the answer never rests on what a machine holds.
+        real = os.path.join(HARNESS_FOLDER, "managed-settings.d",
+                            "loxodonta.json")
+        if os.path.lexists(real):
+            self.skipTest("this machine holds a managed install")
+        env = {name: value for name, value in self.env.items()
+               if name != "LOXODONTA_MANAGED_DIR"}
+
+        with home_guard.left_to_the_machine("LOXODONTA_MANAGED_DIR"):
+            result = run_scan(self.root, "--witness", str(self.witness),
+                              env=env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        note = json.loads(result.stdout).get("settings_note", "")
+        self.assertNotIn(NAMED_BY_VARIABLE, note)
+        self.assertNotIn(FOOTING, note)
 
 
 # The pin as the installer writes it for REMOTE: the four switches and

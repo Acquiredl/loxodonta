@@ -173,6 +173,46 @@ class RecordUnparseableTest(unittest.TestCase):
     def test_the_verifier_names_a_record_naming_a_project_that_is_gone(self):
         self.assert_verify_named(VERIFIER, None)
 
+    def test_a_record_naming_no_project_path_cannot_be_read(self):
+        # #589: an object without a string `path` read as a missing
+        # project, and the value leaked into the line as `(None)` or
+        # `(5)`. It names no project, so it is a record that cannot be
+        # read (SPEC section 3), on every reader and every writer.
+        why = f"{self.record} cannot be read as a project record: it names no project path"
+        for content in (b"{}\n", b'{"path": 5}\n', b'{"path": null}\n'):
+            with self.subTest(record=content):
+                self.spoil(content)
+                logged = self.log_report()
+                checked = [run(script, "verify", "--log", str(self.log), "--files",
+                               cwd=self.workdir, timeout=BOUND)
+                           for script in (LOXODONTA, VERIFIER)]
+
+                self.assertEqual(logged.returncode, 66, logged.stdout + logged.stderr)
+                self.assertIn(why, logged.stderr)
+                for result in checked:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(f"FILES-UNRESOLVED: {why} — file checks skipped",
+                                  result.stdout)
+                    self.assertNotIn("missing project", result.stdout)
+
+    def test_a_record_naming_a_project_that_is_gone_says_which(self):
+        # SPEC section 3 quotes this line; the tests above pin only the
+        # record's name in it.
+        self.gone()
+        missing = (f"{self.record} points at a missing project "
+                   f"({(self.workdir / 'moved-away').as_posix()})")
+
+        logged = self.log_report()
+        checked = [run(script, "verify", "--log", str(self.log), "--files",
+                       cwd=self.workdir, timeout=BOUND)
+                   for script in (LOXODONTA, VERIFIER)]
+
+        self.assertEqual(logged.returncode, 66, logged.stdout + logged.stderr)
+        self.assertIn(missing, logged.stderr)
+        for result in checked:
+            self.assertIn(f"FILES-UNRESOLVED: {missing} — file checks skipped",
+                          result.stdout)
+
 
 class HookedRecordUnparseableTest(unittest.TestCase):
     """The hook with a project record it cannot take apart: the receipt

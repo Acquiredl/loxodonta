@@ -827,6 +827,10 @@ ALLOWED_OPENS = {
            "never the name"),
     ("loxodonta.py", "judge_stamp"): (
         1, "writes the token into a temporary folder of its own"),
+    ("loxodonta.py", "walk_path"): (
+        2, "opens folders only, O_DIRECTORY, the next one O_NOFOLLOW inside "
+           "the last: a file, a pipe or a link at the name is refused, "
+           "never read or waited on (#574)"),
     ("loxodonta.py", "judge_manifest_signature"): (
         1, "writes the allowed-signers line into a temporary folder of "
            "its own"),

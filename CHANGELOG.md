@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `supervisor scan` says on its settings note when the account it runs as can write a managed install's hook file or copy, and when `LOXODONTA_MANAGED_DIR` names the managed folder read. A note: no exit moves (#469, #466).
+
 ### Changed
 
 - `docs/CLAIMS.md` names a limit ADR-0047's measured run found: where a `PreToolUse` hook rewrites a call's input, the receipt holds the input as the model sent it, not what ran.
@@ -21,9 +25,14 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A git checkout holds the four tool files with LF line endings on every platform, so on Windows their sums match the release's `SHA256SUMS` and a managed install made from a checkout carries the release's bytes (#622).
 - `install-hook`, plain or `--managed`, ends its restart line with the next step: the supervisor's `scan`, spelled as the wired commands are, naming the managed copy on a managed install (#147).
 - `supervisor serve` with no keeper cadence looks on a clock of its own, every `SUPERVISOR_WATCH_TICK_SECONDS` (ten minutes; 0 turns it off), `--receiver` included, and a live alarm such a look finds goes in the day book (#281).
+- `docs/SPEC.md` v0.1.7 states `head`'s rule: a final line whose `n` is not an integer equal to its line number (`3.0` or `true`), or whose `entry_hash` is not 64 lowercase hex, has no head; no writer appends after it (#587).
+- Each vector names the SPEC revision it was written against, `since`; the frozen clean-room verifier runs only the rows of the spec it was written from (#587).
 
 ### Fixed
 
+- The managed install's check follows a path one link at a time and judges every folder holding a link, at every hop: a link reached through another link escaped it. A path through more than 40 links is refused (#576).
+- On POSIX the managed install writes its copy through the folders its check held open, so a link put in place after the check cannot redirect it. On Windows the check is asked again just before each write (#574).
+- On Windows the managed install's check passes `Program Files`, `Program Files (x86)` and `System32` as the registry names them, and refuses `System32`'s default-writable folders by name: the rest of `C:\Windows` passed, and `Program Files (x86)` was refused (#574).
 - `scan --receiver` and `serve --receiver` refuse a keeper's flag (`--anchor-every`, `--calendar`, `--publish-every`, `--publish-url`, `--publish-chain`) by name, exit 64: `scan` took and ignored them, and `serve` answered with the keeper's own rule about URLs (#487).
 - At the receiver, an acknowledged session whose events hold a call naming no tool stays acknowledged: its counts were compared before the memory's JSON had turned the missing name into `"null"`, so they never matched (ADR-0046).
 - The help of `install-hook --publish-chain` and of the supervisor's `--publish-chain` says what ADR-0045 built: each entry leaves as it is written, and a send carries what the remote does not hold.
@@ -48,6 +57,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The hook's refusal names a file standing where its drawer's path needs a folder, where Windows said it could not find the path; the unlistable store's warning is printed only once the receipt's chain stands (#589).
 - On Windows a hook command naming `loxodonta.py.`, which Windows runs as the recorder, reads as the recorder's: the supervisor no longer says no recorder hook is wired, and `install-hook` wires no second entry beside it (#589).
 - `serve`, in the supervisor and the receiver, refuses a `--port` no socket takes with 64 by name, where it crashed; `hook --help` names the store's drawer as `--log-dir`'s default; the dashboard says `loxodonta verify` (#589).
+- `verify` on a chain whose only line is torn says `no entry intact`, where it printed `entries 0..-1 intact`. The verdict and the exit are unchanged (#589).
+- A project record that is an object naming no string `path` (`{}`, `{"path": 5}`) cannot be read as a project record, `it names no project path`, where it read as a missing project named `(None)` or `(5)` (#589).
+- `verify` prints the `--transcript` path and the `--authority-chain` file with control characters escaped, in `TRANSCRIPT-UNRESOLVED`, `STAMPED` and the not-found note, where they printed raw (#589).
+- A line advising a recorder verb says whose step it is, the operator's or the recorder holder's, since `verifier.py` prints it too; `head` sends the reader to `verify`. A package's README says why it runs `python -I` (#588).
 
 ## [0.20.0] - 2026-11-12
 

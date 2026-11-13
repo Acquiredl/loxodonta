@@ -23,6 +23,7 @@ changed without its vectors, fails here.
 
 import hashlib
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -133,6 +134,17 @@ class VectorsTest(unittest.TestCase):
                 digest = hashlib.sha256(
                     canonical["text"].encode("utf-8")).hexdigest()
                 self.assertEqual(digest, entry["entry_hash"])
+
+    def test_every_row_names_a_revision_of_the_spec(self):
+        # #587: `since` says which revision of the spec a verifier must
+        # have been written from to be held to the row, so it is one the
+        # spec's version list names.
+        spec = (REPO_ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8")
+        named = set(re.findall(r"^- \*\*(0\.1\.\d+)\*\* \(", spec, re.M))
+        self.assertIn("0.1.7", named)
+        for row in rows():
+            with self.subTest(vector=row["name"]):
+                self.assertIn(row.get("since"), named)
 
     def test_a_rebuild_gives_the_committed_vectors(self):
         checked = run(BUILD, "--check")
