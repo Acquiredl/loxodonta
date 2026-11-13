@@ -130,7 +130,7 @@ The invariant `entry[n].prev == entry[n-1].entry_hash` for all `n ≥ 1`. The pr
 
 ### Chain head
 
-The `entry_hash` of the last entry. Commits to the entire history — this is the value an anchor pins externally.
+The `entry_hash` of the final line, when that line has a head: a damaged tail, a torn or forked one among them, has none (SPEC §6). Commits to the entire history — this is the value an anchor pins externally.
 
 ### File reference
 
