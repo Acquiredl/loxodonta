@@ -2844,9 +2844,11 @@ def token_elevated():
 
 
 def owned_by_this_account(path):
-    """Whether the Windows file at `path` is owned by the user this
-    process runs as, read from its security descriptor, which its owner
-    may always read; False when that cannot be read."""
+    """Whether the owner of the Windows file at `path` is this process's
+    user or a group this token holds enabled (CheckTokenMembership), read
+    from its security descriptor: Administrators owns what an elevated
+    process makes, and is held deny-only, so never enabled, in a token
+    that is not elevated. False when the owner cannot be read."""
     import ctypes
     from ctypes import wintypes
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -2855,14 +2857,8 @@ def owned_by_this_account(path):
         wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
         ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_void_p,
         ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
-    advapi.OpenProcessToken.argtypes = (wintypes.HANDLE, wintypes.DWORD,
-                                        ctypes.POINTER(wintypes.HANDLE))
-    advapi.GetTokenInformation.argtypes = (
-        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
-        ctypes.POINTER(wintypes.DWORD))
-    advapi.EqualSid.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
-    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    advapi.CheckTokenMembership.argtypes = (
+        wintypes.HANDLE, ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL))
     kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
     owner, described = ctypes.c_void_p(), ctypes.c_void_p()
     # SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION.
@@ -2870,21 +2866,13 @@ def owned_by_this_account(path):
                                     None, None, None,
                                     ctypes.byref(described)) != 0:
         return False
-    token = wintypes.HANDLE()
     try:
-        # TOKEN_QUERY, then TokenUser: a SID_AND_ATTRIBUTES, SID first.
-        if not advapi.OpenProcessToken(kernel32.GetCurrentProcess(), 0x8,
-                                       ctypes.byref(token)):
-            return False
-        buffer, size = ctypes.create_string_buffer(256), wintypes.DWORD()
-        if not advapi.GetTokenInformation(token, 1, buffer, 256,
-                                          ctypes.byref(size)):
-            return False
-        user = ctypes.c_void_p.from_buffer(buffer).value
-        return bool(advapi.EqualSid(owner, user))
+        held = wintypes.BOOL()
+        # No token named: this thread's, or else this process's.
+        return bool(advapi.CheckTokenMembership(None, owner,
+                                                ctypes.byref(held))
+                    and held.value)
     finally:
-        if token:
-            kernel32.CloseHandle(token)
         kernel32.LocalFree(described)
 
 
@@ -2900,9 +2888,11 @@ def could_write(path, folder=False):
     access list or its owner: any one granted is "can", since each
     leads to a write; only access denied (5) to all four is "cannot". A
     sharing violation (32) refuses an account that may write, and says
-    nothing. A folder is asked of the token: an elevated one can, and
-    any other is read as cannot, the quieter question than making a
-    file there."""
+    nothing. Failing all four, a file whose owner this token holds
+    (owned_by_this_account) can, since its owner may rewrite its access
+    list. An elevated token can, as root can on POSIX, asked first; a
+    folder is asked of the token alone, any other read as cannot, the
+    quieter question than making a file there."""
     if sys.platform != "win32":
         if os.geteuid() == 0:
             return True, None
@@ -2917,10 +2907,12 @@ def could_write(path, folder=False):
             return False, None
         except OSError as error:
             return None, error.strerror or str(error)
+    elevated = token_elevated()
+    if elevated:
+        return True, None
     if folder:
-        elevated = token_elevated()
         return ((None, "the token could not be asked") if elevated is None
-                else (elevated, None))
+                else (False, None))
     try:
         import ctypes
         from ctypes import wintypes
