@@ -3857,7 +3857,11 @@ def unwritable_why(path, error):
     """Why a write to the chain or a sidecar at `path` failed, in words: what
     `file_problem` says of the path, a folder in its place say, which
     Windows reports as a denied permission (#364); else the system's
-    reason."""
+    reason. A file where a folder above `path` should be is named first:
+    Windows reports it as a path it cannot find (#589)."""
+    above = nearest_standing(path)
+    if not os.path.isdir(above):
+        return f"a file stands at {visible(above)}, where a folder should be"
     return file_problem(path) or error.strerror or str(error)
 
 
