@@ -6431,9 +6431,9 @@ def drawer_of_session(log_dir, session):
     costs nothing: the resolved drawer already has the chain. Returns
     the drawer and a warning, None unless a store folder cannot be
     listed, and the receipt then still goes to the resolved drawer,
-    never lost (#452). The caller prints the warning once that drawer
-    exists, so a receipt refused for want of it prints the refusal
-    alone (#555)."""
+    never lost (#452). The caller prints the warning once the chain in
+    that drawer stands, so a receipt refused for want of the drawer or
+    of the chain prints the refusal alone (#555, #589)."""
     name = f"receipts-{session}.jsonl"
     if os.path.exists(os.path.join(log_dir, name)):
         return log_dir, None
@@ -6680,8 +6680,6 @@ def cmd_hook(args):
                 f.write("*\n!.gitignore\n")
         except FileExistsError:
             pass
-    if drawer_warning:
-        print(drawer_warning, file=sys.stderr)
     if project is not None:
         record_project(log_dir, project)
     # A damaged chain is not extended and not repaired — recording moves to
@@ -6693,6 +6691,10 @@ def cmd_hook(args):
         return locked_out(log)
     except OSError as e:
         return unwritable_log(log, e)
+    # Only once the chain stands: a receipt refused prints the refusal
+    # alone, never "this receipt goes to" a drawer it never reached (#589).
+    if drawer_warning:
+        print(drawer_warning, file=sys.stderr)
 
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
