@@ -18,11 +18,13 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - At the receiver, a receipt first seen more than `SUPERVISOR_LATE_RECEIPT_SECONDS` (one hour) after a settled look named its call missing pays nothing: the session keeps its finding until acknowledged, and the row says why (#620).
 - At the receiver, a chain copy carrying the hook's `second-record-cut:` note is never counted as before the second record's memory, whatever dates its entries carry: it reads `SECOND-RECORD-ABSENT` and raises (#486).
 - `anchor --upgrade` asks only the default calendars and each `--calendar` given; a row naming another address is named, skipped and never asked, so upgrading a handed sidecar sends nothing where its issuer chose. The keeper passes its `--calendar` (#415).
+- `supervisor serve` with no keeper cadence looks on a clock of its own, every `SUPERVISOR_WATCH_TICK_SECONDS` (ten minutes; 0 turns it off), `--receiver` included, and a live alarm such a look finds goes in the day book (#281).
 - `docs/SPEC.md` v0.1.7 states `head`'s rule: a final line whose `n` is not an integer equal to its line number (`3.0` or `true`), or whose `entry_hash` is not 64 lowercase hex, has no head; no writer appends after it (#587).
 - Each vector names the SPEC revision it was written against, `since`; the frozen clean-room verifier runs only the rows of the spec it was written from (#587).
 
 ### Fixed
 
+- `scan --receiver` and `serve --receiver` refuse a keeper's flag (`--anchor-every`, `--calendar`, `--publish-every`, `--publish-url`, `--publish-chain`) by name, exit 64: `scan` took and ignored them, and `serve` answered with the keeper's own rule about URLs (#487).
 - At the receiver, an acknowledged session whose events hold a call naming no tool stays acknowledged: its counts were compared before the memory's JSON had turned the missing name into `"null"`, so they never matched (ADR-0046).
 - The help of `install-hook --publish-chain` and of the supervisor's `--publish-chain` says what ADR-0045 built: each entry leaves as it is written, and a send carries what the remote does not hold.
 - A row appended to a sidecar whose last line is torn starts on a line of its own: it was glued onto the torn line, and both were unreadable. The torn line stays as it lies (#610).
