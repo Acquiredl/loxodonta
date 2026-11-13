@@ -7308,20 +7308,40 @@ def digest_command(payload=False, folder=None, managed=False):
     return command + (" --payload" if payload else "")
 
 
+# The marks PowerShell reads as a single quote inside a single-quoted
+# word: the straight one and the four curly ones. Each is written twice
+# there to stand for itself.
+POWERSHELL_QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+
+
+def shell_word(text):
+    """`text` as one literal word of the shell the next step is printed
+    for, whatever a folder's name holds: single quotes, in which neither
+    PowerShell nor sh expands `$`, `$(...)` or a backtick; each quote
+    mark inside written twice for PowerShell, and as `'\\''` for sh."""
+    if os.name == "nt":
+        for mark in POWERSHELL_QUOTES:
+            text = text.replace(mark, mark * 2)
+        return f"'{text}'"
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
 def next_step(folder=None):
     """The two lines an install prints after its restart word (#147):
-    the README's next step, `supervisor.py scan`, spelled as the
-    digest's command is, alone on the second line so a copy of the line
-    is the command. On Windows in PowerShell's form, its default shell,
-    where a quoted program runs only after `&`. Printed, never asked:
-    the installer reads no stdin."""
+    the README's next step, `supervisor.py scan`, the script the digest
+    is wired to, alone on the second line so a copy of the line is the
+    command. On Windows in PowerShell's form, its default shell, where a
+    quoted program runs only after `&`. Each path is one literal word
+    (shell_word), so a line copied as printed runs as printed. Printed,
+    never asked: the installer reads no stdin."""
     python = sys.executable.replace(os.sep, "/")
     script = (os.path.join(folder, "supervisor.py") if folder
               else supervisor_path())
     shell, run = (" in PowerShell", "& ") if os.name == "nt" else ("", "")
     return (f"next: after a session, run this{shell} for every session so "
             "far, one verdict each:\n"
-            f'  {run}"{python}" -I "{script.replace(os.sep, "/")}" scan')
+            f"  {run}{shell_word(python)} -I "
+            f"{shell_word(script.replace(os.sep, '/'))} scan")
 
 
 def same_path(one, other):

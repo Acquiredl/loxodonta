@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -50,6 +51,19 @@ HARNESS_FOLDER = {"win32": "C:\\Program Files\\ClaudeCode",
 PROGRAM_FOLDER = ("C:\\Program Files\\loxodonta" if sys.platform == "win32"
                   else "/opt/loxodonta")
 REMOTE = "http://127.0.0.1:9/hook"
+# The quote marks PowerShell reads inside single quotes: ' and the curly
+# single quotes, each written twice to stand for itself.
+POWERSHELL_QUOTES = ("'", chr(0x2018), chr(0x2019), chr(0x201A), chr(0x201B))
+
+
+def quoted(text):
+    """`text` as one literal word of the shell the next step is printed
+    for: single quotes in PowerShell on Windows, in sh elsewhere."""
+    if os.name == "nt":
+        for mark in POWERSHELL_QUOTES:
+            text = text.replace(mark, mark * 2)
+        return f"'{text}'"
+    return "'" + text.replace("'", "'\\''") + "'"
 
 
 class ManagedBase(unittest.TestCase):
@@ -424,36 +438,70 @@ class ManagedInstallTest(ManagedBase):
                 done = self.install(*flags)
 
                 digest, = self.commands(self.read(wired), "SessionStart")
-                scan = digest.replace(" --managed", "").replace(
-                    "supervisor.py\" digest", "supervisor.py\" scan")
+                _, python, _, script, _ = digest.split('"', 4)
                 windows = os.name == "nt"
                 self.assertEqual(self.next_step(done), (
                     "next: after a session, run this"
                     + (" in PowerShell" if windows else "")
                     + " for every session so far, one verdict each:",
-                    "  " + ("& " if windows else "") + scan))
+                    "  " + ("& " if windows else "") + quoted(python)
+                    + " -I " + quoted(script) + " scan"))
+
+    def runs_as_printed(self, shell):
+        """The printed line, passed whole to `shell`, from installs under
+        folders whose names a shell would read as code if they were not
+        quoted for it (#147, review): a plain install run from a copy of
+        the scripts in such a folder, and a managed one whose copy is
+        there. Each exits 0, and nothing the name spells is run."""
+        names = ["with space", "t$(New-Item -ItemType File -Path probe-ran)",
+                 "it's here", "it" + chr(0x2019) + "s", "back`tick"]
+        if os.name != "nt":
+            names = ["with space", "t$(touch probe-ran)", "it's here",
+                     "back`touch probe-ran`tick", 'dq"x$HOME']
+        for number, name in enumerate(names):
+            for flags in ((), ("--managed",)):
+                with self.subTest(name=name, flags=flags):
+                    base = self.work / f"case-{number}-{len(flags)}" / name
+                    home = base / "home"
+                    (home / ".claude" / "projects").mkdir(parents=True)
+                    env = {**self.env, "HOME": str(home),
+                           "USERPROFILE": str(home),
+                           "LOXODONTA_HOME": str(base / "store"),
+                           "LOXODONTA_MANAGED_DIR": str(base / "managed"),
+                           "LOXODONTA_PROGRAM_DIR": str(base / "program")}
+                    here = base.parent / "here"
+                    here.mkdir()
+                    tools = base / "tools"
+                    tools.mkdir()
+                    for tool in (LOXODONTA, SUPERVISOR):
+                        shutil.copy(tool, tools / tool.name)
+                    installed = run(tools / "loxodonta.py", "install-hook",
+                                    *flags, env=env)
+                    self.assertEqual(installed.returncode, 0,
+                                     installed.stdout + installed.stderr)
+                    _, command = self.next_step(installed)
+                    self.assertIn(name, command.replace("''", "'").replace(
+                        chr(0x2019) * 2, chr(0x2019)))
+
+                    done = subprocess.run(
+                        [*shell, command], cwd=str(here),
+                        capture_output=True, encoding="utf-8",
+                        errors="replace", env=env, timeout=120)
+
+                    self.assertEqual(done.returncode, 0,
+                                     command + "\n" + done.stdout
+                                     + done.stderr)
+                    self.assertEqual(list(here.iterdir()), [],
+                                     "the folder's name ran as code")
 
     @unittest.skipUnless(os.name == "nt", "PowerShell is Windows' shell")
     def test_the_next_step_runs_in_powershell_as_printed(self):
-        # The line as printed, passed to PowerShell 5.1 whole, from a
-        # home and a copy whose paths hold a space.
-        spaced = self.work / "with space"
-        env = {**self.env, "LOXODONTA_PROGRAM_DIR": str(spaced / "program"),
-               "LOXODONTA_HOME": str(spaced / "store")}
-        for key in ("HOME", "USERPROFILE"):
-            env[key] = str(spaced / "home")
-        (spaced / "home" / ".claude" / "projects").mkdir(parents=True)
-        for flags in ((), ("--managed",)):
-            with self.subTest(flags=flags):
-                _, command = self.next_step(self.install(*flags, env=env))
-                done = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", command],
-                    capture_output=True, encoding="utf-8",
-                    errors="replace", env=env, timeout=120)
+        # PowerShell 5.1, the default shell on Windows.
+        self.runs_as_printed(["powershell", "-NoProfile", "-Command"])
 
-                self.assertEqual(done.returncode, 0,
-                                 command + "\n" + done.stdout + done.stderr)
-                self.assertNotIn("Unexpected token", done.stderr)
+    @unittest.skipIf(os.name == "nt", "sh is the POSIX shell")
+    def test_the_next_step_runs_in_sh_as_printed(self):
+        self.runs_as_printed(["sh", "-c"])
 
     @unittest.skipUnless(os.name == "nt", "Windows drops a trailing dot")
     def test_a_name_windows_runs_as_the_recorder_is_already_installed(self):
