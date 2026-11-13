@@ -6051,8 +6051,8 @@ def scan_root(root, witness=WITNESS_ROOT, anchor_every=None, calendars=(),
     by the same walk and remembered by the same baseline, in a subfolder
     of its own; the harness's events there as the witness; no keeper,
     since nothing of the agent's machine is wired here). `remember=False`
-    reads the day book instead of writing it, for `serve`'s keeper
-    clock (#271): a machine talking to itself is not somebody looking
+    reads the day book instead of writing it, for `serve`'s own clock
+    (#271, #281): a machine talking to itself is not somebody looking
     (ADR-0014), and its rows would silence the lapse line; the exception
     for what a turn finds new is `fold_day`'s."""
     look = Look(root, witness=witness, anchor_every=anchor_every,
@@ -6216,16 +6216,19 @@ def fold_day(look, now, claims, fresh, awakened):
     has nothing new to report (ADR-0014): a machine asking itself every
     minute is not somebody looking. It goes in when it finds what no row
     records yet: an alarm this look found or whose change moved, a
-    reawakening, or a blind memory or more closed folders than the
-    book's newest row shows (#448). Left out, such a finding would be
-    recorded nowhere and the day would paint quiet. An alarm already
-    standing does not mark every later day as watched (ADR-0039); the
-    day's worst is sticky, so a morning reader still sees the day it was
-    found, and every day somebody looks."""
+    reawakening, or a blind memory, more closed folders or more live
+    alarms than the book's newest row shows (#448, #281). Left out, such
+    a finding would be recorded nowhere and the day would paint quiet; a
+    live alarm reads as evidence once its session ends or goes idle
+    (`classify`), so a look nobody asked for at night may be the only
+    one that sees it. An alarm already standing
+    does not mark every later day as watched (ADR-0039); the day's worst
+    is sticky, so a morning reader still sees the day it was found, and
+    every day somebody looks."""
     days, skipped = daybook_rows(look.daybook)
     newest = days[max(days)] if days else {}
     unshown = any(claims[kept] > newest.get(kept, 0)
-                  for kept in ("blind", "closed"))
+                  for kept in ("blind", "closed", "alarms"))
     if look.remember or fresh or awakened or unshown:
         days = remember_day(look.daybook, now, claims, days,
                             bool(look.receiver))
@@ -10428,6 +10431,16 @@ KEEPER_TICK_SECONDS = max(
     env_number("SUPERVISOR_KEEPER_TICK_SECONDS", 60.0, float, waited=True),
     0.1)
 
+# How often `serve` looks on its own while no keeper cadence is in force
+# (#281): with nothing asking, it computed no completeness state,
+# compared no baseline and ran no tail keeper, so ALARM-SILENT waited on
+# somebody opening the page. Slower than the keeper's minute, since only
+# the watch rides it. 0 turns it off; any other value takes the
+# keeper's floor.
+WATCH_TICK_SECONDS = env_number("SUPERVISOR_WATCH_TICK_SECONDS", 600.0,
+                                float, waited=True)
+WATCH_TICK_SECONDS = WATCH_TICK_SECONDS and max(WATCH_TICK_SECONDS, 0.1)
+
 
 def trouble_words(failure):
     """One short line for a failure, its kind and the reason the system
@@ -10440,30 +10453,47 @@ def trouble_words(failure):
         type(failure).__name__)
 
 
-def keep_turning(server, stop):
-    """The keeper's own clock: ask for a fresh scan until `stop` is set,
-    at once and then a tick after each walk finishes, through
-    `fresh_scan`, so a turn and a request take the scan lock in turn,
-    and asking not to be remembered, since a machine talking to itself
-    is not somebody looking (ADR-0014). A failure never stops the clock
-    or the server, and is said: a scan that cannot finish leaves no
-    attempt row anywhere, and on a headless machine nothing else is
-    looking. One line to stderr names its kind, once for a failure that
-    repeats, and again after a turn that works."""
+def keep_turning(server, stop, tick=KEEPER_TICK_SECONDS, whose="keeper's"):
+    """`serve`'s own clock: ask for a fresh scan until `stop` is set, a
+    tick after each walk finishes, through `fresh_scan`, so a turn and a
+    request take the scan lock in turn, and asking not to be remembered,
+    since a machine talking to itself is not somebody looking
+    (ADR-0014). The keeper's clock (#271) turns at once; the watch's
+    (#281, `whose` "watch's") first waits a tick, so a page opened as
+    `serve` starts never queues behind a walk nobody asked for. A
+    failure never stops the clock or the server, and is said: a scan
+    that cannot finish leaves no attempt row anywhere, and on a headless
+    machine nothing else is looking. One line to stderr names its kind,
+    once for a failure that repeats, and again after a turn that
+    works."""
     said = None
+    # The wait is on the event, not the clock, so Ctrl-C stops the
+    # thread now rather than at the end of a tick.
+    if whose != "keeper's":
+        stop.wait(tick)
     while not stop.is_set():
         try:
             server.fresh_scan(remember=False)
             said = None
-        except Exception as failure:  # never take the keeper down
-            trouble = ("error: the keeper's scan did not finish: "
+        except Exception as failure:  # never take the clock down
+            trouble = (f"error: the {whose} scan did not finish: "
                        + trouble_words(failure))
             if trouble != said:
                 print(trouble, file=sys.stderr, flush=True)
                 said = trouble
-        # The wait is on the event, not the clock, so Ctrl-C stops the
-        # thread now rather than at the end of a tick.
-        stop.wait(KEEPER_TICK_SECONDS)
+        stop.wait(tick)
+
+
+def watch_words(tick):
+    """The startup line's clause for the watch's own clock (#281), said
+    when no keeper cadence is in force: how often `serve` looks with
+    nothing asking, or that it does not."""
+    if not tick:
+        return ("watch: none of its own (SUPERVISOR_WATCH_TICK_SECONDS=0), "
+                "a look only when a page or a scrape asks")
+    every = cadence_words(int(tick)) if tick == int(tick) else f"{tick:g}s"
+    return (f"watch: a look of its own every {every} "
+            "(SUPERVISOR_WATCH_TICK_SECONDS)")
 
 
 class Watchtower(ThreadingHTTPServer):
@@ -10506,8 +10536,9 @@ class Watchtower(ThreadingHTTPServer):
     def fresh_scan(self, remember=True):
         """The newest scan no older than the tick, and its age in
         seconds, read under one hold of the lock so the age belongs to
-        the body it comes with. `remember=False` is the keeper clock's
-        turn (#271), kept out of the day book (ADR-0014). A turn's scan
+        the body it comes with. `remember=False` is a turn of `serve`'s
+        own clock, the keeper's (#271) or the watch's (#281), kept out of
+        the day book (ADR-0014). A turn's scan
         never answers a request: its claims stayed out of the book, and
         a page served it would count a look on a day painted unread, so
         the request scans again and its row is `fold_day`'s to write
@@ -10537,7 +10568,8 @@ class Watchtower(ThreadingHTTPServer):
         """The metrics route (ADR-0033): the same held scan the status
         endpoint serves, rendered by one pure function. A scrape walks
         the store only when a request would: the hold has lapsed, or
-        the scan held is a keeper turn's (`fresh_scan`)."""
+        the scan held is a turn of the server's own clock
+        (`fresh_scan`)."""
         body, age = self.fresh_scan()
         return metrics_text(json.loads(body.decode("utf-8")), age)
 
@@ -10792,21 +10824,27 @@ def cmd_serve(args):
     print(f"watching {root.as_posix()} on "
           f"http://127.0.0.1:{server.server_address[1]}/ "
           "(localhost only)", flush=True)
-    print("keeper: none over a receiver's folder; nothing is anchored, "
-          "sent or appended from the far end (ADR-0041)" if receiver
-          else keeper_words(anchor_every, anchor_source, publish_every,
-                            publish_head, publish_chain, publish_source,
-                            authority),
-          flush=True)
     # With a cadence in force, the keepers get a clock of their own
     # (#271): a daemon thread asking for a scan on the tick, so what
     # leaves this machine never depends on somebody having the page
-    # open. With no cadence, no thread starts and nothing changes.
+    # open. With none, the watch gets the same thread on a slower tick
+    # (#281), unless SUPERVISOR_WATCH_TICK_SECONDS=0 turns it off.
+    keeping = anchor_every is not None or publish_every is not None
+    line = ("keeper: none over a receiver's folder; nothing is anchored, "
+            "sent or appended from the far end (ADR-0041)" if receiver
+            else keeper_words(anchor_every, anchor_source, publish_every,
+                              publish_head, publish_chain, publish_source,
+                              authority))
+    print(line if keeping else f"{line}; {watch_words(WATCH_TICK_SECONDS)}",
+          flush=True)
     stop = threading.Event()
     keeper = None
-    if anchor_every is not None or publish_every is not None:
-        keeper = threading.Thread(target=keep_turning, args=(server, stop),
-                                  daemon=True)
+    if keeping or WATCH_TICK_SECONDS:
+        keeper = threading.Thread(
+            target=keep_turning,
+            args=((server, stop) if keeping
+                  else (server, stop, WATCH_TICK_SECONDS, "watch's")),
+            daemon=True)
         keeper.start()
     try:
         server.serve_forever()
@@ -13882,7 +13920,12 @@ def main(argv=None):
                              spoken_wrong=acknowledge.error)
     serve = sub.add_parser(
         "serve", parents=[watching],
-        help="the face: status band on a localhost-only server")
+        help="the face: status band on a localhost-only server",
+        description="The face: status band on a localhost-only server. "
+                    "With no keeper cadence in force it also looks on a "
+                    "clock of its own, every SUPERVISOR_WATCH_TICK_SECONDS "
+                    "(600); 0 turns that off, and it then looks only when "
+                    "a page or a scrape asks (#281).")
     serve.add_argument("--root", default=None,
                        help="legacy/explicit mode: serve this folder of "
                             "repos instead of the store (default: the "
@@ -13890,7 +13933,8 @@ def main(argv=None):
     serve.add_argument("--receiver", default=None, metavar="DIR",
                        help="serve a receiver's data directory as the "
                             "universe (ADR-0041), as `scan --receiver` "
-                            "reads it; no keeper runs. Not with --root")
+                            "reads it; no keeper runs, so no keeper's flag "
+                            "is taken beside it. Not with --root")
     serve.add_argument("--port", type=int, default=7717,
                        help="localhost port (0 picks a free one; "
                             "default 7717)")
@@ -14092,6 +14136,21 @@ def main(argv=None):
     package.set_defaults(func=cmd_package)
 
     args = parser.parse_args(argv)
+    # No keeper runs over a receiver's folder (ADR-0041), so a flag only
+    # a keeper reads is refused there by name, before the keeper's own
+    # rules below could answer in its place (#487 item 11).
+    if getattr(args, "receiver", None) is not None:
+        given = [flag for flag in ("--anchor-every", "--calendar",
+                                   "--publish-every", "--publish-url",
+                                   "--publish-chain")
+                 if getattr(args, flag[2:].replace("-", "_"), None)
+                 is not None]
+        if given:
+            args.spoken_wrong(
+                "--receiver reads a receiver's data directory, and no "
+                "keeper runs over a receiver's folder: drop "
+                + (", ".join(given[:-1]) + " and " if given[1:] else "")
+                + given[-1])
     # The cadence says when and a URL says where, the head's or the
     # chain's; one without the other is a command spoken wrong, refused
     # before any tick runs. `serve` settles this itself, after reading
