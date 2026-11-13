@@ -26,7 +26,7 @@ curl http://127.0.0.1:7717/metrics
 
 The response is `text/plain; version=0.0.4; charset=utf-8`, and every family on it is a gauge: the counts are the reading, and the trend over time is your time-series store's job, which is exactly where ADR-0013 declined to grow one.
 
-With no keeper cadence in force, `serve` also looks on a clock of its own every ten minutes, so the completeness watch and the baseline keep their time with no page open and no scrape (`SUPERVISOR_WATCH_TICK_SECONDS`; 0 turns that clock off).
+With no keeper cadence in force, `serve` also looks on a clock of its own every ten minutes, so the completeness watch and the baseline keep their time with no page open and no scrape (`SUPERVISOR_WATCH_TICK_SECONDS`; 0 turns that clock off). Each such look is a full walk of the store, and the next starts a full tick after the last one ends, so a store that takes minutes to walk is looked at that much less often.
 
 ## 3. What is on the scrape
 
