@@ -215,7 +215,9 @@ def left_to_the_machine(*names):
     installer refuses before it reads or writes anything: with the
     managed stand-in set and the copy's unset, always; with the managed
     folder the machine's own, once the test has seen for itself that the
-    check fails for the interpreter it starts."""
+    check fails for the interpreter it starts; and with both stand-ins
+    set and the operator's settings file not JSON, which the installer
+    refuses after the check and before it writes anything (#574)."""
     _left.update(names)
     try:
         yield

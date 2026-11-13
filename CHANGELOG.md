@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Added
+
+- `supervisor scan` says on its settings note when the account it runs as can write a managed install's hook file or copy, and when `LOXODONTA_MANAGED_DIR` names the managed folder read. A note: no exit moves (#469, #466).
+
 ### Changed
 
 - `docs/CLAIMS.md` names a limit ADR-0047's measured run found: where a `PreToolUse` hook rewrites a call's input, the receipt holds the input as the model sent it, not what ran.
@@ -22,6 +26,9 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ### Fixed
 
+- The managed install's check follows a path one link at a time and judges every folder holding a link, at every hop: a link reached through another link escaped it. A path through more than 40 links is refused (#576).
+- On POSIX the managed install writes its copy through the folders its check held open, so a link put in place after the check cannot redirect it. On Windows the check is asked again just before each write (#574).
+- On Windows the managed install's check passes `Program Files`, `Program Files (x86)` and `System32` as the registry names them, and refuses `System32`'s default-writable folders by name: the rest of `C:\Windows` passed, and `Program Files (x86)` was refused (#574).
 - `scan --receiver` and `serve --receiver` refuse a keeper's flag (`--anchor-every`, `--calendar`, `--publish-every`, `--publish-url`, `--publish-chain`) by name, exit 64: `scan` took and ignored them, and `serve` answered with the keeper's own rule about URLs (#487).
 - At the receiver, an acknowledged session whose events hold a call naming no tool stays acknowledged: its counts were compared before the memory's JSON had turned the missing name into `"null"`, so they never matched (ADR-0046).
 - The help of `install-hook --publish-chain` and of the supervisor's `--publish-chain` says what ADR-0045 built: each entry leaves as it is written, and a send carries what the remote does not hold.
