@@ -3220,6 +3220,22 @@ def number_setting(name, raw, kind=int, waited=False):
     return value
 
 
+def port_number(text):
+    """A port to listen on, as typed on the command line: a whole number
+    from 0 to 65535, 0 asking for a free one. Anything else is a usage
+    error naming the flag, never the OverflowError a socket raises at
+    bind (#589). The recorder listens on no port; it holds the original
+    as it holds every twin's."""
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
+    if not 0 <= value <= 65535:
+        raise argparse.ArgumentTypeError(
+            "a port is a whole number from 0 to 65535")
+    return value
+
+
 # --- Writing a line -----------------------------------------------------------
 # The clock an entry is stamped with, the line it becomes, and the one
 # way a line reaches the disk.

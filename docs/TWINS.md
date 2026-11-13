@@ -220,6 +220,14 @@ Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
 
 The supervisor and the receiver take a number from their environment only when they can use it, and refuse any other by name with 64 before any verb runs: never a traceback at import, and never a wait longer than a wait can take (#487, #589). The recorder's own knobs fall back to their defaults instead, and it holds the original as it holds every twin's.
 
+### A port to listen on
+
+Names: `port_number`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
+
+The supervisor's and the receiver's `serve` take a port only when a socket can, and refuse any other by name with 64 at the parser: never the socket's traceback (#589).
+
 ### Finding a helper program
 
 Names: `helper_path`.

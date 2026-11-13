@@ -200,6 +200,23 @@ def number_setting(name, raw, kind=int, waited=False):
     return value
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def port_number(text):
+    """A port to listen on, as typed on the command line: a whole number
+    from 0 to 65535, 0 asking for a free one. Anything else is a usage
+    error naming the flag, never the OverflowError a socket raises at
+    bind (#589). The recorder listens on no port; it holds the original
+    as it holds every twin's."""
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
+    if not 0 <= value <= 65535:
+        raise argparse.ArgumentTypeError(
+            "a port is a whole number from 0 to 65535")
+    return value
+
+
 # The whole of one request, headers and body, is due this many seconds
 # after its connection is taken, or the connection is dropped (#300). A
 # timeout per receive alone let a sender trickle one byte every 1.5
@@ -1481,7 +1498,7 @@ def main(argv=None):
                        help="the address to listen on (default: all "
                             "interfaces, since the sender is another "
                             "machine); 127.0.0.1 narrows it to this one")
-    serve.add_argument("--port", type=int, default=DEFAULT_PORT,
+    serve.add_argument("--port", type=port_number, default=DEFAULT_PORT,
                        help=f"the port to listen on (default: {DEFAULT_PORT}; "
                             "0 picks a free one and prints it)")
     serve.add_argument("--cert", metavar="FILE",

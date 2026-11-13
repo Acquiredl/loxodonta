@@ -5904,6 +5904,22 @@ class UsageExitTest(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(result.stdout, "")
 
+    def test_a_port_no_socket_takes_exits_64_naming_it(self):
+        # #589: a port past 65535, or below 0, reached the socket
+        # unchecked and raised OverflowError there, exit 70.
+        for port in ("70000", "65536", "-1", "eighty"):
+            with self.subTest(port=port):
+                result = run_supervisor(self.home, "serve", "--root",
+                                        str(temp_folder(self)),
+                                        "--port", port)
+
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                self.assertIn("argument --port: a port is a whole number "
+                              "from 0 to 65535", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.stdout, "")
+
     def test_malformed_cadence_exits_64_not_a_verdict_number(self):
         # parse_cadence raises ArgumentTypeError inside the scan subparser;
         # the subparser must speak 64 too, or scan's own exits collide.
@@ -6009,20 +6025,6 @@ class CrashExitTest(unittest.TestCase):
 
     def setUp(self):
         self.home = temp_folder(self)
-
-    def test_a_port_past_65535_exits_70_with_its_traceback(self):
-        # No honest input makes the supervisor crash on purpose, and the
-        # suite adds no hook to make it (ADR-0037). A port past 65535
-        # reaches the socket unchecked and raises OverflowError there,
-        # an exception of the verb's own and not a failed write. When a
-        # usage rule refuses such a port, this test goes; the read-only
-        # stdout above still holds the 70.
-        result = run_supervisor(self.home, "serve", "--root",
-                                str(temp_folder(self)), "--port", "70000")
-
-        self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
-        self.assertIn("Traceback (most recent call last)", result.stderr)
-        self.assertIn("OverflowError", result.stderr)
 
     def many_hits(self):
         """A repo whose chain holds more `search step` hits than a pipe's
