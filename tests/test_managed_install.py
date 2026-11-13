@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -50,6 +51,19 @@ HARNESS_FOLDER = {"win32": "C:\\Program Files\\ClaudeCode",
 PROGRAM_FOLDER = ("C:\\Program Files\\loxodonta" if sys.platform == "win32"
                   else "/opt/loxodonta")
 REMOTE = "http://127.0.0.1:9/hook"
+# The quote marks PowerShell reads inside single quotes: ' and the curly
+# single quotes, each written twice to stand for itself.
+POWERSHELL_QUOTES = ("'", chr(0x2018), chr(0x2019), chr(0x201A), chr(0x201B))
+
+
+def quoted(text):
+    """`text` as one literal word of the shell the next step is printed
+    for: single quotes in PowerShell on Windows, in sh elsewhere."""
+    if os.name == "nt":
+        for mark in POWERSHELL_QUOTES:
+            text = text.replace(mark, mark * 2)
+        return f"'{text}'"
+    return "'" + text.replace("'", "'\\''") + "'"
 
 
 class ManagedBase(unittest.TestCase):
@@ -399,6 +413,119 @@ class ManagedInstallTest(ManagedBase):
         self.assertIn("install-hook --managed", done.stderr)
         self.assertIn("uninstall-hook --managed", done.stderr)
         self.assertEqual(self.everything(), before)
+
+    def next_step(self, done):
+        """The two lines an install names its next step in: the one that
+        introduces it, and the command, alone on the line after it."""
+        lines = done.stdout.splitlines()
+        said = [n for n, line in enumerate(lines) if line.startswith("next:")]
+        self.assertEqual(len(said), 1, done.stdout)
+        restart = max(n for n, line in enumerate(lines)
+                      if "Restart open" in line or "open sessions" in line)
+        self.assertGreater(said[0], restart, "after the restart line")
+        return lines[said[0]], lines[said[0] + 1]
+
+    def test_each_install_names_the_next_step_as_its_commands_spell_it(self):
+        # #147: the README's next step, `supervisor.py scan`, after the
+        # restart line, naming the script the digest is wired to: the
+        # copy on a managed install, the file beside it on a plain one.
+        # The command stands alone on its line, so a copy of the line is
+        # the command; on Windows in PowerShell's form, the default
+        # shell, where a quoted program needs `&` before it.
+        for flags, wired in (((), self.operator_file),
+                             (("--managed",), self.managed_file)):
+            with self.subTest(flags=flags):
+                done = self.install(*flags)
+
+                digest, = self.commands(self.read(wired), "SessionStart")
+                _, python, _, script, _ = digest.split('"', 4)
+                windows = os.name == "nt"
+                self.assertEqual(self.next_step(done), (
+                    "next: after a session, run this"
+                    + (" in PowerShell" if windows else "")
+                    + " for every session so far, one verdict each:",
+                    "  " + ("& " if windows else "") + quoted(python)
+                    + " -I " + quoted(script) + " scan"))
+
+    def runs_as_printed(self, shell):
+        """The printed line, passed whole to `shell`, from installs under
+        folders whose names a shell would read as code if they were not
+        quoted for it (#147, review): a plain install run from a copy of
+        the scripts in such a folder, and a managed one whose copy is
+        there. Each exits 0, and nothing the name spells is run."""
+        names = ["with space", "t$(New-Item -ItemType File -Path probe-ran)",
+                 "it's here", "it" + chr(0x2019) + "s", "back`tick"]
+        if os.name != "nt":
+            names = ["with space", "t$(touch probe-ran)", "it's here",
+                     "back`touch probe-ran`tick", 'dq"x$HOME']
+        for number, name in enumerate(names):
+            for flags in ((), ("--managed",)):
+                with self.subTest(name=name, flags=flags):
+                    base = self.work / f"case-{number}-{len(flags)}" / name
+                    home = base / "home"
+                    (home / ".claude" / "projects").mkdir(parents=True)
+                    env = {**self.env, "HOME": str(home),
+                           "USERPROFILE": str(home),
+                           "LOXODONTA_HOME": str(base / "store"),
+                           "LOXODONTA_MANAGED_DIR": str(base / "managed"),
+                           "LOXODONTA_PROGRAM_DIR": str(base / "program")}
+                    here = base.parent / "here"
+                    here.mkdir()
+                    tools = base / "tools"
+                    tools.mkdir()
+                    for tool in (LOXODONTA, SUPERVISOR):
+                        shutil.copy(tool, tools / tool.name)
+                    installed = run(tools / "loxodonta.py", "install-hook",
+                                    *flags, env=env)
+                    self.assertEqual(installed.returncode, 0,
+                                     installed.stdout + installed.stderr)
+                    _, command = self.next_step(installed)
+                    copy = base / ("program" if flags else "tools")
+                    self.assertIn(
+                        quoted((copy / "supervisor.py").as_posix()), command)
+
+                    done = subprocess.run(
+                        [*shell, command], cwd=str(here),
+                        capture_output=True, encoding="utf-8",
+                        errors="replace", env=env, timeout=120)
+
+                    self.assertEqual(done.returncode, 0,
+                                     command + "\n" + done.stdout
+                                     + done.stderr)
+                    self.assertEqual(list(here.iterdir()), [],
+                                     "the folder's name ran as code")
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell is Windows' shell")
+    def test_the_next_step_runs_in_powershell_as_printed(self):
+        # PowerShell 5.1, the default shell on Windows.
+        self.runs_as_printed(["powershell", "-NoProfile", "-Command"])
+
+    @unittest.skipIf(os.name == "nt", "sh is the POSIX shell")
+    def test_the_next_step_runs_in_sh_as_printed(self):
+        self.runs_as_printed(["sh", "-c"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows drops a trailing dot")
+    def test_a_name_windows_runs_as_the_recorder_is_already_installed(self):
+        # #589 item 8: `loxodonta.py.` runs the recorder on Windows, so
+        # a re-install reads it as its own and wires no second entry.
+        self.install()
+        dotted = self.operator_file.read_text(encoding="utf-8").replace(
+            'loxodonta.py\\" hook', 'loxodonta.py.\\" hook').replace(
+            'supervisor.py\\" digest', 'supervisor.py.\\" digest')
+        self.assertIn("loxodonta.py.", dotted)
+        self.assertIn("supervisor.py.", dotted)
+        self.operator_file.write_text(dotted, encoding="utf-8")
+
+        self.install()
+
+        # SessionEnd's command is rewritten to the installer's own
+        # spelling, as any of its own that differs is; never doubled.
+        settings = self.read(self.operator_file)
+        for event in ("PostToolUse", "PostToolUseFailure", "SessionEnd",
+                      "SessionStart"):
+            with self.subTest(event=event):
+                self.assertEqual(len(self.commands(settings, event)), 1,
+                                 settings)
 
     def test_a_plain_install_for_codex_is_another_harness_and_goes_ahead(self):
         self.install("--managed")

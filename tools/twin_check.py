@@ -109,7 +109,7 @@ TWINS = (
          "Every file answers `--version` with the same line, tool, format "
          "and the commit it sits in, read by local git only and never "
          "fetched (ADR-0015, ADR-0022), and a git that has not answered "
-         "within the same bound reads as unknown (#572)."),
+         "within `GIT_TIMEOUT` reads as unknown (#572)."),
     Twin("A usage error", ("EX_USAGE", "UsageParser"), ORIGINAL, BOTH,
          "A wrong flag exits 64 from every file, never a number a script "
          "could read as an answer (ADR-0026 ruling 7)."),
@@ -260,6 +260,10 @@ TWINS = (
          "and never a wait longer than a wait can take (#487, #589). The "
          "recorder's own knobs fall back to their defaults instead, and "
          "it holds the original as it holds every twin's."),
+    Twin("A port to listen on", ("port_number",), ORIGINAL, BOTH,
+         "The supervisor's and the receiver's `serve` take a port only "
+         "when a socket can, and refuse any other by name with 64 at the "
+         "parser: never the socket's traceback (#589)."),
     Twin("Finding a helper program", ("helper_path",), ORIGINAL, BOTH,
          "openssl, ssh-keygen, git, gh and claude run by the full path a walk of PATH "
          "finds, never from the working directory, in every file that "

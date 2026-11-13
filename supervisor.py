@@ -162,6 +162,23 @@ def number_setting(name, raw, kind=int, waited=False):
     return value
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def port_number(text):
+    """A port to listen on, as typed on the command line: a whole number
+    from 0 to 65535, 0 asking for a free one. Anything else is a usage
+    error naming the flag, never the OverflowError a socket raises at
+    bind (#589). The recorder listens on no port; it holds the original
+    as it holds every twin's."""
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
+    if not 0 <= value <= 65535:
+        raise argparse.ArgumentTypeError(
+            "a port is a whole number from 0 to 65535")
+    return value
+
+
 def env_number(name, default, kind=int, waited=False):
     """The number in environment variable `name`, or `default` when it
     is unset. Read at import, so a value `number_setting` refuses is
@@ -3058,6 +3075,12 @@ def owned_script(command, names):
     if not words or len(words) < 3:
         return None
     interpreter, script, verb = words[:3]
+    if os.name == "nt":
+        # Windows drops a name's trailing dots and spaces, so it runs
+        # `loxodonta.py.` as the recorder, and the path returned is the
+        # one it runs, which git and the notice ask about; on POSIX that
+        # is another file.
+        script = script.rstrip(". ")
     name = file_name(script)
     if not is_interpreter(interpreter) or name not in names \
             or WIRED_VERB[name] != verb:
@@ -11694,7 +11717,7 @@ db       .d88b.  db    db  .d88b.  d8888b.  .d88b.  d8b   db d888888b  .d8b.
 Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</pre>
   <h1>supervisor</h1>
   <p class="stance">a tripwire with a memory — verdicts come from
-  <code>receipts verify</code>; this page draws them and decides nothing</p>
+  <code>loxodonta verify</code>; this page draws them and decides nothing</p>
 </header>
 <div id="strip">
   <span id="statemark" aria-hidden="true"></span>
@@ -11727,7 +11750,7 @@ Y88888P  `Y88P'  YP    YP  `Y88P'  Y8888D'  `Y88P'  VP   V8P    YP    YP   YP</p
   <p id="lapse"></p>
 </section>
 
-<footer id="railfoot">verdicts come from <code>receipts verify</code> —
+<footer id="railfoot">verdicts come from <code>loxodonta verify</code> —
 this page draws them and decides nothing</footer>
 </aside>
 <main id="work">
@@ -11777,7 +11800,7 @@ this page draws them and decides nothing</footer>
         </div>
         <div class="tabpane" id="pane-search" hidden>
           <p class="testimony">the writer's word, findable — run
-          <code>receipts verify</code> for the verdict</p>
+          <code>loxodonta verify</code> for the verdict</p>
           <input type="search" id="ask-search"
                  placeholder="search every action line on this machine">
           <div id="found"></div>
@@ -11808,7 +11831,7 @@ this page draws them and decides nothing</footer>
             title="drag to resize"></button>
     <div class="pane">
       <div class="phead"><span class="no">[2]</span> inspect — the chain
-        as <code>receipts verify</code> sees it</div>
+        as <code>loxodonta verify</code> sees it</div>
       <div class="pbody">
         <div id="p2-inspect">
           <div id="inspect-meta" class="pane-empty">click a session on
@@ -11886,7 +11909,7 @@ this page draws them and decides nothing</footer>
   <p class="testimony">entry by entry, each hash recomputed in your
   browser via WebCrypto — a second, independent check in your hands.
   The walker reports its recomputation; the verdict comes from
-  <code>receipts verify</code></p>
+  <code>loxodonta verify</code></p>
   <div id="walking"></div>
   <div id="entries"></div>
 </section>
@@ -14140,7 +14163,7 @@ def main(argv=None):
                             "universe (ADR-0041), as `scan --receiver` "
                             "reads it; no keeper runs, so no keeper's flag "
                             "is taken beside it. Not with --root")
-    serve.add_argument("--port", type=int, default=7717,
+    serve.add_argument("--port", type=port_number, default=7717,
                        help="localhost port (0 picks a free one; "
                             "default 7717)")
     # serve settles its publish flags against the coverage marker, so

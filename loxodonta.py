@@ -3246,6 +3246,22 @@ def number_setting(name, raw, kind=int, waited=False):
     return value
 
 
+def port_number(text):
+    """A port to listen on, as typed on the command line: a whole number
+    from 0 to 65535, 0 asking for a free one. Anything else is a usage
+    error naming the flag, never the OverflowError a socket raises at
+    bind (#589). The recorder listens on no port; it holds the original
+    as it holds every twin's."""
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
+    if not 0 <= value <= 65535:
+        raise argparse.ArgumentTypeError(
+            "a port is a whole number from 0 to 65535")
+    return value
+
+
 # --- Writing a line -----------------------------------------------------------
 # The clock an entry is stamped with, the line it becomes, and the one
 # way a line reaches the disk.
@@ -3883,7 +3899,11 @@ def unwritable_why(path, error):
     """Why a write to the chain or a sidecar at `path` failed, in words: what
     `file_problem` says of the path, a folder in its place say, which
     Windows reports as a denied permission (#364); else the system's
-    reason."""
+    reason. A file where a folder above `path` should be is named first:
+    Windows reports it as a path it cannot find (#589)."""
+    above = nearest_standing(path)
+    if not os.path.isdir(above):
+        return f"a file stands at {visible(above)}, where a folder should be"
     return file_problem(path) or error.strerror or str(error)
 
 
@@ -6453,9 +6473,9 @@ def drawer_of_session(log_dir, session):
     costs nothing: the resolved drawer already has the chain. Returns
     the drawer and a warning, None unless a store folder cannot be
     listed, and the receipt then still goes to the resolved drawer,
-    never lost (#452). The caller prints the warning once that drawer
-    exists, so a receipt refused for want of it prints the refusal
-    alone (#555)."""
+    never lost (#452). The caller prints the warning once the chain in
+    that drawer stands, so a receipt refused for want of the drawer or
+    of the chain prints the refusal alone (#555, #589)."""
     name = f"receipts-{session}.jsonl"
     if os.path.exists(os.path.join(log_dir, name)):
         return log_dir, None
@@ -6717,8 +6737,6 @@ def cmd_hook(args):
                 f.write("*\n!.gitignore\n")
         except FileExistsError:
             pass
-    if drawer_warning:
-        print(drawer_warning, file=sys.stderr)
     if project is not None:
         record_project(log_dir, project)
     # A damaged chain is not extended and not repaired — recording moves to
@@ -6730,6 +6748,10 @@ def cmd_hook(args):
         return locked_out(log)
     except OSError as e:
         return unwritable_log(log, e)
+    # Only once the chain stands: a receipt refused prints the refusal
+    # alone, never "this receipt goes to" a drawer it never reached (#589).
+    if drawer_warning:
+        print(drawer_warning, file=sys.stderr)
 
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
@@ -7041,6 +7063,12 @@ def owned_script(command, names):
     if not words or len(words) < 3:
         return None
     interpreter, script, verb = words[:3]
+    if os.name == "nt":
+        # Windows drops a name's trailing dots and spaces, so it runs
+        # `loxodonta.py.` as the recorder, and the path returned is the
+        # one it runs, which git and the notice ask about; on POSIX that
+        # is another file.
+        script = script.rstrip(". ")
     name = file_name(script)
     if not is_interpreter(interpreter) or name not in names \
             or WIRED_VERB[name] != verb:
@@ -7279,6 +7307,42 @@ def digest_command(payload=False, folder=None, managed=False):
     command = f'"{python}" -I "{script.replace(os.sep, "/")}" digest'
     command += " --managed" if managed else ""
     return command + (" --payload" if payload else "")
+
+
+# The marks PowerShell reads as a single quote inside a single-quoted
+# word: the straight one and the four curly ones. Each is written twice
+# there to stand for itself.
+POWERSHELL_QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+
+
+def shell_word(text):
+    """`text` as one literal word of the shell the next step is printed
+    for, whatever a folder's name holds: single quotes, in which neither
+    PowerShell nor sh expands `$`, `$(...)` or a backtick; each quote
+    mark inside written twice for PowerShell, and as `'\\''` for sh."""
+    if os.name == "nt":
+        for mark in POWERSHELL_QUOTES:
+            text = text.replace(mark, mark * 2)
+        return f"'{text}'"
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def next_step(folder=None):
+    """The two lines an install prints after its restart word (#147):
+    the README's next step, `supervisor.py scan`, the script the digest
+    is wired to, alone on the second line so a copy of the line is the
+    command. On Windows in PowerShell's form, its default shell, where a
+    quoted program runs only after `&`. Each path is one literal word
+    (shell_word), so a line copied as printed runs as printed. Printed,
+    never asked: the installer reads no stdin."""
+    python = sys.executable.replace(os.sep, "/")
+    script = (os.path.join(folder, "supervisor.py") if folder
+              else supervisor_path())
+    shell, run = (" in PowerShell", "& ") if os.name == "nt" else ("", "")
+    return (f"next: after a session, run this{shell} for every session so "
+            "far, one verdict each:\n"
+            f"  {run}{shell_word(python)} -I "
+            f"{shell_word(script.replace(os.sep, '/'))} scan")
 
 
 def same_path(one, other):
@@ -8907,6 +8971,8 @@ def cmd_install_hook(args):
     print("every NEW Claude Code session on this machine now leaves a chain")
     print(f"in the store ({os.path.join(store_home(), 'receipts')}), one")
     print("drawer per project. Restart open sessions.")
+    if os.path.isfile(supervisor_path()):
+        print(next_step())
     if tier:
         print(tier)
     return 0
@@ -9130,6 +9196,9 @@ def install_managed_hooks(args):
     elif changed or pinned:
         print("Restart open sessions and a running `supervisor serve`: "
               "managed settings load at start.")
+    if (both or removed or changed or pinned) and any(
+            os.path.basename(copy[0]) == "supervisor.py" for copy in plan):
+        print(next_step(folder))
     tier = profile_notice(args.profile, wired)
     if tier:
         print(tier)
@@ -9386,8 +9455,10 @@ def main(argv=None):
         help="append one entry from a Claude Code PostToolUse payload on stdin")
     hook_parser.add_argument("--log-dir", default=None, metavar="DIR",
                              help="directory for per-session receipt logs "
-                                  "(default: $CLAUDE_PROJECT_DIR/receipts, "
-                                  "else the working directory)")
+                                  "(default: the store's drawer for the "
+                                  "project in $CLAUDE_PROJECT_DIR, or in "
+                                  "the payload's cwd when that is unset, "
+                                  "else the working directory; ADR-0011)")
     hook_parser.add_argument("--actor", default=CLAUDE_CODE_ACTOR,
                              help="actor recorded for hook entries")
     hook_parser.add_argument("--anchor", action="store_true",

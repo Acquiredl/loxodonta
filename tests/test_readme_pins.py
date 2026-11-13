@@ -18,6 +18,9 @@ The blocks pinned:
   (in docs/HOW-IT-WORKS.md, the walk the README links to).
 - `bad-day-check` — verify and drill over the committed demo chain (same
   page).
+- `handing-over` — a sentence, not a block (`<!-- pin-prose:NAME -->`):
+  the package and verify-package commands it names, run with each
+  placeholder filled (same page, #589).
 
 Commands run cross-platform: `python loxodonta.py ...` runs through the
 copy in the working directory, and `sed -i 's/A/B/' FILE` is applied as
@@ -40,7 +43,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import (LOXODONTA, REPO_ROOT, SUPERVISOR,  # noqa: E402
-                     isolated_env, run)
+                     VERIFIER, isolated_env, run)
 
 
 README = REPO_ROOT / "README.md"
@@ -116,11 +119,15 @@ class Runner:
             return self._sed(command)
         if argv[:1] == ["python"]:
             # `python loxodonta.py ...` / `python supervisor.py ...` run
-            # through the copies placed in cwd, or the repo's own files.
+            # through the copies placed in cwd, or the repo's own files;
+            # `python -I ...` isolated, as written.
             import shlex
             parts = shlex.split(command, posix=True)
+            isolated = parts[1:2] == ["-I"]
+            if isolated:
+                parts = parts[:1] + parts[2:]
             return run(parts[1], *parts[2:], cwd=str(self.cwd),
-                       env=self.env)
+                       env=self.env, isolated=isolated)
         self.fail(f"don't know how to run {command!r}")
 
     def _sed(self, command):
@@ -229,6 +236,52 @@ class CommandListPinTest(unittest.TestCase):
             self.assertTrue(
                 (clone / "docs" / "demo" / ".supervisor-drill").is_dir(),
                 "[pin:bad-day-check] the drill line ran no drill")
+
+
+# A command named in a sentence rather than a block (#589 item 11): the
+# paragraph after `<!-- pin-prose:NAME -->`, its inline commands run with
+# each placeholder given the value a reader would type.
+PROSE_MARKER = "<!-- pin-prose:{} -->"
+DEMO_STORE = REPO_ROOT / "tools" / "demo_store.py"
+BAD_DAY_SESSION = "b5d1e0a7-3c62-4f89-a0d4-8e21f6b4c907"
+
+
+def pinned_prose(text, name):
+    """The inline `python ...` commands of the paragraph after the
+    marker, in the order the sentence names them."""
+    lines = text.splitlines()
+    at = lines.index(PROSE_MARKER.format(name))
+    paragraph = next(line for line in lines[at + 1:] if line.strip())
+    return re.findall(r"`(python [^`]+)`", paragraph)
+
+
+class ProsePinTest(unittest.TestCase):
+
+    def test_handing_over_packages_a_session_and_verifies_it(self):
+        commands = pinned_prose(WALK.read_text(encoding="utf-8"),
+                                "handing-over")
+        self.assertEqual(len(commands), 2, commands)
+        filled = {"<session-id>": BAD_DAY_SESSION,
+                  "<zip>": f"loxodonta-package-{BAD_DAY_SESSION}.zip"}
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            built = run(DEMO_STORE, "--home", str(home))
+            self.assertEqual(built.returncode, 0, built.stderr)
+            work = Path(tmp) / "work"
+            work.mkdir()
+            for tool in (LOXODONTA, SUPERVISOR, VERIFIER):
+                shutil.copy(tool, work / tool.name)
+            runner = Runner("handing-over", work, isolated_env(home))
+            for command in commands:
+                for placeholder, value in filled.items():
+                    command = command.replace(placeholder, value)
+                done = runner.run(command)
+                self.assertEqual(
+                    done.returncode, 0,
+                    f"[pin-prose:handing-over] {command!r} exited "
+                    f"{done.returncode}\n{done.stdout}{done.stderr}")
+            self.assertIn("VALID", done.stdout)
 
 
 class PinGuardTest(unittest.TestCase):

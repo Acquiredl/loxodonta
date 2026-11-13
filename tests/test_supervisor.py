@@ -5337,6 +5337,41 @@ class RecorderDriftTest(unittest.TestCase):
         self.assertIn("install-hook", older["note"])
         self.assertNotIn("failed tool calls", rewired["note"])
 
+    @unittest.skipUnless(os.name == "nt", "Windows drops a trailing dot")
+    def test_a_name_windows_runs_as_the_recorder_is_wired(self):
+        # #589 item 8: Windows runs `loxodonta.py.` as `loxodonta.py`,
+        # so the notice must not say no recorder hook is wired.
+        home = self.base / "loose"
+        home.mkdir()
+        script = home / "loxodonta.py"
+        script.write_text("# loose recorder\n", encoding="utf-8")
+        for tail in (".", ". .", ".."):
+            with self.subTest(tail=tail):
+                install_witness_hook(
+                    self.witness,
+                    command=f'python "{script.as_posix()}{tail}" hook')
+
+                recorder = self.notice()
+
+                self.assertNotEqual(recorder["state"], "unwired")
+                self.assertNotIn("not on disk", recorder["note"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows drops a trailing dot")
+    def test_a_checkout_wired_with_a_trailing_dot_reads_clean(self):
+        # #589 item 8, review: the file the notice asks git about is the
+        # one Windows runs, `loxodonta.py`, never `loxodonta.py.`, which
+        # git holds no blob of, so a clean checkout read as dirty.
+        _, script = self.make_checkout(autocrlf="false")
+        install_witness_hook(
+            self.witness, command=f'python "{script.as_posix()}." hook')
+
+        recorder = self.notice()
+
+        self.assertEqual(recorder["state"], "tracked")
+        self.assertFalse(recorder["dirty"])
+        self.assertIn("clean", recorder["note"])
+        self.assertEqual(recorder["path"], script.as_posix())
+
     def test_no_wired_hook_means_no_recorder_to_report_on(self):
         self.witness.mkdir(parents=True, exist_ok=True)
         (self.witness.parent / "settings.json").write_text(
@@ -5885,6 +5920,22 @@ class UsageExitTest(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(result.stdout, "")
 
+    def test_a_port_no_socket_takes_exits_64_naming_it(self):
+        # #589: a port past 65535, or below 0, reached the socket
+        # unchecked and raised OverflowError there, exit 70.
+        for port in ("70000", "65536", "-1", "eighty"):
+            with self.subTest(port=port):
+                result = run_supervisor(self.home, "serve", "--root",
+                                        str(temp_folder(self)),
+                                        "--port", port)
+
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                self.assertIn("argument --port: a port is a whole number "
+                              "from 0 to 65535", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.stdout, "")
+
     def test_malformed_cadence_exits_64_not_a_verdict_number(self):
         # parse_cadence raises ArgumentTypeError inside the scan subparser;
         # the subparser must speak 64 too, or scan's own exits collide.
@@ -5998,20 +6049,6 @@ class CrashExitTest(unittest.TestCase):
 
     def setUp(self):
         self.home = temp_folder(self)
-
-    def test_a_port_past_65535_exits_70_with_its_traceback(self):
-        # No honest input makes the supervisor crash on purpose, and the
-        # suite adds no hook to make it (ADR-0037). A port past 65535
-        # reaches the socket unchecked and raises OverflowError there,
-        # an exception of the verb's own and not a failed write. When a
-        # usage rule refuses such a port, this test goes; the read-only
-        # stdout above still holds the 70.
-        result = run_supervisor(self.home, "serve", "--root",
-                                str(temp_folder(self)), "--port", "70000")
-
-        self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
-        self.assertIn("Traceback (most recent call last)", result.stderr)
-        self.assertIn("OverflowError", result.stderr)
 
     def many_hits(self):
         """A repo whose chain holds more `search step` hits than a pipe's

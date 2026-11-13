@@ -17,6 +17,7 @@ authority and remote the other suites use. No network, no internals.
 """
 
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -135,6 +136,27 @@ class TornSidecarTest(StoreCase):
         self.assertIn("chain", rows_after_the_tear(self, sidecar))
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         self.assertIn("nothing to send", again.stdout)
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a file this user may write and not read")
+    def test_a_sidecar_the_account_may_write_and_not_read_is_refused(self):
+        # The append reads the last byte through the open it writes
+        # with (#610), so a sidecar of mode 0200, appended to before,
+        # is refused now: loudly, by name, never a traceback.
+        calendar = start_calendar(self, b"fake-nonce")
+        sidecar = self.sidecar(".anchors.jsonl")
+        tear(sidecar)
+        os.chmod(sidecar, 0o200)
+        self.addCleanup(os.chmod, sidecar, 0o600)
+
+        result = run(LOXODONTA, "anchor", "--calendar", calendar.url,
+                     cwd=self.workdir)
+
+        self.assertEqual(result.returncode, 73, result.stdout + result.stderr)
+        self.assertIn("Permission denied", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        os.chmod(sidecar, 0o600)
+        self.assertEqual(sidecar.read_bytes(), TORN)
 
 
 class TornMemoScannedTest(unittest.TestCase):

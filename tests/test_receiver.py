@@ -1335,20 +1335,38 @@ class ExitTest(ReceiverFixture):
                                  result.stdout + result.stderr)
                 self.assertIn("receiver", result.stdout)
 
+    def test_a_port_no_socket_takes_exits_64_naming_it(self):
+        # #589: a port past 65535, or below 0, reached the socket
+        # unchecked and raised OverflowError there, exit 70.
+        for port in ("70000", "65536", "-1", "eighty"):
+            with self.subTest(port=port):
+                result = run(RECEIVER, "serve", "--data", str(self.data),
+                             "--bind", "127.0.0.1", "--port", port,
+                             timeout=60)
+
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                self.assertIn("argument --port: a port is a whole number "
+                              "from 0 to 65535", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(result.stdout, "")
+
     def test_a_crash_exits_70_with_its_traceback(self):
         # No honest input makes the receiver crash on purpose, and the
-        # suite adds no hook to make it (ADR-0037). A port past 65535
-        # reaches the socket unchecked and raises OverflowError there:
+        # suite adds no hook to make it (ADR-0037). An address to bind
+        # that is not ASCII and no host name fails to encode in the
+        # socket, a TypeError and not the OSError a refused bind is:
         # the lever until a usage rule refuses it first, when this test
-        # wants another. A stdout opened read only is not one: serve's
+        # wants another. A port past 65535 was the lever until #589
+        # refused it. A stdout opened read only is not one: serve's
         # unwritten lines fail again at the interpreter's last flush,
         # which turns the 70 into Python's 120.
         result = run(RECEIVER, "serve", "--data", str(self.data),
-                     "--bind", "127.0.0.1", "--port", "70000", timeout=60)
+                     "--bind", "\u00e9..x", "--port", "0", timeout=60)
 
         self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
         self.assertIn("Traceback (most recent call last)", result.stderr)
-        self.assertIn("OverflowError", result.stderr)
+        self.assertIn("encoding of hostname failed", result.stderr)
 
 
 if __name__ == "__main__":
