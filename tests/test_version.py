@@ -123,5 +123,20 @@ class VersionTest(unittest.TestCase):
             declared = one_constant.findall(script.read_text(encoding="utf-8"))
             self.assertEqual(declared, [line["tool"]], script.name)
 
+    def test_every_file_the_release_sums_checks_out_as_lf(self):
+        # #622: git's autocrlf on Windows rewrote the checkout's bytes, so
+        # its sums never matched SHA256SUMS. The release workflow's sum
+        # line is the list; a fifth file added there and not here fails.
+        workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml"
+                    ).read_text(encoding="utf-8")
+        summed = re.search(r"^\s*sha256sum (.+?) > SHA256SUMS\s*$",
+                           workflow, re.M)
+        self.assertIsNotNone(summed, "release.yml no longer sums the files")
+        rules = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
+        for name in summed.group(1).split():
+            self.assertRegex(rules, rf"(?m)^{re.escape(name)} text eol=lf\s*$",
+                             name)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,3 +16,11 @@ tests/fixtures/harness_events.jsonl -text
 # The clean-room verifier is frozen and its bytes are pinned in the suite
 # (tests/test_cleanroom.py, #493): checkout must not rewrite them.
 cleanroom/** -text
+
+# The four tool files are what the release sums (SHA256SUMS, ADR-0022):
+# a checkout must hold the release's bytes on every platform, so a sum
+# taken of it matches (#622).
+loxodonta.py text eol=lf
+supervisor.py text eol=lf
+receiver.py text eol=lf
+verifier.py text eol=lf

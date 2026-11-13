@@ -18,6 +18,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - At the receiver, a receipt first seen more than `SUPERVISOR_LATE_RECEIPT_SECONDS` (one hour) after a settled look named its call missing pays nothing: the session keeps its finding until acknowledged, and the row says why (#620).
 - At the receiver, a chain copy carrying the hook's `second-record-cut:` note is never counted as before the second record's memory, whatever dates its entries carry: it reads `SECOND-RECORD-ABSENT` and raises (#486).
 - `anchor --upgrade` asks only the default calendars and each `--calendar` given; a row naming another address is named, skipped and never asked, so upgrading a handed sidecar sends nothing where its issuer chose. The keeper passes its `--calendar` (#415).
+- A git checkout holds the four tool files with LF line endings on every platform, so on Windows their sums match the release's `SHA256SUMS` and a managed install made from a checkout carries the release's bytes (#622).
 
 ### Fixed
 
