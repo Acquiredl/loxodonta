@@ -395,3 +395,74 @@ class NotUtf8TailTest(TailDamageCase):
         self.assertIn("after the byte", entries[1]["action"])
         self.assertEqual(self.chain().read_bytes(), spoiled,
                          "the damaged chain is evidence: untouched")
+
+
+class HeadlessTailTest(TailDamageCase):
+    """A final line `head` gives no head for (SPEC section 6, v0.1.7,
+    #587) is a damaged tail for the writers too: an `entry_hash` that is
+    not 64 lowercase hex, or an `n` that is absent, a float or a boolean.
+    The walk calls each BROKEN, so a writer that appended after it would
+    bury damage under later receipts and chain a `prev` no recorder
+    writes. The hook starts a sibling, and the operator's verbs refuse.
+    Each tail is rehashed, so the one field is all that is wrong."""
+
+    TAILS = (
+        ("entry_hash in uppercase", lambda e: None, str.upper),
+        ("no n", lambda e: e.pop("n"), None),
+        ("n a float", lambda e: e.update(n=float(e["n"])), None),
+    )
+
+    def spoil(self, path, change, hash_form):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        last = json.loads(lines[-1])
+        del last["entry_hash"]
+        change(last)
+        digest = spec_hash(last)
+        last["entry_hash"] = hash_form(digest) if hash_form else digest
+        lines[-1] = json.dumps(last, sort_keys=True, separators=(",", ":"))
+        path.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
+        return path.read_bytes()
+
+    def test_the_hook_starts_a_sibling_after_a_tail_with_no_head(self):
+        for name, change, hash_form in self.TAILS:
+            with self.subTest(tail=name):
+                self.log_dir = temp_folder(self) / "receipts"
+                self.fire_hook(command="before")
+                spoiled = self.spoil(self.chain(), change, hash_form)
+
+                result = self.fire_hook(command="after")
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                sibling = self.chain("-002")
+                self.assertTrue(sibling.exists(), "recording continues in a "
+                                "sibling")
+                entries = [json.loads(l) for l in
+                           sibling.read_text(encoding="utf-8").splitlines()]
+                self.assertIn("after", entries[1]["action"])
+                self.assertEqual(self.chain().read_bytes(), spoiled,
+                                 "the damaged chain is evidence: untouched")
+
+    def test_log_and_anchor_refuse_a_tail_with_no_head(self):
+        log = self.workdir / "receipts.jsonl"
+        # Nothing listens at the calendar, and nothing is sent: the
+        # refusal comes first.
+        nowhere = "http://127.0.0.1:9/x"
+        for name, change, hash_form in self.TAILS:
+            if log.exists():
+                log.unlink()
+            run(LOXODONTA, "init", cwd=self.workdir, env=quiet_env())
+            run(LOXODONTA, "log", "--actor", "agent", "--action", "one",
+                cwd=self.workdir, env=quiet_env())
+            before = self.spoil(log, change, hash_form)
+            for verb in (["log", "--actor", "agent", "--action", "two"],
+                         ["anchor", "--calendar", nowhere]):
+                with self.subTest(tail=name, verb=verb[0]):
+                    result = run(LOXODONTA, *verb, cwd=self.workdir,
+                                 env=quiet_env())
+
+                    self.assertEqual(result.returncode, 1,
+                                     result.stdout + result.stderr)
+                    self.assertIn("damaged tail", result.stderr)
+                    self.assertEqual(log.read_bytes(), before)
+                    self.assertFalse(Path(str(log) + ".anchors.jsonl")
+                                     .exists())

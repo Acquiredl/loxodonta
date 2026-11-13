@@ -11,6 +11,7 @@
         "genesis-only.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "VALID"
     },
     {
@@ -22,6 +23,7 @@
         "genesis-only.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "f20b1b3b9b0dd649fc6f00125ad29f374143b0d5c0b4d0a68749bbb5657c1fd4"
     },
     {
@@ -33,6 +35,7 @@
         "valid-chain.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "VALID"
     },
     {
@@ -45,6 +48,7 @@
         "valid-chain.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "VALID"
     },
     {
@@ -56,6 +60,7 @@
         "valid-chain.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "fab3462eec002f8cfca9c05ffdee3f05c348388c6a5e470b6235476ae3fafb35"
     },
     {
@@ -69,6 +74,7 @@
         "valid-chain.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "VALID"
     },
     {
@@ -82,6 +88,7 @@
         "valid-chain.jsonl"
       ],
       "exit": 3,
+      "since": "0.1.3",
       "last_line": "HEAD-MISMATCH: chain head is fab3462eec002f8cfca9c05ffdee3f05c348388c6a5e470b6235476ae3fafb35, expected 6da336801769a2bb75cc6a22c67c852069597548afd3d0fa20e822951169ec11 \u2014 this is not the recorded history"
     },
     {
@@ -93,6 +100,7 @@
         "entry-edited.jsonl"
       ],
       "exit": 1,
+      "since": "0.1.3",
       "last_line": "BROKEN at entry 2: entry_hash does not match canonical form"
     },
     {
@@ -104,6 +112,7 @@
         "entry-deleted.jsonl"
       ],
       "exit": 1,
+      "since": "0.1.3",
       "last_line": "BROKEN at entry 2: prev does not match predecessor's entry_hash"
     },
     {
@@ -115,6 +124,7 @@
         "entries-swapped.jsonl"
       ],
       "exit": 1,
+      "since": "0.1.3",
       "last_line": "BROKEN at entry 3: prev does not match predecessor's entry_hash"
     },
     {
@@ -126,6 +136,7 @@
         "tail-truncated.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "VALID"
     },
     {
@@ -139,6 +150,7 @@
         "tail-truncated.jsonl"
       ],
       "exit": 3,
+      "since": "0.1.3",
       "last_line": "HEAD-MISMATCH: chain head is 6da336801769a2bb75cc6a22c67c852069597548afd3d0fa20e822951169ec11, expected fab3462eec002f8cfca9c05ffdee3f05c348388c6a5e470b6235476ae3fafb35 \u2014 this is not the recorded history"
     },
     {
@@ -150,6 +162,7 @@
         "tail-torn.jsonl"
       ],
       "exit": 1,
+      "since": "0.1.3",
       "last_line": "BROKEN: torn tail at line 3 (crash-truncated append; entries 0..2 intact)"
     },
     {
@@ -161,6 +174,127 @@
         "tail-torn.jsonl"
       ],
       "exit": 1,
+      "since": "0.1.3",
+      "last_line": ""
+    },
+    {
+      "name": "tail-forked",
+      "about": "Line 3 holds an entry claiming n 2 after entry 2, as two writers that read one tail leave it.",
+      "args": [
+        "verify",
+        "--log",
+        "tail-forked.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": "BROKEN at entry 3: prev does not match predecessor's entry_hash"
+    },
+    {
+      "name": "tail-forked-head",
+      "about": "A forked tail has no head: the final line's n is not its line number (SPEC section 6, v0.1.7).",
+      "args": [
+        "head",
+        "--log",
+        "tail-forked.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": ""
+    },
+    {
+      "name": "entry-hash-not-hex",
+      "about": "The final entry's entry_hash written in uppercase hex, which no canonical form hashes to.",
+      "args": [
+        "verify",
+        "--log",
+        "entry-hash-not-hex.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": "BROKEN at entry 3: entry_hash does not match canonical form"
+    },
+    {
+      "name": "entry-hash-not-hex-head",
+      "about": "No head: the final entry_hash is not 64 lowercase hex (SPEC section 6, v0.1.7).",
+      "args": [
+        "head",
+        "--log",
+        "entry-hash-not-hex.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": ""
+    },
+    {
+      "name": "tail-no-n",
+      "about": "The final entry holds no n, with a hash that holds for it.",
+      "args": [
+        "verify",
+        "--log",
+        "tail-no-n.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": "BROKEN at entry 3: n is not an integer"
+    },
+    {
+      "name": "tail-no-n-head",
+      "about": "No head: the final line holds no n (SPEC section 6, v0.1.7).",
+      "args": [
+        "head",
+        "--log",
+        "tail-no-n.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": ""
+    },
+    {
+      "name": "tail-n-float",
+      "about": "The final entry's n is 3.0, a float, with a hash that holds for it.",
+      "args": [
+        "verify",
+        "--log",
+        "tail-n-float.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": "BROKEN at entry 3: n is not an integer"
+    },
+    {
+      "name": "tail-n-float-head",
+      "about": "No head: the final line's n is a float, not an integer, though it equals 3 (SPEC section 6, v0.1.7).",
+      "args": [
+        "head",
+        "--log",
+        "tail-n-float.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": ""
+    },
+    {
+      "name": "tail-n-true",
+      "about": "Entry 1's n is true, a boolean, on line 1, with a hash that holds for it.",
+      "args": [
+        "verify",
+        "--log",
+        "tail-n-true.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
+      "last_line": "BROKEN at entry 1: n is not an integer"
+    },
+    {
+      "name": "tail-n-true-head",
+      "about": "No head: the final line's n is a boolean, not an integer, though true equals 1 in some languages (SPEC section 6, v0.1.7).",
+      "args": [
+        "head",
+        "--log",
+        "tail-n-true.jsonl"
+      ],
+      "exit": 1,
+      "since": "0.1.7",
       "last_line": ""
     },
     {
@@ -172,6 +306,7 @@
         "key-given-twice.jsonl"
       ],
       "exit": 1,
+      "since": "0.1.3",
       "last_line": "BROKEN at entry 3: key 'action' given twice"
     },
     {
@@ -183,6 +318,7 @@
         "wrong-type-files.jsonl"
       ],
       "exit": 1,
+      "since": "0.1.3",
       "last_line": "BROKEN at entry 3: files is not an array"
     },
     {
@@ -194,6 +330,7 @@
         "wrong-type-n.jsonl"
       ],
       "exit": 1,
+      "since": "0.1.3",
       "last_line": "BROKEN at entry 3: n is not an integer"
     },
     {
@@ -205,6 +342,7 @@
         "non-ascii.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "VALID",
       "canonical": {
         "entry": 1,
@@ -220,6 +358,7 @@
         "non-ascii-raw.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "VALID"
     },
     {
@@ -231,6 +370,7 @@
         "non-ascii-raw.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "d64816ebfed46774271ff6df6942637168be8a61d1a99c2d74a2d8e0667bdce0"
     },
     {
@@ -242,6 +382,7 @@
         "escapes.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "VALID",
       "canonical": {
         "entry": 1,
@@ -257,6 +398,7 @@
         "escapes-other-spelling.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "VALID"
     },
     {
@@ -268,6 +410,7 @@
         "escapes-hashed-wrong.jsonl"
       ],
       "exit": 1,
+      "since": "0.1.3",
       "last_line": "BROKEN at entry 1: entry_hash does not match canonical form"
     },
     {
@@ -279,6 +422,7 @@
         "lone-surrogate-text.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "VALID",
       "canonical": {
         "entry": 1,
@@ -294,6 +438,7 @@
         "lone-surrogate-json.jsonl"
       ],
       "exit": 1,
+      "since": "0.1.3",
       "last_line": "BROKEN at entry 1: a string holds a lone surrogate, which has no canonical form"
     },
     {
@@ -305,6 +450,7 @@
         "files-unsorted.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.5",
       "last_line": "VALID",
       "canonical": {
         "entry": 1,
@@ -320,6 +466,7 @@
         "transcript-commitment.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "VALID"
     },
     {
@@ -333,6 +480,7 @@
         "transcript-commitment.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.3",
       "last_line": "VALID"
     },
     {
@@ -344,6 +492,7 @@
         "transcript-commitment-shrank.jsonl"
       ],
       "exit": 5,
+      "since": "0.1.3",
       "last_line": "TRANSCRIPT-DIVERGED: chain intact, but a committed transcript prefix no longer holds"
     },
     {
@@ -355,6 +504,7 @@
         "unsupported-version.jsonl"
       ],
       "exit": 4,
+      "since": "0.1.3",
       "last_line": "UNSUPPORTED-VERSION: log is format \"0.2\"; this verifier speaks \"0.1\""
     },
     {
@@ -368,6 +518,7 @@
         "unsupported-version.jsonl"
       ],
       "exit": 3,
+      "since": "0.1.3",
       "last_line": "HEAD-MISMATCH: chain head is 19299290b71641786ac5d0dd9a8c47011a5e92945b75c995eb973e0de56d636c, expected fab3462eec002f8cfca9c05ffdee3f05c348388c6a5e470b6235476ae3fafb35 \u2014 this is not the recorded history"
     },
     {
@@ -379,6 +530,7 @@
         "unsupported-version-new-fields.jsonl"
       ],
       "exit": 4,
+      "since": "0.1.3",
       "last_line": "UNSUPPORTED-VERSION: log is format \"0.2\"; this verifier speaks \"0.1\""
     },
     {
@@ -390,6 +542,7 @@
         "unsupported-version-edited.jsonl"
       ],
       "exit": 1,
+      "since": "0.1.3",
       "last_line": "BROKEN at entry 2: entry_hash does not match canonical form"
     },
     {
@@ -401,6 +554,7 @@
         "log-missing.jsonl"
       ],
       "exit": 66,
+      "since": "0.1.3",
       "last_line": "",
       "log_absent": true
     },
@@ -413,6 +567,7 @@
         "log-empty.jsonl"
       ],
       "exit": 66,
+      "since": "0.1.3",
       "last_line": ""
     },
     {
@@ -424,6 +579,7 @@
         "log-empty.jsonl"
       ],
       "exit": 66,
+      "since": "0.1.3",
       "last_line": ""
     },
     {
@@ -436,9 +592,10 @@
         "anchor-pending.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.4",
       "last_line": "VALID",
       "stdout": [
-        "ANCHOR-PENDING: head fab3462eec00\u2026 submitted 2026-09-23T12:05:00Z via https://calendar.example/ \u2014 run `loxodonta anchor --upgrade`",
+        "ANCHOR-PENDING: head fab3462eec00\u2026 submitted 2026-09-23T12:05:00Z via https://calendar.example/ \u2014 on the machine that holds the chain, the operator can run `loxodonta anchor --upgrade`",
         "VALID"
       ]
     },
@@ -452,6 +609,7 @@
         "anchor-complete.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.4",
       "last_line": "VALID",
       "stdout": [
         "ANCHOR-CLAIMED: entries 0..3: the attestation claims Bitcoin block 850123, and the block was not checked; that block's merkle root must read a0592f67027757ad17f4b44d3ea1e19395807e8bf7be07fa8de69b5c347a72f1, which --block-header with its header checks",
@@ -470,6 +628,7 @@
         "anchor-complete.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.4",
       "last_line": "VALID",
       "stdout": [
         "ANCHORED: entries 0..3 existed by the block whose header hashes to aa11334a81018ef6a6e5425937b1d1101d0c7f498f06a928293febd510d8c411, whose merkle root a0592f67027757ad17f4b44d3ea1e19395807e8bf7be07fa8de69b5c347a72f1 is the one the proof replays to; the attestation calls it Bitcoin block 850123, which is your header source's word, and the hash is what a second source can confirm",
@@ -486,6 +645,7 @@
         "anchor-mismatch.jsonl"
       ],
       "exit": 3,
+      "since": "0.1.4",
       "last_line": "ANCHOR-MISMATCH: line 1 of anchor-mismatch.jsonl.anchors.jsonl: anchored head d64816ebfed46774271ff6df6942637168be8a61d1a99c2d74a2d8e0667bdce0 appears nowhere in this log \u2014 this log is not the anchored history",
       "stdout": [
         "ANCHOR-MISMATCH: line 1 of anchor-mismatch.jsonl.anchors.jsonl: anchored head d64816ebfed46774271ff6df6942637168be8a61d1a99c2d74a2d8e0667bdce0 appears nowhere in this log \u2014 this log is not the anchored history"
@@ -501,6 +661,7 @@
         "anchor-invalid-proof.jsonl"
       ],
       "exit": 3,
+      "since": "0.1.4",
       "last_line": "ANCHOR-INVALID: line 1 of anchor-invalid-proof.jsonl.anchors.jsonl: truncated proof \u2014 evidence that does not verify is not evidence",
       "stdout": [
         "ANCHOR-INVALID: line 1 of anchor-invalid-proof.jsonl.anchors.jsonl: truncated proof \u2014 evidence that does not verify is not evidence"
@@ -516,6 +677,7 @@
         "anchor-unreadable-line.jsonl"
       ],
       "exit": 3,
+      "since": "0.1.4",
       "last_line": "ANCHOR-INVALID: line 1 of anchor-unreadable-line.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence",
       "stdout": [
         "ANCHOR-INVALID: line 1 of anchor-unreadable-line.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence"
@@ -531,6 +693,7 @@
         "anchor-attempt-only.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.4",
       "last_line": "VALID",
       "stdout": [
         "VALID"
@@ -546,6 +709,7 @@
         "anchor-kindless.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.4",
       "last_line": "VALID",
       "stdout": [
         "ANCHOR-CLAIMED: entries 0..2: the attestation claims Bitcoin block 850123, and the block was not checked; that block's merkle root must read b8d161dd366ecbf694607e39b08d90d9365f6c76eb7aad941b933196c7621f83, which --block-header with its header checks",
@@ -562,6 +726,7 @@
         "anchor-kind-null.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.4",
       "last_line": "VALID",
       "stdout": [
         "ANCHOR-UNKNOWN-KIND: line 1 of anchor-kind-null.jsonl.anchors.jsonl is of a kind that is null, not a string \u2014 this verifier does not know the kind in this sidecar, and does not judge it",
@@ -578,6 +743,7 @@
         "anchor-unknown-kind.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.4",
       "last_line": "VALID",
       "stdout": [
         "ANCHOR-UNKNOWN-KIND: line 1 of anchor-unknown-kind.jsonl.anchors.jsonl is of kind \"witness-note\" \u2014 this verifier does not know the kind in this sidecar, and does not judge it",
@@ -594,6 +760,7 @@
         "anchor-misplaced-chain.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.4",
       "last_line": "VALID",
       "stdout": [
         "ANCHOR-UNKNOWN-KIND: line 1 of anchor-misplaced-chain.jsonl.anchors.jsonl is of kind \"chain\" \u2014 this verifier does not know the kind in this sidecar, and does not judge it",
@@ -610,6 +777,7 @@
         "anchor-key-twice.jsonl"
       ],
       "exit": 3,
+      "since": "0.1.4",
       "last_line": "ANCHOR-INVALID: line 1 of anchor-key-twice.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence",
       "stdout": [
         "ANCHOR-INVALID: line 1 of anchor-key-twice.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence"
@@ -625,6 +793,7 @@
         "anchor-nan.jsonl"
       ],
       "exit": 3,
+      "since": "0.1.4",
       "last_line": "ANCHOR-INVALID: line 1 of anchor-nan.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence",
       "stdout": [
         "ANCHOR-INVALID: line 1 of anchor-nan.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence"
@@ -640,6 +809,7 @@
         "anchor-number-too-large.jsonl"
       ],
       "exit": 3,
+      "since": "0.1.4",
       "last_line": "ANCHOR-INVALID: line 1 of anchor-number-too-large.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence",
       "stdout": [
         "ANCHOR-INVALID: line 1 of anchor-number-too-large.jsonl.anchors.jsonl is not a record \u2014 evidence that does not verify is not evidence"
@@ -655,6 +825,7 @@
         "anchor-trailing-bytes.jsonl"
       ],
       "exit": 3,
+      "since": "0.1.4",
       "last_line": "ANCHOR-INVALID: line 1 of anchor-trailing-bytes.jsonl.anchors.jsonl: proof holds bytes after its timestamp tree \u2014 evidence that does not verify is not evidence",
       "stdout": [
         "ANCHOR-INVALID: line 1 of anchor-trailing-bytes.jsonl.anchors.jsonl: proof holds bytes after its timestamp tree \u2014 evidence that does not verify is not evidence"
@@ -670,6 +841,7 @@
         "stamp-kindless.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.4",
       "last_line": "VALID",
       "stdout": [
         "stamp not judged: no --authority-chain FILE given \u2014 head fab3462eec00\u2026 (entry 3) holds a token, present and not judged here (ADR-0032)",
@@ -686,6 +858,7 @@
         "stamp-rejected.jsonl"
       ],
       "exit": 3,
+      "since": "0.1.4",
       "last_line": "STAMP-INVALID: line 1 of stamp-rejected.jsonl.stamps.jsonl, head fab3462eec00\u2026 (entry 3): the reply's status is 2 (rejection), so it holds no token \u2014 evidence that does not verify is not evidence",
       "stdout": [
         "STAMP-INVALID: line 1 of stamp-rejected.jsonl.stamps.jsonl, head fab3462eec00\u2026 (entry 3): the reply's status is 2 (rejection), so it holds no token \u2014 evidence that does not verify is not evidence"
@@ -701,6 +874,7 @@
         "stamp-trailing-bytes.jsonl"
       ],
       "exit": 3,
+      "since": "0.1.4",
       "last_line": "STAMP-INVALID: line 1 of stamp-trailing-bytes.jsonl.stamps.jsonl, head fab3462eec00\u2026 (entry 3): the reply is not a timestamp response: bytes after the reply \u2014 evidence that does not verify is not evidence",
       "stdout": [
         "STAMP-INVALID: line 1 of stamp-trailing-bytes.jsonl.stamps.jsonl, head fab3462eec00\u2026 (entry 3): the reply is not a timestamp response: bytes after the reply \u2014 evidence that does not verify is not evidence"
@@ -716,6 +890,7 @@
         "stamp-attempt-only.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.4",
       "last_line": "VALID",
       "stdout": [
         "VALID"
@@ -731,6 +906,7 @@
         "stamp-unknown-kind.jsonl"
       ],
       "exit": 0,
+      "since": "0.1.4",
       "last_line": "VALID",
       "stdout": [
         "STAMP-UNKNOWN-KIND: line 1 of stamp-unknown-kind.jsonl.stamps.jsonl is of kind \"witness-note\" \u2014 this verifier does not know the kind in this sidecar, and does not judge it",
@@ -745,7 +921,8 @@
         "package-unsealed"
       ],
       "exit": 0,
-      "last_line": "SELF-CONSISTENT: every chain walks clean and every artifact matches the manifest; indistinguishable from a wholesale regeneration, since no seal is declared"
+      "last_line": "SELF-CONSISTENT: every chain walks clean and every artifact matches the manifest; indistinguishable from a wholesale regeneration, since no seal is declared",
+      "since": "0.1.4"
     },
     {
       "name": "package-artifact-altered",
@@ -755,7 +932,8 @@
         "package-artifact-altered"
       ],
       "exit": 2,
-      "last_line": "ARTIFACT-DIVERGED: something in this package is not what the manifest lists (the lines above say what)"
+      "last_line": "ARTIFACT-DIVERGED: something in this package is not what the manifest lists (the lines above say what)",
+      "since": "0.1.4"
     },
     {
       "name": "package-named-twice",
@@ -765,7 +943,8 @@
         "package-named-twice.zip"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: package-named-twice.zip holds two members that unpack to one file, 'receipts-vector.jsonl' twice; which one is read depends on the tool that unpacks it, so this verifier refuses it unopened"
+      "last_line": "UNSUPPORTED-FORMAT: package-named-twice.zip holds two members that unpack to one file, 'receipts-vector.jsonl' twice; which one is read depends on the tool that unpacks it, so this verifier refuses it unopened",
+      "since": "0.1.4"
     },
     {
       "name": "package-seal-missing",
@@ -775,7 +954,8 @@
         "package-seal-missing"
       ],
       "exit": 3,
-      "last_line": "SEAL-MISSING: a seal the manifest declares is not in this package (the seal line above says which)"
+      "last_line": "SEAL-MISSING: a seal the manifest declares is not in this package (the seal line above says which)",
+      "since": "0.1.4"
     },
     {
       "name": "package-unknown-format",
@@ -785,7 +965,8 @@
         "package-unknown-format"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: package is format \"loxodonta-package/2\"; this verifier speaks \"loxodonta-package/1\""
+      "last_line": "UNSUPPORTED-FORMAT: package is format \"loxodonta-package/2\"; this verifier speaks \"loxodonta-package/1\"",
+      "since": "0.1.4"
     },
     {
       "name": "package-name-drive",
@@ -795,7 +976,8 @@
         "package-name-drive"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'C:x' is not a bare file name"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'C:x' is not a bare file name",
+      "since": "0.1.4"
     },
     {
       "name": "package-name-backslash",
@@ -805,7 +987,8 @@
         "package-name-backslash"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'a\\\\b' is not a bare file name"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'a\\\\b' is not a bare file name",
+      "since": "0.1.4"
     },
     {
       "name": "package-name-trailing-dot",
@@ -815,7 +998,8 @@
         "package-name-trailing-dot"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'project.json.' is not a bare file name"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'project.json.' is not a bare file name",
+      "since": "0.1.4"
     },
     {
       "name": "package-name-device",
@@ -825,7 +1009,8 @@
         "package-name-device"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'NUL' is not a bare file name"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'NUL' is not a bare file name",
+      "since": "0.1.4"
     },
     {
       "name": "package-name-refused-character",
@@ -835,7 +1020,8 @@
         "package-name-refused-character"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'a?b' is not a bare file name"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'a?b' is not a bare file name",
+      "since": "0.1.4"
     },
     {
       "name": "package-name-short",
@@ -845,7 +1031,8 @@
         "package-name-short"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'LONGFI~1.TXT' is not a bare file name"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists an artifact whose path 'LONGFI~1.TXT' is not a bare file name",
+      "since": "0.1.4"
     },
     {
       "name": "package-name-case",
@@ -855,7 +1042,8 @@
         "package-name-case"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: this package holds 'PROJECT.JSON', which some systems open as 'project.json', a name the verifier reads, and others do not; which file is judged would depend on where it is verified, so this verifier refuses it"
+      "last_line": "UNSUPPORTED-FORMAT: this package holds 'PROJECT.JSON', which some systems open as 'project.json', a name the verifier reads, and others do not; which file is judged would depend on where it is verified, so this verifier refuses it",
+      "since": "0.1.4"
     },
     {
       "name": "package-names-one-file",
@@ -865,7 +1053,8 @@
         "package-names-one-file"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json names 'A.txt' and 'a.txt', which some systems open as one file; which one is read would depend on where the package is verified"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json names 'A.txt' and 'a.txt', which some systems open as one file; which one is read would depend on where the package is verified",
+      "since": "0.1.4"
     },
     {
       "name": "package-entries-boolean",
@@ -875,7 +1064,8 @@
         "package-entries-boolean"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists a chain whose entries is true or false, not an integer"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json lists a chain whose entries is true or false, not an integer",
+      "since": "0.1.4"
     },
     {
       "name": "package-tool-nan",
@@ -885,7 +1075,8 @@
         "package-tool-nan"
       ],
       "exit": 4,
-      "last_line": "UNSUPPORTED-FORMAT: manifest.json holds NaN, which is not JSON; a strict JSON reader cannot read it"
+      "last_line": "UNSUPPORTED-FORMAT: manifest.json holds NaN, which is not JSON; a strict JSON reader cannot read it",
+      "since": "0.1.4"
     },
     {
       "name": "package-anchored",
@@ -897,7 +1088,8 @@
         "000000201111111111111111111111111111111111111111111111111111111111111111d36e638ceba60d8e26beeaae130fcc280b248c9f738f343906b63ea6ac82c61a98c1b36a1942031707000000"
       ],
       "exit": 0,
-      "last_line": "SELF-CONSISTENT + ANCHORED: every chain walks clean and every artifact matches the manifest, and the manifest existed by the block whose header hashes to b6eed9fd921eb901384173feee3236d5dec2c511e7101efdbc461cca3790dcbd, which its anchor calls Bitcoin block 850123"
+      "last_line": "SELF-CONSISTENT + ANCHORED: every chain walks clean and every artifact matches the manifest, and the manifest existed by the block whose header hashes to b6eed9fd921eb901384173feee3236d5dec2c511e7101efdbc461cca3790dcbd, which its anchor calls Bitcoin block 850123",
+      "since": "0.1.4"
     },
     {
       "name": "package-anchored-unchecked",
@@ -907,7 +1099,8 @@
         "package-anchored"
       ],
       "exit": 0,
-      "last_line": "SELF-CONSISTENT: every chain walks clean and every artifact matches the manifest, and the manifest's anchor claims Bitcoin block 850123, a block not checked here; indistinguishable from a wholesale regeneration until a block header checks its manifest anchor's block"
+      "last_line": "SELF-CONSISTENT: every chain walks clean and every artifact matches the manifest, and the manifest's anchor claims Bitcoin block 850123, a block not checked here; indistinguishable from a wholesale regeneration until a block header checks its manifest anchor's block",
+      "since": "0.1.4"
     }
   ]
 }

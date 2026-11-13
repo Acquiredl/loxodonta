@@ -594,6 +594,26 @@ class JudgedPackageStampTest(StampedStoreCase):
         self.assertNotIn("ANCHOR", lines[-1])
         self.assertIn("seal stamp: STAMPED", out)
 
+    def test_the_chain_file_the_recipient_typed_is_named_escaped(self):
+        # #589, #556's class: both STAMPED lines printed --authority-chain
+        # raw, so a name holding a steering character steered the line.
+        # DEL, a control character every system takes in a file name.
+        self.stamp_chain()
+        folder = self.stamped_folder()
+        typed = self.root / "authority\x7f.pem"
+        typed.write_bytes(self.chain_file.read_bytes())
+
+        judged = self.judge(folder, typed)
+
+        out = judged.stdout
+        self.assertEqual(judged.returncode, 0, out + judged.stderr)
+        shown = str(self.root / "authority\\x7f.pem")
+        self.assertIn(f"STAMPED: entries 0..2 existed when a key certified by "
+                      f"{shown} signed", out)
+        self.assertIn(f"seal stamp: STAMPED: a key certified by {shown} "
+                      "signed", out)
+        self.assertNotIn("\x7f", out)
+
     def test_a_chains_good_token_is_detail_and_earns_the_package_nothing(self):
         # Ruling 6 reaches the third seal too: a token over a chain head
         # seals a different object, so it prints under its chain and the

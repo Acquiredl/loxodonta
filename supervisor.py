@@ -1251,8 +1251,10 @@ PENDING_LINE = re.compile(
     r"ANCHOR-PENDING: head ([0-9a-f]{12}…) "
     r"submitted (at an unrecorded time|\S+) "
     r"via (no recorded calendar|\S+) — "
-    r"(?:run `loxodonta anchor --upgrade`|`loxodonta anchor --upgrade` "
-    r"cannot complete it; `loxodonta anchor --force` submits the head again)")
+    r"(?:on the machine that holds the chain, the operator can run "
+    r"`loxodonta anchor --upgrade`|`loxodonta anchor --upgrade` cannot "
+    r"complete it; on the machine that holds the chain, the operator can "
+    r"run `loxodonta anchor --force` to submit the head again)")
 
 
 def anchor_span(line):
@@ -2783,6 +2785,206 @@ def wired_rules(witness, event):
             continue
         rules += found if isinstance(found, list) else []
     return rules
+
+
+# --- Whether the managed install's footing holds (#469) -----------------------
+# A managed install holds only while the account the agent runs as
+# cannot write the managed hook file or the copy its commands name
+# (ADR-0040, ADR-0042). The supervisor runs as that account, so each
+# scan asks, of the account it runs as, and says so on the settings
+# note: a note about the setup, never a verdict about a chain, and no
+# exit moves. It asks without writing: nothing is changed, made or
+# left behind, and no mtime moves.
+
+def managed_paths():
+    """(the managed hook file, the copies its commands name) when the
+    recorder's managed file wires the recorder or the digest, else
+    None: a plain install, whose file the account writes by design."""
+    managed = Path(managed_hooks_path())
+    settings = read_settings(managed)
+    hooks = settings.get("hooks") if settings else None
+    copies = []
+    for rules in hooks.values() if isinstance(hooks, dict) else []:
+        for rule in rules if isinstance(rules, list) else []:
+            entries = rule.get("hooks") if isinstance(rule, dict) else None
+            for hook in entries if isinstance(entries, list) else []:
+                script = isinstance(hook, dict) and owned_script(
+                    hook.get("command"), RECORDER_NAMES + DIGEST_NAMES)
+                copy = script and Path(os.path.expanduser(script))
+                if copy and copy not in copies:
+                    copies.append(copy)
+    return (managed, copies) if copies else None
+
+
+def token_elevated():
+    """Whether this process runs with an administrator's token on
+    Windows (shell32's IsUserAnAdmin), or None when it cannot be asked."""
+    try:
+        import ctypes  # Windows alone calls this
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, ImportError, OSError):
+        return None
+
+
+def owned_by_this_account(path):
+    """Whether the Windows file at `path` is owned by the user this
+    process runs as, read from its security descriptor, which its owner
+    may always read; False when that cannot be read."""
+    import ctypes
+    from ctypes import wintypes
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.GetNamedSecurityInfoW.argtypes = (
+        wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+    advapi.OpenProcessToken.argtypes = (wintypes.HANDLE, wintypes.DWORD,
+                                        ctypes.POINTER(wintypes.HANDLE))
+    advapi.GetTokenInformation.argtypes = (
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD))
+    advapi.EqualSid.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.LocalFree.argtypes = (ctypes.c_void_p,)
+    owner, described = ctypes.c_void_p(), ctypes.c_void_p()
+    # SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION.
+    if advapi.GetNamedSecurityInfoW(str(path), 1, 1, ctypes.byref(owner),
+                                    None, None, None,
+                                    ctypes.byref(described)) != 0:
+        return False
+    token = wintypes.HANDLE()
+    try:
+        # TOKEN_QUERY, then TokenUser: a SID_AND_ATTRIBUTES, SID first.
+        if not advapi.OpenProcessToken(kernel32.GetCurrentProcess(), 0x8,
+                                       ctypes.byref(token)):
+            return False
+        buffer, size = ctypes.create_string_buffer(256), wintypes.DWORD()
+        if not advapi.GetTokenInformation(token, 1, buffer, 256,
+                                          ctypes.byref(size)):
+            return False
+        user = ctypes.c_void_p.from_buffer(buffer).value
+        return bool(advapi.EqualSid(owner, user))
+    finally:
+        if token:
+            kernel32.CloseHandle(token)
+        kernel32.LocalFree(described)
+
+
+def could_write(path, folder=False):
+    """Whether the account this process runs as could write the file at
+    `path`, or make a file in the folder at `path` (`folder`), as
+    (True, None), (False, None), or (None, why) when it cannot be told.
+    Nothing is written. On POSIX root can, and so does the owner of what
+    stands there, who may give the write bits back (#638 review); else
+    the effective ids' access. On Windows a file is opened, by
+    CreateFileW so the system's own answer is read, and closed, asking
+    in turn to append, to change its attributes (a read-only mark), its
+    access list or its owner: any one granted is "can", since each
+    leads to a write; only access denied (5) to all four is "cannot". A
+    sharing violation (32) refuses an account that may write, and says
+    nothing. A folder is asked of the token: an elevated one can, and
+    any other is read as cannot, the quieter question than making a
+    file there."""
+    if sys.platform != "win32":
+        if os.geteuid() == 0:
+            return True, None
+        try:
+            if os.lstat(path).st_uid == os.geteuid():
+                return True, None
+            mode = os.W_OK | (os.X_OK if folder else 0)
+            if os.access in os.supports_effective_ids:
+                return os.access(path, mode, effective_ids=True), None
+            return os.access(path, mode), None
+        except FileNotFoundError:
+            return False, None
+        except OSError as error:
+            return None, error.strerror or str(error)
+    if folder:
+        elevated = token_elevated()
+        return ((None, "the token could not be asked") if elevated is None
+                else (elevated, None))
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = (
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        why = None
+        # FILE_APPEND_DATA, FILE_WRITE_ATTRIBUTES, WRITE_DAC, WRITE_OWNER;
+        # every share mode, OPEN_EXISTING: never made.
+        for access in (0x4, 0x100, 0x40000, 0x80000):
+            handle = kernel32.CreateFileW(str(path), access, 0x7, None, 3, 0,
+                                          None)
+            if handle not in (None, wintypes.HANDLE(-1).value):
+                kernel32.CloseHandle(handle)
+                return True, None
+            code = ctypes.get_last_error()
+            if code in (2, 3):  # nothing there to write
+                return False, None
+            if code != 5:
+                why = why or (f"{ctypes.FormatError(code).strip()} "
+                              f"(Windows error {code})")
+        if owned_by_this_account(path):
+            # A deny entry, even on SYNCHRONIZE, which every open asks
+            # for: its owner may still rewrite the access list.
+            return True, None
+        return (None, why) if why else (False, None)
+    except (AttributeError, ImportError, OSError) as error:
+        return None, str(error)
+
+
+def footing_said():
+    """The settings note's lines on the managed install's footing: one
+    when LOXODONTA_MANAGED_DIR names the folder read here (#466 ruling
+    1), since a writer who sets it hides the managed hook from the scan;
+    one when a managed install is in place and the account this runs as
+    could write what it rests on (#469). Nothing for a plain install."""
+    lines = []
+    if environment("LOXODONTA_MANAGED_DIR"):
+        lines.append(
+            "LOXODONTA_MANAGED_DIR is set where this scan runs, so the managed "
+            f"hook file was read as {Path(managed_hooks_path()).as_posix()} and "
+            f"not under the harness's own {harness_managed_folder()}: a hook "
+            "wired there is not seen by this scan")
+    found = managed_paths()
+    if found is None:
+        return lines
+    managed, copies = found
+    asked = [(managed, False), (managed.parent, True)]
+    for copy in copies:
+        asked.append((copy, False))
+        if (copy.parent, True) not in asked:
+            asked.append((copy.parent, True))
+    writable, untold = [], []
+    for path, folder in asked:
+        answer, why = could_write(path, folder)
+        named = path.as_posix() + (" (a file can be made there)" if folder
+                                   else "")
+        if answer:
+            writable.append(named)
+        elif answer is None:
+            # Never read as cannot: a file held open by another program
+            # would then silence the note (#638 review).
+            untold.append(f"{named}: {why}")
+    if writable:
+        lines.append(
+            "the account this supervisor runs as can write what the managed "
+            f"install rests on: {', '.join(writable)}. The install holds only "
+            "while the account the agent runs as cannot, so a session run as "
+            "this account could switch the recorder off or change what it "
+            "runs. This asks of the account the supervisor runs as, not of a "
+            "session: one started elevated beside a scan that is not reads "
+            "here as one that cannot")
+    if untold:
+        lines.append(
+            "this scan could not tell whether the account it runs as can "
+            f"write what the managed install rests on: {'; '.join(untold)}. "
+            "Read it as an account that may")
+    return lines
 
 
 # --- Which hook entries are the recorder's ------------------------------------
@@ -6316,10 +6518,11 @@ def memory_notes(look, skipped):
     # managed file's name hides a hook as one at the operator's does,
     # and so does a file there that is not JSON (#465).
     unset = "; ".join(
-        f"{settings.as_posix()} cannot be read as harness settings: {why} "
-        "— read as none, as if no hook were wired"
-        for settings in wired_files(look.witness)
-        for why in [settings_reading(settings)[1]] if why)
+        [f"{settings.as_posix()} cannot be read as harness settings: {why} "
+         "— read as none, as if no hook were wired"
+         for settings in wired_files(look.witness)
+         for why in [settings_reading(settings)[1]] if why]
+        + footing_said())
     if unset:
         notes["settings_note"] = unset
     return notes
@@ -9408,7 +9611,9 @@ def package_readme(unit, packed, sessions, witness, record, notes,
         "Get `verifier.py` from a release you trust "
         "(https://github.com/Acquiredl/loxodonta/releases; check it "
         "against the release's `SHA256SUMS`). Python 3.9 or newer, no "
-        "dependencies. Then, on the zip or on the unpacked folder:",
+        "dependencies. Then, on the zip or on the unpacked folder, with "
+        "`-I` so that a module dropped beside the verifier cannot shadow "
+        "the standard library:",
         "",
         "    python -I verifier.py verify-package <this package>",
         "",
