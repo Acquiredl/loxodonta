@@ -86,11 +86,19 @@ A writer exits 73 when a file it must write cannot be, the supervisor's `drill` 
 
 ### What the keepers read from a recorder verb
 
-Names: `EX_UNAVAILABLE`, `EX_SOFTWARE`, `EX_TEMPFAIL`.
+Names: `EX_UNAVAILABLE`, `EX_TEMPFAIL`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
-The keepers name each exit of `anchor`, `stamp` and `publish` for what it is, and say a calendar, an authority or a remote did not do what was asked only for 69; 70 is the recorder itself failing, 75 another writer holding the chain's lock (ADR-0037, #557).
+The keepers name each exit of `anchor`, `stamp` and `publish` for what it is, and say a calendar, an authority or a remote did not do what was asked only for 69; 70 is the recorder itself failing, read by the name below, 75 another writer holding the chain's lock (ADR-0037, #557).
+
+### A crash is never a verdict
+
+Names: `EX_SOFTWARE`, `EXIT_READER_GONE`, `reader_gone`, `run_main`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
+
+Every file ends through `run_main`: a crash prints its traceback and exits 70, and a reader that hangs up gets a quiet 141, so neither is read as an answer, least of all as 1, the recorder's `BROKEN`, which `supervisor verify` passes on and the scan's ladder counts (ADR-0037, #449).
 
 ### Writing to the console
 
@@ -172,6 +180,14 @@ Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 The supervisor's keeper hands its URLs to the recorder's `publish`, so its flags refuse the URLs `publish` refuses, as a usage error when the flag is given (ADR-0025).
 
+### Which calendars an upgrade asks
+
+Names: `DEFAULT_CALENDARS`, `DEFAULT_PORTS`, `SHOWN_CALENDAR`, `calendar_key`, `calendars_asked`, `unnamed_calendar`, `shown_address`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`.
+
+`anchor --upgrade` asks only the default calendars and those it is told, and the supervisor's keeper says on a chain's row which pending proof waits at a calendar the keeper's upgrade does not ask, so both compare and show an address by one rule (#415).
+
 ### Written-down coverage
 
 Names: `COVERAGE_NAME`.
@@ -195,6 +211,14 @@ Names: `MANAGED_READS`, `MANAGED_RUN`, `environment`.
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
 A managed install writes `--managed` on the hook's and the digest's commands, and under it both read no variable but the ones the harness sets, so the store and the managed file they name are the built-in ones (ADR-0043).
+
+### A number from the environment
+
+Names: `number_setting`.
+
+Original: `loxodonta.py`. Copies: `supervisor.py`, `receiver.py`.
+
+The supervisor and the receiver take a number from their environment only when they can use it, and refuse any other by name with 64 before any verb runs: never a traceback at import, and never a wait longer than a wait can take (#487, #589). The recorder's own knobs fall back to their defaults instead, and it holds the original as it holds every twin's.
 
 ### Finding a helper program
 
@@ -238,11 +262,11 @@ The receiver keeps a line only when it is an entry: SPEC section 2's fields of t
 
 ### A receipt's suffix
 
-Names: `CALL_ID_CHARACTERS`, `CALL_ID_LONGEST`, `UNHASHED_INPUT`, `is_call_id`, `holds_fraction`, `input_form`, `split_suffix`, `listed_action`.
+Names: `CALL_ID_CHARACTERS`, `CALL_ID_LONGEST`, `UNHASHED_INPUT`, `is_call_id`, `holds_fraction`, `input_form`, `split_suffix`, `FOLDED_MARK`, `listed_action`.
 
 Original: `loxodonta.py`. Copies: `supervisor.py`.
 
-The hook writes the call's id and a hash of the call's input in SPEC section 4's canonical form at the end of its action line, and the supervisor reads that suffix, setting it aside to name the tool and, in `show`, hashing the transcript's record of the call by the same form to compare; both fold it out of the lines they list for a person (ADR-0047).
+The hook writes the call's id and a hash of the call's input in SPEC section 4's canonical form at the end of its action line, and the supervisor reads that suffix, setting it aside to name the tool and, in `show`, hashing the transcript's record of the call by the same form to compare; both fold it out of the lines they list for a person and mark each line they fold with the same mark (ADR-0047, #619).
 
 ## Same name, not a twin
 

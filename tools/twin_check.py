@@ -125,13 +125,21 @@ TWINS = (
          "write cannot be; the keeper reads a recorder verb's 73 by the "
          "same name (ADR-0037, #430, #422, #448)."),
     Twin("What the keepers read from a recorder verb",
-         ("EX_UNAVAILABLE", "EX_SOFTWARE", "EX_TEMPFAIL"),
+         ("EX_UNAVAILABLE", "EX_TEMPFAIL"),
          ORIGINAL, SUPERVISOR,
          "The keepers name each exit of `anchor`, `stamp` and `publish` "
          "for what it is, and say a calendar, an authority or a remote did "
          "not do what was asked only for 69; 70 is the recorder itself "
-         "failing, 75 another writer holding the chain's lock (ADR-0037, "
-         "#557)."),
+         "failing, read by the name below, 75 another writer holding the "
+         "chain's lock (ADR-0037, #557)."),
+    Twin("A crash is never a verdict",
+         ("EX_SOFTWARE", "EXIT_READER_GONE", "reader_gone", "run_main"),
+         ORIGINAL, BOTH,
+         "Every file ends through `run_main`: a crash prints its traceback "
+         "and exits 70, and a reader that hangs up gets a quiet 141, so "
+         "neither is read as an answer, least of all as 1, the recorder's "
+         "`BROKEN`, which `supervisor verify` passes on and the scan's "
+         "ladder counts (ADR-0037, #449)."),
     Twin("Writing to the console", ("speak_utf8",), ORIGINAL, BOTH,
          "Every file can print text a Windows console's code page cannot "
          "hold, and none of them may die on it (#294)."),
@@ -218,6 +226,15 @@ TWINS = (
          "The supervisor's keeper hands its URLs to the recorder's "
          "`publish`, so its flags refuse the URLs `publish` refuses, as a "
          "usage error when the flag is given (ADR-0025)."),
+    Twin("Which calendars an upgrade asks",
+         ("DEFAULT_CALENDARS", "DEFAULT_PORTS", "SHOWN_CALENDAR",
+          "calendar_key", "calendars_asked", "unnamed_calendar",
+          "shown_address"),
+         ORIGINAL, SUPERVISOR,
+         "`anchor --upgrade` asks only the default calendars and those it "
+         "is told, and the supervisor's keeper says on a chain's row which "
+         "pending proof waits at a calendar the keeper's upgrade does not "
+         "ask, so both compare and show an address by one rule (#415)."),
     Twin("Written-down coverage", ("COVERAGE_NAME",), ORIGINAL, SUPERVISOR,
          "The recorder writes down the coverage it wired under this name, "
          "and the supervisor's scan reads it there (ADR-0030)."),
@@ -235,6 +252,14 @@ TWINS = (
          "digest's commands, and under it both read no variable but the "
          "ones the harness sets, so the store and the managed file they "
          "name are the built-in ones (ADR-0043)."),
+    Twin("A number from the environment", ("number_setting",), ORIGINAL,
+         BOTH,
+         "The supervisor and the receiver take a number from their "
+         "environment only when they can use it, and refuse any other by "
+         "name with 64 before any verb runs: never a traceback at import, "
+         "and never a wait longer than a wait can take (#487, #589). The "
+         "recorder's own knobs fall back to their defaults instead, and "
+         "it holds the original as it holds every twin's."),
     Twin("Finding a helper program", ("helper_path",), ORIGINAL, BOTH,
          "openssl, ssh-keygen, git, gh and claude run by the full path a walk of PATH "
          "finds, never from the working directory, in every file that "
@@ -266,14 +291,15 @@ TWINS = (
     Twin("A receipt's suffix",
          ("CALL_ID_CHARACTERS", "CALL_ID_LONGEST",
           "UNHASHED_INPUT", "is_call_id", "holds_fraction", "input_form",
-          "split_suffix", "listed_action"),
+          "split_suffix", "FOLDED_MARK", "listed_action"),
          ORIGINAL, SUPERVISOR,
          "The hook writes the call's id and a hash of the call's input in "
          "SPEC section 4's canonical form at the end of its action line, "
          "and the supervisor reads that suffix, setting it aside to name "
          "the tool and, in `show`, hashing the transcript's record of the "
          "call by the same form to compare; both fold it out of the lines "
-         "they list for a person (ADR-0047)."),
+         "they list for a person and mark each line they fold with the "
+         "same mark (ADR-0047, #619)."),
 )
 
 DIFFERENT = (

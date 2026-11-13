@@ -14,6 +14,8 @@ import json
 import os
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import time
@@ -30,10 +32,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
                      temp_folder)
 
-from test_supervisor import (FIXTURE_RECEIPTS, FIXTURE_SESSION,
+from test_supervisor import (BASELINE_NAME, FIXTURE_RECEIPTS,
+                             FIXTURE_SESSION, NO_KEEPER_THERE, ago,
                              assert_replaced_whole, chain_copy, hold,
-                             read_line_within, receiver_folder,
-                             unreadable_depth)
+                             install_witness_hook, keeper_flag_cases,
+                             lay_events, post_event, prime_memory,
+                             read_line_within, received_ago,
+                             receiver_folder, unreadable_depth,
+                             write_transcript)
 
 
 TAG_BITCOIN = bytes.fromhex("0588960d73d71901")
@@ -92,6 +98,100 @@ def log_entry(log, action, actor="claude-code", files=()):
         action, *file_args, check=True)
 
 
+def tamper(log):
+    """Rewrite the first receipt's action in place, keeping the file's
+    times: verify reads the chain BROKEN from that entry on."""
+    times = os.stat(log)
+    lines = log.read_text(encoding="utf-8").splitlines()
+    entry = json.loads(lines[1])
+    entry["action"] = "something else entirely"
+    lines[1] = json.dumps(entry)
+    log.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    os.utime(log, (times.st_atime, times.st_mtime))
+
+
+def strip_drawn(test, page, report):
+    """What the page's verdict strip says over `report`: its colour, its
+    state line and its why. The words are chosen by the page's script,
+    so this runs `renderStrip` itself under a JavaScript runtime, with a
+    stand-in for the document (#612), in the test's isolated homes.
+    Skips where no runtime is installed: neither is a dependency of
+    this repo."""
+    runner = shutil.which("node") or shutil.which("bun")
+    if runner is None:
+        test.skipTest("no node or bun on this machine to draw the strip")
+    script = page.split("<script>")[1].split("</script>")[0]
+
+    def declared(start):
+        at = script.index(start)
+        return script[at:script.index("\n}\n", at) + 3]
+
+    folder = temp_folder(test)
+    probe, served = folder / "strip.js", folder / "status.json"
+    served.write_text(json.dumps(report), encoding="utf-8")
+    probe.write_text(
+        "const drawn = {};\n"
+        "const document = {getElementById: id => drawn[id] || (drawn[id] ="
+        " {textContent: '', className: '', hidden: false,"
+        " classList: {toggle() {}}})};\n"
+        + re.search(r"const MARK = \{.*?\};\n", script, re.S).group()
+        + declared("function since(") + declared("function renderStrip(")
+        + "renderStrip(JSON.parse(require('fs').readFileSync("
+          "process.argv[2], 'utf8')));\n"
+          "console.log(JSON.stringify({colour: drawn.strip.className, "
+          "state: drawn.stateline.textContent, "
+          "why: drawn.statewhy.textContent}));\n", encoding="utf-8")
+    result = subprocess.run([runner, str(probe), str(served)],
+                            capture_output=True, encoding="utf-8",
+                            env=test.env, timeout=120)
+    test.assertEqual(result.returncode, 0, result.stderr)
+    return json.loads(result.stdout)
+
+
+def note_drawn(test, page, row):
+    """What the completeness watch draws for a receiver row's `note`, by
+    the page's own `rowNote` under a JavaScript runtime, as
+    `strip_drawn` draws the strip; skips where none is installed."""
+    runner = shutil.which("node") or shutil.which("bun")
+    if runner is None:
+        test.skipTest("no node or bun on this machine to draw the note")
+    script = page.split("<script>")[1].split("</script>")[0]
+    at = script.index("function rowNote(")
+    folder = temp_folder(test)
+    probe, served = folder / "note.js", folder / "row.json"
+    served.write_text(json.dumps(row), encoding="utf-8")
+    probe.write_text(
+        script[at:script.index("\n}\n", at) + 3]
+        + "console.log(JSON.stringify(rowNote(JSON.parse(require('fs')"
+          ".readFileSync(process.argv[2], 'utf8')))));\n", encoding="utf-8")
+    result = subprocess.run([runner, str(probe), str(served)],
+                            capture_output=True, encoding="utf-8",
+                            env=test.env, timeout=120)
+    test.assertEqual(result.returncode, 0, result.stderr)
+    return json.loads(result.stdout)
+
+
+def wait_for(test, done, within=60, missing="it never came"):
+    """Wait for `done()`, polling to a bound rather than sleeping a fixed
+    time: a slow runner gets longer and a quick one does not wait."""
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        if done():
+            return
+        time.sleep(0.1)
+    test.fail(f"{missing} within {within}s")
+
+
+def todays_row(book):
+    """Today's row of the day book at `book`, or None while it has none;
+    a book caught mid-swap on Windows reads as none yet."""
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    try:
+        return json.loads(book.read_text(encoding="utf-8"))["days"].get(today)
+    except (OSError, ValueError):
+        return None
+
+
 class ServerFixture(unittest.TestCase):
     """A temp root and a real `serve` subprocess on an ephemeral port, in
     a home of the test's own: serve reads the coverage marker and follows
@@ -124,8 +224,11 @@ class ServerFixture(unittest.TestCase):
         self.url = match.group()
 
     def _stop(self):
-        self.proc.kill()
-        self.proc.communicate(timeout=30)
+        # Once: a test that stops the server to read what it left runs
+        # this again at cleanup.
+        if self.proc.returncode is None:
+            self.proc.kill()
+            self.proc.communicate(timeout=30)
 
     def get(self, path):
         with OPENER.open(self.url + path, timeout=30) as response:
@@ -225,6 +328,96 @@ class DashboardTest(ServerFixture):
         self.assertIn("NOT THE RECORDED HISTORY", page)
         self.assertIn("RECEIPTS STOPPED ARRIVING", page)
         self.assertIn("all quiet", page)
+
+    def serve_beside_a_live_alarm(self):
+        """Serve the root with a witness that holds one session visibly
+        active and recorded nowhere, ALARM-SILENT; the served status and
+        the page, once the test has laid down what sits beside it."""
+        witness = temp_folder(self) / "witness"
+        install_witness_hook(witness)
+        prime_memory(self.root)
+        write_transcript(witness, self.root / "beta", "sess-nowhere",
+                         event_times=[ago(600), ago(400), ago(120)])
+        self.serve(extra_args=("--witness", str(witness)))
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 6)
+        states = {s["session"]: s["state"]
+                  for s in served["completeness"]["sessions"]}
+        self.assertEqual(states["sess-nowhere"], "ALARM-SILENT")
+        return served, page
+
+    def test_a_live_alarm_does_not_hide_a_broken_chain(self):
+        # #612 on the agent's machine: a session gone quiet while active
+        # and a chain that fails verification, in one look. The strip
+        # names both, the live alarm first, as the exit (6) does.
+        tamper(make_chain(self.root / "alpha" / "receipts", "sess-aaaa"))
+
+        served, page = self.serve_beside_a_live_alarm()
+
+        strip = strip_drawn(self, page, served)
+        self.assertEqual(strip["colour"], "grave")
+        self.assertEqual(strip["state"], "RECEIPTS STOPPED ARRIVING"
+                                         " · HISTORY WAS ALTERED")
+        self.assertLess(strip["why"].index("visibly active"),
+                        strip["why"].index("1 chain(s) fail verification"))
+
+    def test_a_live_alarm_does_not_hide_a_chain_verify_could_not_judge(self):
+        # #612, the strip's last clause: an exit no other words explain
+        # (here 4, an empty chain verify will not judge) is named beside
+        # the live alarm by the chains' own verdicts, never only when
+        # nothing else was found.
+        empty = self.root / "alpha" / "receipts" / "receipts-sess-empty.jsonl"
+        empty.parent.mkdir(parents=True)
+        empty.write_text("", encoding="utf-8")
+
+        served, page = self.serve_beside_a_live_alarm()
+
+        (repo,) = served["repos"]
+        self.assertEqual([(c["verdict"], c["exit"]) for s in repo["sessions"]
+                          for c in s["chains"]], [("NO-VERDICT", 4)])
+        strip = strip_drawn(self, page, served)
+        self.assertEqual(strip["colour"], "grave")
+        self.assertEqual(strip["state"], "RECEIPTS STOPPED ARRIVING"
+                                         " · CHANGED SINCE LAST LOOK")
+        self.assertTrue(strip["why"].endswith(
+            " · 1 chain(s) NO-VERDICT — details in the band below"
+            " (scan exit 6)"), strip["why"])
+
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs a folder this user may not list")
+    def test_a_change_does_not_hide_a_folder_the_scan_cannot_list(self):
+        # #612, inside the amber words: a chain gone since the last look
+        # and a folder the census cannot list, in one look, each named in
+        # its own words, in the order the strip ranks them.
+        gone = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        make_chain(self.root / "beta" / "receipts", "sess-bbbb")
+        run(SUPERVISOR, "scan", "--root", str(self.root), "--json",
+            env=self.env, check=True)
+        gone.unlink()
+        shut = self.root / "gamma" / "receipts"
+        shut.mkdir(parents=True)
+        os.chmod(shut, 0)
+        self.addCleanup(os.chmod, shut, 0o755)
+        self.serve()
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 5)
+        self.assertEqual([e["change"] for e in served["baseline"]["events"]],
+                         ["vanished"])
+        self.assertEqual(len(served["closed"]), 1)
+        strip = strip_drawn(self, page, served)
+        self.assertEqual(strip["colour"], "damage")
+        self.assertEqual(strip["state"], "CHANGED SINCE LAST LOOK"
+                                         " · FOLDER CANNOT BE LISTED")
+        self.assertEqual(strip["why"], (
+            "1 change(s) the baseline cannot explain as appends · 1 "
+            "folder(s) the scan cannot list, so what they hold is unknown, "
+            "never read as empty (scan exit 5)"))
 
     def test_a_watch_row_says_the_counts_that_decided_its_chip(self):
         # ADR-0034: paired tool by tool, the totals can match while a
@@ -898,6 +1091,36 @@ class FortnightTest(ServerFixture):
 
 
 class ServeTest(ServerFixture):
+    def test_a_client_that_hangs_up_leaves_no_traceback(self):
+        # #589 item 18: a client that leaves mid-request is not the
+        # supervisor's fault, and its request thread printed a traceback
+        # to the serve log. Half a request, then a reset rather than a
+        # close, so the thread's next read of the connection fails, as
+        # its write of a reply does when the client is gone.
+        #
+        # Nothing the server says marks that thread done, and the next
+        # request can be answered first (seen on Windows), so the log is
+        # given a bound to say anything at all. A quiet log waits the
+        # bound out and passes on any machine; only a regression whose
+        # print came later than the bound could slip by.
+        self.serve()
+        port = int(self.url.rsplit(":", 1)[1])
+        leaving = socket.create_connection(("127.0.0.1", port), timeout=30)
+        leaving.sendall(b"GET /api/status HTTP/1.1\r\n")
+        # SO_LINGER on, zero seconds: the close sends a reset. Windows'
+        # struct linger is two shorts, POSIX's two ints.
+        leaving.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                           struct.pack("HH" if os.name == "nt" else "ii",
+                                       1, 0))
+        leaving.close()
+
+        status, _, _ = self.get("/api/status")
+        said = read_line_within(self.proc.stderr, bound=3)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(said, "", "a client that left put this on the "
+                                   "serve log")
+
     def test_serve_binds_localhost_only(self):
         # The announcement is the bind: an ephemeral port on 127.0.0.1,
         # answering — nothing is offered to any other interface.
@@ -1573,7 +1796,7 @@ class SearchTest(ServerFixture):
 
     def test_a_hit_keeps_the_line_whole_and_lists_it_folded(self):
         # ADR-0047: the JSON keeps the line whole; `listed` is what the
-        # page shows, the suffix folded.
+        # page shows, the suffix folded and the line marked (#619).
         alpha = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
         log_entry(alpha, "Bash: deploy the albatross [call=toolu_1 "
                          "input=unhashed]")
@@ -1584,7 +1807,7 @@ class SearchTest(ServerFixture):
         self.assertEqual(
             (hit["action"], hit["listed"]),
             ("Bash: deploy the albatross [call=toolu_1 input=unhashed]",
-             "Bash: deploy the albatross"))
+             "Bash: deploy the albatross [...]"))
 
     def test_search_is_case_insensitive(self):
         log = make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
@@ -1657,6 +1880,80 @@ class ScanBatchingTest(ServerFixture):
         make_chain(self.root / "beta" / "receipts", "sess-bbbb")
         _, _, second = self.get("/api/status")
         self.assertEqual(first, second)
+
+
+class WatchTickTest(ServerFixture):
+    """With no keeper cadence in force, `serve` looks on a clock of its
+    own (#281): a `serve` left running with no page open and no scrape
+    used to compute no completeness state, compare no baseline and run
+    no tail keeper. Nothing here asks the server anything; what the
+    clock's look left on disk is what is read."""
+
+    def test_a_live_alarm_reaches_the_day_book_with_nobody_asking(self):
+        # The alarm band itself: ALARM-SILENT is the state that says
+        # recording stopped. A look nobody asked for stays out of the
+        # book while it has nothing new (ADR-0014), and goes in when it
+        # finds an alarm the book does not show yet; once, not on every
+        # later turn while the alarm stands (ADR-0039).
+        witness = temp_folder(self) / "witness"
+        install_witness_hook(witness)
+        prime_memory(self.root)
+        write_transcript(witness, self.root / "beta", "sess-nowhere",
+                         event_times=[ago(600), ago(400), ago(120)])
+        book = self.root / ".supervisor-daybook.json"
+        baseline = self.root / BASELINE_NAME
+
+        self.serve(extra_env={"SUPERVISOR_WATCH_TICK_SECONDS": "0.5"},
+                   extra_args=("--witness", str(witness)))
+        said = read_line_within(self.proc.stdout)
+        wait_for(self, lambda: todays_row(book) is not None,
+                 missing="the watch's look wrote no day book")
+        caught = todays_row(book)
+
+        def turned_twice_since():
+            # Every look rewrites the baseline's stamp; two seconds past
+            # the catching look is several turns at half a second each.
+            try:
+                memory = json.loads(baseline.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+            later = datetime.datetime.strptime(memory["scanned"],
+                                               "%Y-%m-%dT%H:%M:%SZ")
+            first = datetime.datetime.strptime(caught["last"],
+                                               "%Y-%m-%dT%H:%M:%SZ")
+            return (later - first).total_seconds() >= 2
+
+        wait_for(self, turned_twice_since, missing="the clock stopped turning")
+        self._stop()
+
+        row = todays_row(book)
+        self.assertEqual((row["alarms"], row["worst"], row["looks"]),
+                         (1, 6, 0))
+        self.assertEqual(row["scans"], 1, "a turn wrote the day book for an "
+                                          "alarm already standing")
+        self.assertIn("publish off", said)
+        self.assertTrue(said.strip().endswith(
+            "; watch: a look of its own every 0.5s "
+            "(SUPERVISOR_WATCH_TICK_SECONDS)"), said)
+
+    def test_a_request_after_the_clock_looked_is_still_somebody_looking(self):
+        # #538 kept: the clock's look is held, but a request is answered
+        # from a look of its own, which is the one the day book counts.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        book = self.root / ".supervisor-daybook.json"
+        baseline = self.root / BASELINE_NAME
+
+        self.serve(extra_env={"SUPERVISOR_WATCH_TICK_SECONDS": "0.5",
+                              "SUPERVISOR_SCAN_TTL_SECONDS": "600"})
+        wait_for(self, baseline.exists, missing="the clock never looked")
+        self.assertFalse(book.exists(), "a quiet look wrote the day book")
+        _, _, body = self.get("/api/status")
+        self._stop()
+
+        row = todays_row(book)
+        self.assertEqual((row["worst"], row["scans"]), (0, 1))
+        self.assertTrue(json.loads(body)["history"][-1]["watched"],
+                        "the request painted its day unread")
 
 
 class ReceiverServeTest(ServerFixture):
@@ -1750,15 +2047,177 @@ class ReceiverServeTest(ServerFixture):
         self.assertIn("acknowledged here with supervisor acknowledge "
                       "--receiver DIR", page)
 
+    def test_a_row_s_note_is_drawn_with_only_safe_characters(self):
+        # #620: the note says why a receipt paid nothing, and names the
+        # tool the receipt's line gives, which the writer chooses. Its
+        # status carries the tool in a safe alphabet, and the page draws
+        # the note with no control or bidi character in it.
+        chain_copy(self.data, FIXTURE_SESSION, actions=(
+            "Bash: git status [call=toolu_000000000000000000000001 "
+            "input=unhashed]",
+            "Re‮ad: notes.md [call=toolu_000000000000000000000002 "
+            "input=unhashed]"))
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        (row,) = json.loads(body)["completeness"]["sessions"]
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertIn("toolu_000000000000000000000002 names Re?ad where the "
+                      "harness's event names Bash", row["note"])
+        self.assertIn("rowNote(s)", page)
+        drawn = note_drawn(self, page, dict(row, note=row["note"]
+                                            + " ‮\u0007tail"))
+        self.assertIn("names Re?ad where", drawn)
+        self.assertNotIn("‮", drawn)
+        self.assertNotIn("\u0007", drawn)
+        self.assertEqual(note_drawn(self, page, {"state": "ENDED-CLEAN",
+                                                 "by_tool": {}}), "")
+
+    def test_a_broken_chain_does_not_hide_a_finding_no_one_has_accepted(self):
+        # #612: one look, both findings. The exit carries the worse (6,
+        # the finding), and the strip names both, the worse first, each
+        # in its own words.
+        tamper(chain_copy(self.data, FIXTURE_SESSION,
+                          actions=FIXTURE_RECEIPTS[:1]))
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 6)
+        (repo,) = served["repos"]
+        self.assertEqual([c["verdict"] for s in repo["sessions"]
+                          for c in s["chains"]], ["BROKEN"])
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["raises"]),
+                         ("ENDED-DEFICIT", True))
+        strip = strip_drawn(self, page, served)
+        self.assertEqual(strip["colour"], "grave")
+        self.assertEqual(strip["state"], "A FINDING NO ONE HAS ACCEPTED"
+                                         " · HISTORY WAS ALTERED")
+        self.assertLess(strip["why"].index("1 settled session(s)"),
+                        strip["why"].index("1 chain(s) fail verification"))
+        self.assertEqual(strip["why"].count("(scan exit 6)"), 1)
+
+    def test_a_session_still_arriving_stands_until_it_settles(self):
+        # #617: a session still arriving with a call overdue raises the
+        # exit and cannot be accepted (ADR-0046 ruling 6), so the strip
+        # says it stands until its receipts arrive or it settles, and
+        # names no acknowledgement for it.
+        self.env["SUPERVISOR_SETTLE_SECONDS"] = "3600"
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        post_event(self.data, 51, "api_request", received_ago(0))
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 6)
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["raises"]),
+                         ("PENDING-OVERDUE", True))
+        strip = strip_drawn(self, page, served)
+        self.assertEqual(strip["state"], "CALLS OVERDUE AT THE RECEIVER")
+        self.assertIn("until the receipts arrive or the session settles",
+                      strip["why"])
+        self.assertNotIn("acknowledge", strip["why"])
+
     def test_the_startup_line_says_no_keeper_runs_at_the_far_end(self):
-        # #487 item 12.
+        # #487 item 12, and #281: no keeper, and the watch's own clock.
         self.assertIsNotNone(self.serve_receiver())
 
         keeper = read_line_within(self.proc.stdout)
 
         self.assertEqual(keeper.strip(), (
             "keeper: none over a receiver's folder; nothing is anchored, "
-            "sent or appended from the far end (ADR-0041)"))
+            "sent or appended from the far end (ADR-0041); watch: a look "
+            "of its own every 10m (SUPERVISOR_WATCH_TICK_SECONDS)"))
+
+    def test_the_startup_line_says_when_the_watch_is_off(self):
+        # #281: 0 is today's `serve`, a look only when somebody asks.
+        self.env["SUPERVISOR_WATCH_TICK_SECONDS"] = "0"
+        self.assertIsNotNone(self.serve_receiver())
+
+        keeper = read_line_within(self.proc.stdout)
+
+        self.assertTrue(keeper.strip().endswith(
+            "(ADR-0041); watch: none of its own "
+            "(SUPERVISOR_WATCH_TICK_SECONDS=0), a look only when a page or "
+            "a scrape asks"), keeper)
+
+    def test_a_finding_reaches_the_receivers_day_book_with_nobody_asking(self):
+        # #281: `serve --receiver` never has a keeper, so ADR-0046's
+        # findings were computed only when a page or a scrape asked. The
+        # watch's clock looks with nothing asking, and a finding the
+        # book does not show yet goes in it, as one a request found.
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        self.env["SUPERVISOR_WATCH_TICK_SECONDS"] = "0.5"
+        book = self.data / "supervisor" / "daybook.json"
+        self.assertIsNotNone(self.serve_receiver())
+        said = read_line_within(self.proc.stdout)
+
+        wait_for(self, lambda: todays_row(book) is not None,
+                 missing="the watch's look wrote no day book")
+        self._stop()
+
+        row = todays_row(book)
+        self.assertEqual((row["alarms"], row["worst"], row["looks"]),
+                         (1, 6, 0))
+        self.assertIn("watch: a look of its own every 0.5s", said)
+
+    def test_a_keeper_flag_beside_receiver_is_refused_by_name(self):
+        # #487 item 11: `--publish-every` here exited 64 with the
+        # keeper's own rule about URLs, and the three flags together
+        # started a server that ran no keeper. Refused as --root is.
+        for asked, named in keeper_flag_cases():
+            with self.subTest(asked=asked):
+                result = run(SUPERVISOR, "serve", "--receiver",
+                             str(self.data), "--port", "0", *asked,
+                             timeout=60, env=self.env)
+
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                self.assertIn(NO_KEEPER_THERE + named + "\n", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_the_views_and_the_acknowledged_lines_say_whose_reach(self):
+        # #615: the saved views sit in the receiver's folder, out of the
+        # writer's reach, and so does the record of what an operator
+        # accepted there. The page draws an acknowledged change with the
+        # words the server gives for where its memory is kept, and no
+        # longer calls every such record writer-reachable itself.
+        self.assertIsNotNone(self.serve_receiver())
+        self.get("/api/status")   # the first look makes the memory's folder
+        request = urllib.request.Request(
+            self.url + "/api/views",
+            data=json.dumps({"save": {"name": "lately"}}).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with OPENER.open(request, timeout=30) as response:
+            saved = json.loads(response.read().decode("utf-8"))
+
+        _, _, listed = self.get("/api/views")
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        for reply in (saved, json.loads(listed)):
+            self.assertIn("out of the writer's reach if the receiver is",
+                          reply["purpose"])
+            self.assertNotIn("writer-reachable", reply["purpose"])
+        kept = (self.data / "supervisor" / "views.json").read_text(
+            encoding="utf-8")
+        self.assertNotIn("writer-reachable", kept)
+        self.assertEqual(json.loads(body)["baseline"]["kept"],
+                         "kept at the receiver, out of the writer's reach if "
+                         "the receiver is")
+        # One source for every acknowledgement line, a session's and a
+        # change's alike.
+        self.assertIn("report.baseline.kept", page)
+        self.assertNotIn("kept in a writer-reachable file", page)
+        self.assertNotIn("(an operator's word, kept at the receiver)", page)
 
     def test_the_recall_routes_read_the_receivers_copies(self):
         # #487 item 10: the census counts the copies, and so must the
@@ -1793,3 +2252,170 @@ class ReceiverServeTest(ServerFixture):
 
         self.assertEqual(self.proc.returncode, 64, err)
         self.assertIn("--receiver reads a receiver's data directory", err)
+
+    def accepted_strip(self, *findings):
+        """Scan the receiver's folder, accept each (session, state) there
+        with `acknowledge --receiver`, then serve it: the strip the page
+        draws once nothing raises (#613)."""
+        scan = run(SUPERVISOR, "scan", "--receiver", str(self.data), "--json",
+                   timeout=180, env=self.env)
+        self.assertEqual(scan.returncode, 6, scan.stderr)
+        for session, state in findings:
+            accepted = run(SUPERVISOR, "acknowledge", "--receiver",
+                           str(self.data), "--session", session, state,
+                           timeout=180, env=self.env)
+            self.assertEqual(accepted.returncode, 0,
+                             accepted.stdout + accepted.stderr)
+        self.assertIsNotNone(self.serve_receiver())
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 0)
+        rows = {row["session"]: row
+                for row in served["completeness"]["sessions"]}
+        for session, state in findings:
+            self.assertEqual(rows[session]["state"], state)
+            self.assertTrue(rows[session]["acknowledged"]["holds"])
+        return strip_drawn(self, page, served)
+
+    def test_an_accepted_shortfall_says_it_was_accepted_with_its_counts(self):
+        # #613: the receipts are still missing once someone accepts the
+        # shortfall; the strip says so, with the counts, never "every
+        # receipt accounted for". The exit stays 0 (ADR-0046 ruling 2).
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+
+        strip = self.accepted_strip((FIXTURE_SESSION, "ENDED-DEFICIT"))
+
+        self.assertEqual((strip["colour"], strip["state"]),
+                         ("quiet", "all quiet"))
+        self.assertEqual(strip["why"], (
+            "1 chain(s), 1 finding(s) accepted at the receiver, still as "
+            "found: 3253bacd ENDED-DEFICIT, 2 owed, 1 received, "
+            "1 missing"))
+
+    def test_an_accepted_absent_or_gapped_second_record_never_reads_complete(self):
+        # #613 on the other two findings the receiver accepts: events that
+        # never arrived, and events lost on the way.
+        lay_events(self.data, drop=(29, 30))
+        chain_copy(self.data, "cut-session-1111")
+
+        strip = self.accepted_strip(("cut-session-1111", "SECOND-RECORD-ABSENT"),
+                                    (FIXTURE_SESSION, "SECOND-RECORD-GAP"))
+
+        self.assertEqual((strip["colour"], strip["state"]),
+                         ("quiet", "all quiet"))
+        self.assertNotIn("accounted for", strip["why"])
+        self.assertIn("2 finding(s) accepted at the receiver", strip["why"])
+        self.assertIn("3253bacd SECOND-RECORD-GAP, 2 owed, 4 received, "
+                      "2 event number(s) missing", strip["why"])
+        self.assertIn("cut-sess SECOND-RECORD-ABSENT, 4 received, no harness "
+                      "events", strip["why"])
+
+
+    def test_a_session_id_reaches_the_strip_in_a_safe_alphabet(self):
+        # #613: a receiver's events can name a session with any
+        # character; on the headline a right-to-left override and the
+        # like read as ?, never as themselves.
+        session = "‮evil-0001"
+        post_event(self.data, 0, "tool_result", received_ago(7200),
+                   tool="Bash", session=session)
+
+        strip = self.accepted_strip((session, "ENDED-DEFICIT"))
+
+        self.assertNotIn("‮", strip["why"])
+        self.assertIn("?evil-00 ENDED-DEFICIT, 1 owed, 0 received, "
+                      "1 missing", strip["why"])
+
+class QuietStripTest(ServerFixture):
+    """The strip's quiet words over a look that raises nothing: true of
+    every row in the report, never "every receipt accounted for" while a
+    row is short of receipts (#613)."""
+
+    def setUp(self):
+        super().setUp()
+        self.witness = temp_folder(self) / "witness"
+        install_witness_hook(self.witness)
+        prime_memory(self.root)
+
+    def session(self, name, calls, receipts=1):
+        """A chain of `receipts` Bash receipts and a transcript of Bash
+        calls at `calls`, each an age in seconds."""
+        log = make_chain(self.root / "alpha" / "receipts", name, entries=0)
+        for _ in range(receipts):
+            log_entry(log, "Bash: ls")
+        write_transcript(self.witness, self.root / "alpha", name,
+                         event_times=[ago(age) for age in calls],
+                         idle=min(calls))
+
+    def drawn(self, extra_env=None):
+        """Serve the root, and the report and the strip drawn over it."""
+        self.serve(extra_env=extra_env,
+                   extra_args=("--witness", str(self.witness)))
+
+        _, _, body = self.get("/api/status")
+        _, _, page = self.get("/")
+
+        served = json.loads(body)
+        self.assertEqual(served["exit"], 0)
+        strip = strip_drawn(self, page, served)
+        self.assertEqual((strip["colour"], strip["state"]),
+                         ("quiet", "all quiet"))
+        return served, strip
+
+    def test_an_ended_session_short_of_receipts_never_reads_accounted_for(self):
+        # On the agent's machine an ended deficit is evidence and exit 0
+        # (ADR-0046 ruling 1), so the strip stays quiet; its words say a
+        # session ended short, with its counts.
+        self.session("sess-lost", [7200, 7100, 7000])
+
+        served, strip = self.drawn()
+
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["deficit"]), ("ENDED-DEFICIT", 2))
+        self.assertEqual(strip["why"], (
+            "1 chain(s), 1 session(s) short of receipts, kept as evidence: "
+            "sess-los ENDED-DEFICIT, 3 owed, 1 received, 2 missing"))
+
+    def test_a_look_with_no_row_short_reads_every_receipt_accounted_for(self):
+        self.session("sess-whole", [7000])
+
+        served, strip = self.drawn()
+
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["deficit"]), ("ENDED-CLEAN", 0))
+        self.assertEqual(strip["why"],
+                         "1 chain(s), every receipt accounted for")
+
+    def test_a_session_behind_inside_the_grace_window_is_not_called_missing(self):
+        # LAGGING: the receipt may still arrive (WATCH_WORDS), so it is
+        # neither evidence nor missing. A wide grace keeps the test off
+        # the clock.
+        self.session("sess-lag", [600, 60])
+
+        served, strip = self.drawn({"SUPERVISOR_GRACE_SECONDS": "3600"})
+
+        (row,) = served["completeness"]["sessions"]
+        self.assertEqual((row["state"], row["deficit"]), ("LAGGING", 1))
+        self.assertEqual(strip["why"], (
+            "1 chain(s), 1 session(s) behind the witness inside the grace "
+            "window: sess-lag LAGGING, 2 owed, 1 received, 1 not yet "
+            "received"))
+
+    def test_a_group_names_three_sessions_and_counts_the_rest(self):
+        for n in range(5):
+            self.session(f"sess-lost-{n}", [7200, 7100, 7000])
+
+        served, strip = self.drawn()
+
+        self.assertEqual([row["state"] for row
+                          in served["completeness"]["sessions"]],
+                         ["ENDED-DEFICIT"] * 5)
+        self.assertTrue(strip["why"].startswith(
+            "5 chain(s), 5 session(s) short of receipts, kept as evidence: "),
+            strip["why"])
+        self.assertEqual(strip["why"].count("ENDED-DEFICIT"), 3)
+        self.assertTrue(strip["why"].endswith(
+            "; and 2 more, named in the completeness watch below"),
+            strip["why"])

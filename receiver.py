@@ -60,6 +60,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import unicodedata
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -159,21 +160,58 @@ MIB = 1024 * 1024
 FILE_CAP_MIB = 1024
 TOTAL_CAP_MIB = 10 * 1024
 
-# The whole of one request, headers and body, is due this many seconds
-# after its connection is taken, or the connection is dropped (#300). A
-# timeout per receive alone let a sender trickle one byte every 1.5
-# seconds and hold its request open for as long as it liked. Sixty
-# seconds carries a full 8 MiB batch at a little over one megabit a
-# second, and the recorder's own sends give up sooner. The env knob is
-# the test suite's handle, like the timeout's on the door below.
-DEADLINE_SECONDS = float(os.environ.get("RECEIVER_DEADLINE_SECONDS", 60))
-
 # The shape of a token this file mints (secrets.token_urlsafe), so a
 # hand-edited token file that would not make a clean URL is replaced.
 TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]+")
 
 # Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
 EX_USAGE = 64  # sysexits(3) EX_USAGE: the command was spoken wrong
+
+# 70 when the receiver crashes and 141 when its reader hangs up, both
+# given by run_main, as in the recorder (#449).
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+EX_SOFTWARE = 70
+EXIT_READER_GONE = 141
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def number_setting(name, raw, kind=int, waited=False):
+    """The number the text `raw` of environment variable `name` says,
+    read as `kind` (int or float). A value that is not such a number,
+    or is negative or infinite, is refused by name: one line on stderr
+    and exit 64, never a traceback (#487). When the number is a wait,
+    one past threading.TIMEOUT_MAX is refused the same way, since no
+    wait can take it (#589); a number only compared has no such
+    bound."""
+    try:
+        value = kind(raw)
+    except ValueError:
+        value = None
+    if value is None or not 0 <= value < float("inf"):
+        print(f"error: {name}={ascii(raw)} is not a "
+              f"{'whole' if kind is int else 'finite'} number 0 or more",
+              file=sys.stderr)
+        sys.exit(EX_USAGE)
+    if waited and value > threading.TIMEOUT_MAX:
+        print(f"error: {name}={ascii(raw)} is more seconds than a wait "
+              f"can take (at most {int(threading.TIMEOUT_MAX)} here)",
+              file=sys.stderr)
+        sys.exit(EX_USAGE)
+    return value
+
+
+# The whole of one request, headers and body, is due this many seconds
+# after its connection is taken, or the connection is dropped (#300). A
+# timeout per receive alone let a sender trickle one byte every 1.5
+# seconds and hold its request open for as long as it liked. Sixty
+# seconds carries a full 8 MiB batch at a little over one megabit a
+# second, and the recorder's own sends give up sooner. The env knob is
+# the test suite's handle, like the timeout's on the door below. Read
+# at import by the supervisor's rule, so a value the receiver cannot
+# wait on is refused before any verb runs (#589).
+DEADLINE_SECONDS = number_setting(
+    "RECEIVER_DEADLINE_SECONDS",
+    os.environ.get("RECEIVER_DEADLINE_SECONDS", "60"), float, waited=True)
 
 
 # --- The data directory and the token ------------------------------------------
@@ -887,8 +925,10 @@ class Door(BaseHTTPRequestHandler):
     # A sender that goes quiet this long, mid-body or before a TLS
     # handshake it never starts, is dropped, not waited on, even with
     # time left before the deadline. The env knob is the test suite's
-    # handle.
-    timeout = float(os.environ.get("RECEIVER_TIMEOUT_SECONDS", 30))
+    # handle, read at import by the deadline's rule (#589).
+    timeout = number_setting(
+        "RECEIVER_TIMEOUT_SECONDS",
+        os.environ.get("RECEIVER_TIMEOUT_SECONDS", "30"), float, waited=True)
 
     def setup(self):
         # The stdlib sets the timeout and opens the reading side here.
@@ -1359,6 +1399,43 @@ def speak_utf8():
             reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def reader_gone(error):
+    """True when `error` is the reader hanging up on stdout (`loxodonta
+    report | head`). POSIX raises BrokenPipeError (EPIPE); Windows
+    reports a plain EINVAL from the closed handle instead, so match on
+    both or the quiet death is a traceback on half the platforms. EINVAL
+    means nothing about pipes off Windows, and on Windows it counts only
+    when it names no file: a write to stdout never does, and a file
+    refused for not being a regular one always does, so that refusal is
+    never taken for a reader that left."""
+    return isinstance(error, BrokenPipeError) or (
+        os.name == "nt" and isinstance(error, OSError)
+        and error.errno == errno.EINVAL and error.filename is None)
+
+
+# Copy of loxodonta.py's; edit there, then run tools/twin_check.py --write.
+def run_main(main):
+    """Run a command line to its exit code, as every tool's entry point.
+    Two endings are not the command's own (ADR-0037). A reader that hung
+    up gets a quiet 141, what a shell reports for that: never 0 (VALID)
+    or 1 (BROKEN), since the unread lines were never judged. A crash
+    prints its traceback to stderr and exits 70, sysexits' internal
+    error, so it is never read as a verdict. SystemExit (argparse's 64,
+    `--version`'s 0) and Ctrl-C pass through as Python ends them."""
+    try:
+        speak_utf8()  # before anything prints
+        code = main()
+    except Exception as e:  # noqa: BLE001 - every failure gets its exit
+        if not reader_gone(e):
+            traceback.print_exc()
+            sys.exit(EX_SOFTWARE)
+        # Give the interpreter a sink to flush into, or shutdown re-raises.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(EXIT_READER_GONE)
+    sys.exit(code)
+
+
 def mebibytes(text):
     """A cap as typed at the command line: a whole number of MiB, one or
     more. Anything else is a usage error naming the flag."""
@@ -1386,7 +1463,7 @@ class UsageParser(argparse.ArgumentParser):
         self.exit(EX_USAGE, f"{self.prog}: error: {message}\n")
 
 
-def main(argv):
+def main(argv=None):
     parser = UsageParser(prog="receiver",
                          description=__doc__.splitlines()[0])
     parser.add_argument("--version", action=VersionAction,
@@ -1431,5 +1508,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    speak_utf8()  # before anything prints
-    sys.exit(main(sys.argv[1:]))
+    run_main(main)

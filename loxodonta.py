@@ -3101,14 +3101,17 @@ def reader_gone(error):
     report | head`). POSIX raises BrokenPipeError (EPIPE); Windows
     reports a plain EINVAL from the closed handle instead, so match on
     both or the quiet death is a traceback on half the platforms. EINVAL
-    means nothing about pipes off Windows."""
+    means nothing about pipes off Windows, and on Windows it counts only
+    when it names no file: a write to stdout never does, and a file
+    refused for not being a regular one always does, so that refusal is
+    never taken for a reader that left."""
     return isinstance(error, BrokenPipeError) or (
         os.name == "nt" and isinstance(error, OSError)
-        and error.errno == errno.EINVAL)
+        and error.errno == errno.EINVAL and error.filename is None)
 
 
 def run_main(main):
-    """Run a command line to its exit code, as both files' entry point.
+    """Run a command line to its exit code, as every tool's entry point.
     Two endings are not the command's own (ADR-0037). A reader that hung
     up gets a quiet 141, what a shell reports for that: never 0 (VALID)
     or 1 (BROKEN), since the unread lines were never judged. A crash
@@ -3188,6 +3191,33 @@ def environment(name, default=None):
     if MANAGED_RUN and name not in MANAGED_READS:
         return default
     return os.environ.get(name, default)
+
+
+# Never called here: held so the supervisor and the receiver read their
+# numbers by one rule; the recorder's own knobs fall back quietly (#449).
+def number_setting(name, raw, kind=int, waited=False):
+    """The number the text `raw` of environment variable `name` says,
+    read as `kind` (int or float). A value that is not such a number,
+    or is negative or infinite, is refused by name: one line on stderr
+    and exit 64, never a traceback (#487). When the number is a wait,
+    one past threading.TIMEOUT_MAX is refused the same way, since no
+    wait can take it (#589); a number only compared has no such
+    bound."""
+    try:
+        value = kind(raw)
+    except ValueError:
+        value = None
+    if value is None or not 0 <= value < float("inf"):
+        print(f"error: {name}={ascii(raw)} is not a "
+              f"{'whole' if kind is int else 'finite'} number 0 or more",
+              file=sys.stderr)
+        sys.exit(EX_USAGE)
+    if waited and value > threading.TIMEOUT_MAX:
+        print(f"error: {name}={ascii(raw)} is more seconds than a wait "
+              f"can take (at most {int(threading.TIMEOUT_MAX)} here)",
+              file=sys.stderr)
+        sys.exit(EX_USAGE)
+    return value
 
 
 # --- Writing a line -----------------------------------------------------------
@@ -3707,6 +3737,59 @@ DEFAULT_CALENDARS = [
     "https://a.pool.eternitywall.com",
     "https://ots.btc.catallaxy.com",
 ]
+DEFAULT_PORTS = {"http": 80, "https": 443}
+SHOWN_CALENDAR = 200   # characters of a row's address a skip line prints
+
+
+def calendar_key(url):
+    """What an upgrade compares to tell whether an address is a calendar
+    it was told to ask (#415): the scheme and the host in either case,
+    the port written or left to its default, the path with or without a
+    trailing slash, so `HTTPS://A.example:443/` is `https://a.example`.
+    Anything else that differs, a path included, is another calendar,
+    since the address is the door every request goes through. No name
+    is looked up. An address urllib cannot take apart is its own text."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return url
+    if port is None:
+        port = DEFAULT_PORTS.get(parts.scheme)
+    return (parts.scheme, parts.username, parts.password, parts.hostname,
+            port, parts.path.rstrip("/"), parts.query, parts.fragment)
+
+
+def calendars_asked(calendars):
+    """The keys of the calendars an upgrade may ask: the defaults this
+    recorder submits to, and `calendars`, those the operator named on the
+    command line. A sidecar row is the writer's text, or the text of
+    whoever handed the sidecar over, so the address it names is asked
+    only when it is one of these (#415)."""
+    return {calendar_key(calendar)
+            for calendar in [*DEFAULT_CALENDARS, *(calendars or [])]}
+
+
+def unnamed_calendar(url, asked):
+    """True for an http or https address whose key is not in `asked`:
+    one an upgrade passes by and never asks (#415). Any other address
+    is left to `calendar_request`, which refuses it before it asks."""
+    try:
+        scheme = urllib.parse.urlsplit(url).scheme
+    except ValueError:
+        return False
+    return scheme in PUBLISH_SCHEMES and calendar_key(url) not in asked
+
+
+def shown_address(url):
+    """A row's address as a line prints it: escaped, and cut past
+    SHOWN_CALENDAR characters with the count of those cut, so a planted
+    address of a megabyte prints as some two hundred characters, more
+    only where escapes lengthen them."""
+    if len(url) <= SHOWN_CALENDAR:
+        return visible(url)
+    return (f"{visible(url[:SHOWN_CALENDAR])}… "
+            f"(+{len(url) - SHOWN_CALENDAR})")
 
 
 def write_varint(n):
@@ -3745,16 +3828,25 @@ def append_sidecar_record(path, record):
     shape every sidecar record has. The sidecar is opened without
     waiting and written only when it is a regular file: an ordinary open
     of a pipe with no reader never returns, so one at the sidecar's name
-    would hang every writer (#364). Here a pipe with no reader fails at
-    once, and anything else that is not a file is refused before a byte
-    is written, as an OSError the caller already answers."""
+    would hang every writer (#364). Here anything that is not a file, a
+    pipe included, is refused before a byte is written, as an OSError the
+    caller already answers. A sidecar whose last line has no line end, a
+    torn line a crash or a full disk left, gets one before the record, so
+    the record starts on a line of its own and only the torn line, left
+    as it lies, is unreadable (#610). The file is opened for reading too,
+    to see how it ends."""
     line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT
                  | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0),
                  0o644)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
             raise OSError(errno.EINVAL, NOT_REGULAR, path)
+        if opened.st_size > 0:
+            os.lseek(fd, -1, os.SEEK_END)
+            if os.read(fd, 1) != b"\n":
+                line = "\n" + line
         with os.fdopen(os.dup(fd), "ab") as f:
             f.write(line.encode("utf-8"))
     finally:
@@ -4038,14 +4130,15 @@ def anchor_and_upgrade(log, calendars, budget):
         if submitted:
             changed.append(log)
     upgrade_pending_proofs(os.path.dirname(os.path.abspath(log)), remaining,
-                           deadline, changed)
+                           deadline, changed, calendars_asked(calendars))
     return changed
 
 
-def upgrade_pending_proofs(folder, remaining, deadline, changed):
+def upgrade_pending_proofs(folder, remaining, deadline, changed, asked):
     """Every pending proof in the folder's sidecars, oldest first, one
-    request each, until the deadline. A settled head is skipped. Each
-    chain whose sidecar gains a row is added to `changed`, once."""
+    request each, until the deadline. A settled head is skipped, and so
+    is a row naming a calendar not in `asked` (#415). Each chain whose
+    sidecar gains a row is added to `changed`, once."""
     for name in sorted(os.listdir(folder)):
         if not name.endswith(".anchors.jsonl"):
             continue
@@ -4058,6 +4151,8 @@ def upgrade_pending_proofs(folder, remaining, deadline, changed):
             if record["head"] in settled:
                 continue
             url = record["calendar"].rstrip("/")
+            if unnamed_calendar(url, asked):
+                continue
             try:
                 continuation = calendar_request(
                     f"{url}/timestamp/{commitment_hex}", timeout=remaining())
@@ -5705,7 +5800,11 @@ def submit_digest(target, head, n, calendars, upgrade_flags, force=False):
         print("error: no calendar accepted the digest — not anchored",
               file=sys.stderr)
         return EX_UNAVAILABLE
-    print(f"proof is pending — run `loxodonta anchor {upgrade_flags}` "
+    # The upgrade asks only the calendars it is told to (#415), so the
+    # command names the ones given here.
+    named = "".join(f" --calendar {visible(calendar)}"
+                    for calendar in calendars or [])
+    print(f"proof is pending — run `loxodonta anchor {upgrade_flags}{named}` "
           "after a few hours to complete it")
     return 0
 
@@ -5726,6 +5825,8 @@ def upgrade_anchors(args):
         return EX_NOINPUT
     # verify --anchors reports the rows this leaves out; upgrade skips them.
     pending, completed, settled_heads = pending_upgrades(records)
+    asked = calendars_asked(args.calendar)
+    passed_by = set()   # one line per address, however many rows name it
     failures = 0
     for record, commitment_hex in pending:
         key = (record["head"], record["calendar"])
@@ -5739,6 +5840,21 @@ def upgrade_anchors(args):
         if record["head"] in settled_heads:
             print(f"skipped {label} at {shown}: another calendar already "
                   "settled this head")
+            continue
+        if unnamed_calendar(url, asked):
+            # Asked, it would be a request to an address the row chose,
+            # from the network of whoever upgrades: a recipient's, for a
+            # sidecar handed over with a package (#415).
+            if calendar_key(url) not in passed_by:
+                passed_by.add(calendar_key(url))
+                cut = shown_address(url)
+                # Named once, as data: the address is the row's, and a
+                # flag built from it would hand a reader the row's words
+                # to paste into a shell.
+                print(f"warning: skipped calendar {cut}: it is not one "
+                      "this upgrade was told to ask (the default calendars "
+                      "and each --calendar given); add it with --calendar "
+                      "to ask it", file=sys.stderr)
             continue
         try:
             continuation = calendar_request(f"{url}/timestamp/{commitment_hex}")
@@ -5842,6 +5958,14 @@ def cmd_report(args):
     print()
     for line in timeline_lines(entries, breaks, warns):
         print(line)
+    # Printed here and not in the timeline: explain hands the timeline to
+    # a model as the observed agent's words, and this line is the tool's.
+    if any(entry is not None and split_suffix(entry.get("action"))[1]
+           for entry in entries):
+        print()
+        print(f"a line ending {FOLDED_MARK} is listed without its last "
+              "group, the call's id and input hash; the chain holds the "
+              "line whole")
     if breaks:
         print()
         print("chain integrity: BROKEN — this timeline is testimony only "
@@ -6227,12 +6351,19 @@ def split_suffix(action):
     return action[:at], fields
 
 
+# Ends every line a listing shows without its suffix. Nothing in an
+# entry the writer cannot set tells a hook's receipt from a line logged
+# by hand, the actor included, so every folded line is marked (#619).
+FOLDED_MARK = "[...]"
+
+
 def listed_action(action):
-    """An action line as a listing shows it, without its suffix: the
-    suffix is for a reader that checks, and a listing for a person
-    scanning (ADR-0047). A whole line is in the chain, in `show` and in
-    every JSON output."""
-    return split_suffix(action)[0]
+    """An action line as a listing shows it, its suffix folded to
+    `FOLDED_MARK`: the suffix is for a reader that checks, and a listing
+    for a person scanning (ADR-0047). A whole line is in the chain, in
+    `show` and in every JSON output."""
+    head, fields = split_suffix(action)
+    return head if fields is None else f"{head} {FOLDED_MARK}"
 
 
 def main_repo_root(project):
@@ -6495,8 +6626,9 @@ def cmd_hook(args):
             publish_head(log, args.publish, session, timeout=bound,
                          window=window)
         if args.publish_chain:
-            # The entries after the cursor (ADR-0031 ruling 3); what
-            # does not fit the window is the keeper's.
+            # From the chain's last entry, and on from the remote's
+            # answer (ADR-0045 ruling 4); what does not fit the window
+            # is the keeper's.
             session_end_publish_chain(log, args.publish_chain, session,
                                       timeout=bound, window=window)
         if args.stamp:
@@ -8855,7 +8987,10 @@ def main(argv=None):
     anchor_parser.add_argument("--calendar", action="append", default=[],
                                metavar="URL",
                                help="calendar server (repeatable; default: "
-                                    "public OpenTimestamps pools)")
+                                    "public OpenTimestamps pools); with "
+                                    "--upgrade, a calendar a pending row "
+                                    "may name and be asked, beside those "
+                                    "pools, which are always asked (#415)")
     anchor_parser.add_argument("--upgrade", action="store_true",
                                help="complete pending proofs once Bitcoin has them")
     anchor_parser.add_argument("--manifest", default=None, metavar="PATH",
@@ -9042,10 +9177,11 @@ def main(argv=None):
              "name, or action line leaves")
     install_parser.add_argument(
         "--publish-chain", default=None, metavar="URL", type=publish_url,
-        help="opt in: every session end POSTs the chain's entries since "
-             "the last acknowledged one to this URL, after the head and "
-             "before the stamp and the anchor, quietly and best-effort "
-             "(ADR-0031). Pick a remote that can only add, never delete, "
+        help="opt in: each entry is POSTed to this URL as it is written, "
+             "within a second, and every session end sends what the "
+             "remote does not hold, after the head and before the stamp "
+             "and the anchor, quietly and best-effort (ADR-0031, "
+             "ADR-0045). Pick a remote that can only add, never delete, "
              "such as the receiver (docs/RECEIVER.md). Every entry "
              "leaves: action lines are command lines, and the installer "
              "says so")

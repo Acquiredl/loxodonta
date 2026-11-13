@@ -13,6 +13,36 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 ### Changed
 
 - `docs/CLAIMS.md` names a limit ADR-0047's measured run found: where a `PreToolUse` hook rewrites a call's input, the receipt holds the input as the model sent it, not what ran.
+- `docs/CLAIMS.md` names two more limits: a listing drops any group shaped like a receipt's suffix, hand-written or not, and pairing by call id does not compare the receipt's tool with the call's.
+- `docs/CLAIMS.md` says the holder of the receiver's URL can add receipts as well as events: a hand-written receipt carrying a missing call's id pays that call at the receiver.
+- At the receiver, a receipt first seen more than `SUPERVISOR_LATE_RECEIPT_SECONDS` (one hour) after a settled look named its call missing pays nothing: the session keeps its finding until acknowledged, and the row says why (#620).
+- At the receiver, a chain copy carrying the hook's `second-record-cut:` note is never counted as before the second record's memory, whatever dates its entries carry: it reads `SECOND-RECORD-ABSENT` and raises (#486).
+- `anchor --upgrade` asks only the default calendars and each `--calendar` given; a row naming another address is named, skipped and never asked, so upgrading a handed sidecar sends nothing where its issuer chose. The keeper passes its `--calendar` (#415).
+- `supervisor serve` with no keeper cadence looks on a clock of its own, every `SUPERVISOR_WATCH_TICK_SECONDS` (ten minutes; 0 turns it off), `--receiver` included, and a live alarm such a look finds goes in the day book (#281).
+
+### Fixed
+
+- `scan --receiver` and `serve --receiver` refuse a keeper's flag (`--anchor-every`, `--calendar`, `--publish-every`, `--publish-url`, `--publish-chain`) by name, exit 64: `scan` took and ignored them, and `serve` answered with the keeper's own rule about URLs (#487).
+- At the receiver, an acknowledged session whose events hold a call naming no tool stays acknowledged: its counts were compared before the memory's JSON had turned the missing name into `"null"`, so they never matched (ADR-0046).
+- The help of `install-hook --publish-chain` and of the supervisor's `--publish-chain` says what ADR-0045 built: each entry leaves as it is written, and a send carries what the remote does not hold.
+- A row appended to a sidecar whose last line is torn starts on a line of its own: it was glued onto the torn line, and both were unreadable. The torn line stays as it lies (#610).
+- `docs/TOUR.md` says where the hook puts a chain today: the store's drawer for the project, read from `CLAUDE_PROJECT_DIR` or the payload's `cwd`, and fingerprints files under the project, not the log's folder (#611).
+- The dashboard's verdict strip names every condition one look found, the worst first: a broken chain no longer hides a finding at the receiver no one has accepted, nor a live alarm a broken chain (#612).
+- The recorder notice hashes the recorder against its committed blob, so an edit `git status` hides (assume-unchanged, skip-worktree, ignored and never committed) reads as uncommitted changes; autocrlf line endings do not (#621).
+- The recorder notice reads the checkout's commits as made, never through `git replace`: a replaced HEAD whose tree holds an edited recorder no longer reads as clean (#621).
+- A listing marks `[...]` each line it shows without its receipt suffix and says once what that means: a hand-written line ending in a group of that shape lost it silently, and no entry tells it from a hook's receipt (#619).
+- The dashboard no longer says "every receipt accounted for" while a session is short of receipts: the quiet strip names findings accepted at the receiver, deficits kept as evidence and sessions behind inside the grace window, with their counts (#613).
+- An uncaught exception in the supervisor exits 70 with its traceback, as in the recorder, never 1, which `supervisor verify` and the scan's ladder say for `BROKEN`; a reader that hangs up on it gets a quiet 141 (#449).
+- The receiver refuses a `RECEIVER_DEADLINE_SECONDS` or `RECEIVER_TIMEOUT_SECONDS` it cannot use by name, exit 64, before it starts: it died at import with a traceback. A crash in it exits 70, never 1 (#589).
+- A number of seconds the supervisor or the receiver waits on, such as `SUPERVISOR_KEEPER_TICK_SECONDS=1e10`, is refused by name with 64 when no wait can take it: the keeper's first turn raised `OverflowError` (#589).
+- `supervisor serve` says nothing on its log when a client leaves before its reply is read: the request's thread printed a traceback there (#589).
+- At the receiver, a receipt pays a call only when it names the tool the event names for that id: one naming another tool pays nothing, and the row, dashboard included, names the id and both tools (#620).
+- At the receiver, a second receipt carrying a call id already paid, as a failed call's two hooks leave, is no longer surplus: the row counts it apart, and it pays no second call under the count by tool (#476).
+- At the receiver, one event posted for a session whose events name no completed call no longer turns its receipts into a surplus, exit 0: the session reads `SECOND-RECORD-ABSENT` and raises, and the row says why (#620).
+- A transcript holding lines, not one of them readable, reads `UNWITNESSED` naming the file and why, as one that cannot be opened does: it counted as a session that ran no tools, so a live alarm read `QUIET` (#473).
+- The scan no longer says the remote "has never taken" a send it took: where the memo shows earlier sends taken and the newest failed, the publishing note says the remote missed the newest (#614).
+- A reading over a receiver's folder no longer labels its memory, day book, saved views or acceptances writer-reachable: they are kept at the receiver, out of the writer's reach if the receiver is. The agent's machine keeps its labels (#615).
+- The help of `scan --receiver` no longer says every session short of receipts raises the exit until acknowledged: a settled one stands until accepted, and one still arriving with a call overdue until the receipts arrive or it settles (#617).
 
 ## [0.20.0] - 2026-11-12
 
