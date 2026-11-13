@@ -7536,12 +7536,12 @@ COPIED = ("loxodonta.py", "supervisor.py")
 # github.com/api0cradle/UltimateAppLockerByPassList,
 # Generic-AppLockerbypasses.md. That list names a folder inside Tasks;
 # Tasks itself gives Authenticated Users write in its own access list.
-# LogFiles\WMI was proposed and is left out: that list does not name
-# it, and its access list gives write to Performance Log Users alone.
+# LogFiles\WMI is not on that list: its access list gives full control
+# to Performance Log Users, a group an ordinary account can be in.
 WRITABLE_IN_SYSTEM32 = ("Tasks", "Tasks_Migrated", "spool\\drivers\\color",
                         "spool\\PRINTERS", "spool\\SERVERS",
                         "Microsoft\\Crypto\\RSA\\MachineKeys", "com\\dmp",
-                        "FxsTmp")
+                        "FxsTmp", "LogFiles\\WMI")
 # The kernel follows at most this many links in one path (Linux's
 # MAXSYMLINKS), and the check follows no more (#576).
 LINK_HOPS = 40
@@ -7683,8 +7683,8 @@ def long_spelling(path):
     """`path` with each 8.3 short name in the part of it that exists
     spelled in full (GetLongPathNameW), which follows no link or
     junction, so the path as written stays the path as written. As it
-    was when anything goes wrong."""
-    import ctypes  # Windows alone calls this
+    was when anything goes wrong, ctypes missing included: the path
+    resolved is checked beside it."""
     standing, rest = path, ""
     while not os.path.lexists(standing):
         parent = os.path.dirname(standing)
@@ -7693,12 +7693,13 @@ def long_spelling(path):
         rest = os.path.join(os.path.basename(standing), rest)
         standing = parent
     try:
+        import ctypes  # Windows alone calls this
         size = ctypes.windll.kernel32.GetLongPathNameW(standing, None, 0)
         buffer = ctypes.create_unicode_buffer(size)
         if not size or not ctypes.windll.kernel32.GetLongPathNameW(
                 standing, buffer, size):
             return path
-    except (AttributeError, OSError, ValueError):
+    except (AttributeError, ImportError, OSError, ValueError):
         return path
     return os.path.join(buffer.value, rest) if rest else buffer.value
 
@@ -7747,12 +7748,18 @@ def in_reach(path):
     network spelling (\\\\?\\, \\\\.\\, \\??\\, \\\\localhost\\C$\\) is
     under no place and fails: the loud side, since spelled back it could
     name a folder any account may make at a drive's root (C:\\Program
-    Files. under \\\\?\\ is not C:\\Program Files)."""
+    Files. under \\\\?\\ is not C:\\Program Files). A colon after the
+    drive names a stream (Tasks:python.exe) or a device, never a folder
+    of its own, and fails, as stand_in fails it (#638 review)."""
     if sys.platform != "win32":
         return walk_path(path)[0]
+    written = os.path.abspath(path)
+    if ":" in ntpath.splitdrive(written)[1]:
+        return ("it holds a colon after its drive, which names a stream or "
+                "a device and never a folder of its own")
     places, windows = windows_places()
     real = os.path.realpath(path)
-    for place, it in ((long_spelling(os.path.abspath(path)), "it"),
+    for place, it in ((long_spelling(written), "it"),
                       (real, f"it resolves to {real}, which")):
         why = by_place(place, places, windows)
         if why:
@@ -8011,7 +8018,8 @@ def write_copy(plan, folder, judged=True):
             if data != old or os.path.islink(target):
                 why = judged and in_reach(folder)
                 refusal = why and folder_refused(folder, why)
-                why = judged and not refusal and os.path.lexists(target)                     and in_reach(target)
+                why = (judged and not refusal and os.path.lexists(target)
+                       and in_reach(target))
                 refusal = refusal or (why and copy_refused(target, why))
                 if refusal:
                     put_copy_back(written)
