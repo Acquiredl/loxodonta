@@ -7239,6 +7239,18 @@ def digest_command(payload=False, folder=None, managed=False):
     return command + (" --payload" if payload else "")
 
 
+def next_step(folder=None):
+    """The line an install ends its restart word with (#147): the
+    README's next step, `supervisor.py scan`, spelled as the digest's
+    command is. Printed, never asked: the installer reads no stdin."""
+    python = sys.executable.replace(os.sep, "/")
+    script = (os.path.join(folder, "supervisor.py") if folder
+              else supervisor_path())
+    return (f'next: after a session, run "{python}" -I '
+            f'"{script.replace(os.sep, "/")}" scan for every session so '
+            "far, one verdict each.")
+
+
 def same_path(one, other):
     """Whether two script paths, as commands spell them, name one file
     by their spelling: `~` expanded, either separator, and case on a
@@ -8584,6 +8596,8 @@ def cmd_install_hook(args):
     print("every NEW Claude Code session on this machine now leaves a chain")
     print(f"in the store ({os.path.join(store_home(), 'receipts')}), one")
     print("drawer per project. Restart open sessions.")
+    if os.path.isfile(supervisor_path()):
+        print(next_step())
     if tier:
         print(tier)
     return 0
@@ -8803,6 +8817,9 @@ def install_managed_hooks(args):
     elif changed or pinned:
         print("Restart open sessions and a running `supervisor serve`: "
               "managed settings load at start.")
+    if (both or removed or changed or pinned) and any(
+            os.path.basename(copy[0]) == "supervisor.py" for copy in plan):
+        print(next_step(folder))
     tier = profile_notice(args.profile, wired)
     if tier:
         print(tier)

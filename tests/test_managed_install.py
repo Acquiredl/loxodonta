@@ -400,6 +400,28 @@ class ManagedInstallTest(ManagedBase):
         self.assertIn("uninstall-hook --managed", done.stderr)
         self.assertEqual(self.everything(), before)
 
+    def test_each_install_names_the_next_step_as_its_commands_spell_it(self):
+        # #147: the README's next step, `supervisor.py scan`, after the
+        # restart line, naming the script the digest is wired to: the
+        # copy on a managed install, the file beside it on a plain one.
+        for flags, wired in (((), self.operator_file),
+                             (("--managed",), self.managed_file)):
+            with self.subTest(flags=flags):
+                done = self.install(*flags)
+
+                digest, = self.commands(self.read(wired), "SessionStart")
+                scan = digest.replace(" --managed", "").replace(
+                    "supervisor.py\" digest", "supervisor.py\" scan")
+                lines = done.stdout.splitlines()
+                said = [line for line in lines if line.startswith("next:")]
+                self.assertEqual(said, [
+                    f"next: after a session, run {scan} for every session "
+                    "so far, one verdict each."], done.stdout)
+                restart = max(n for n, line in enumerate(lines)
+                              if "Restart open" in line or "open sessions"
+                              in line)
+                self.assertGreater(lines.index(said[0]), restart)
+
     def test_a_plain_install_for_codex_is_another_harness_and_goes_ahead(self):
         self.install("--managed")
 
