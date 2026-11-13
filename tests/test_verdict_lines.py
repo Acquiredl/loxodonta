@@ -106,14 +106,16 @@ class AnchorRowLineTest(Case):
 
     def test_5_a_pending_row_with_no_time_says_so(self):
         self.assertIn("ANCHOR-PENDING: head fab3462eec00… submitted at an "
-                      "unrecorded time via https://calendar.example/ — run "
+                      "unrecorded time via https://calendar.example/ — on the "
+                      "machine that holds the chain, the operator can run "
                       "`loxodonta anchor --upgrade`", self.out)
 
     def test_6_a_pending_row_with_no_calendar_says_upgrade_cannot_help(self):
         self.assertIn("ANCHOR-PENDING: head fab3462eec00… submitted "
                       "2026-09-23T12:05:00Z via no recorded calendar — "
                       "`loxodonta anchor --upgrade` cannot complete it; "
-                      "`loxodonta anchor --force` submits the head again",
+                      "on the machine that holds the chain, the operator can "
+                      "run `loxodonta anchor --force` to submit the head again",
                       self.out)
 
     def test_no_line_prints_none(self):
@@ -251,7 +253,8 @@ class PackageLineTest(Case):
                                     "--anchors", exit_code=0)
 
         self.assertIn("NO-ANCHORS: receipts.jsonl.anchors.jsonl not found — "
-                      "anchoring is optional; run `loxodonta anchor` to add "
+                      "anchoring is optional; on the machine that holds the "
+                      "chain, the operator can run `loxodonta anchor` to add "
                       "one", out)
 
     def test_14_a_refused_manifest_names_the_one_reason(self):

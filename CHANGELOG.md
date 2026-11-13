@@ -23,6 +23,8 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - At the receiver, a chain copy carrying the hook's `second-record-cut:` note is never counted as before the second record's memory, whatever dates its entries carry: it reads `SECOND-RECORD-ABSENT` and raises (#486).
 - `anchor --upgrade` asks only the default calendars and each `--calendar` given; a row naming another address is named, skipped and never asked, so upgrading a handed sidecar sends nothing where its issuer chose. The keeper passes its `--calendar` (#415).
 - `supervisor serve` with no keeper cadence looks on a clock of its own, every `SUPERVISOR_WATCH_TICK_SECONDS` (ten minutes; 0 turns it off), `--receiver` included, and a live alarm such a look finds goes in the day book (#281).
+- `docs/SPEC.md` v0.1.7 states `head`'s rule: a final line whose `n` is not an integer equal to its line number (`3.0` or `true`), or whose `entry_hash` is not 64 lowercase hex, has no head; no writer appends after it (#587).
+- Each vector names the SPEC revision it was written against, `since`; the frozen clean-room verifier runs only the rows of the spec it was written from (#587).
 
 ### Fixed
 
@@ -50,6 +52,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - The scan no longer says the remote "has never taken" a send it took: where the memo shows earlier sends taken and the newest failed, the publishing note says the remote missed the newest (#614).
 - A reading over a receiver's folder no longer labels its memory, day book, saved views or acceptances writer-reachable: they are kept at the receiver, out of the writer's reach if the receiver is. The agent's machine keeps its labels (#615).
 - The help of `scan --receiver` no longer says every session short of receipts raises the exit until acknowledged: a settled one stands until accepted, and one still arriving with a call overdue until the receipts arrive or it settles (#617).
+- `verify` on a chain whose only line is torn says `no entry intact`, where it printed `entries 0..-1 intact`. The verdict and the exit are unchanged (#589).
+- A project record that is an object naming no string `path` (`{}`, `{"path": 5}`) cannot be read as a project record, `it names no project path`, where it read as a missing project named `(None)` or `(5)` (#589).
+- `verify` prints the `--transcript` path and the `--authority-chain` file with control characters escaped, in `TRANSCRIPT-UNRESOLVED`, `STAMPED` and the not-found note, where they printed raw (#589).
+- A line advising a recorder verb says whose step it is, the operator's or the recorder holder's, since `verifier.py` prints it too; `head` sends the reader to `verify`. A package's README says why it runs `python -I` (#588).
 
 ## [0.20.0] - 2026-11-12
 

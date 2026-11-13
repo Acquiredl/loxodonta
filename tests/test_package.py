@@ -752,6 +752,9 @@ class DemoStorePackageTest(PackageCase):
         self.assertIn("    python -I verifier.py verify-package "
                       "<this package>\n", readme)
         self.assertNotIn("loxodonta.py verify-package", readme)
+        # #588: and the page says why, so the flag is not dropped as noise.
+        self.assertIn("with `-I` so that a module dropped beside the verifier "
+                      "cannot shadow the standard library:", readme)
 
     def test_readme_never_holds_the_manifest_hash_and_manifest_is_last(self):
         folder = self.folder_package()
