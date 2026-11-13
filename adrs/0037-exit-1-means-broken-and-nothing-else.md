@@ -193,3 +193,42 @@ with its own readers.
   same day.
 - docs/HOOK.md (what a harness does with a hook's exit).
 - Discussion: the rulings on #299, 2026-09-23, item 2.
+
+## Addendum, 2026-11-12: the exits added since, and two endings the supervisor and the receiver now share
+
+*Drafted for the author to confirm (#454, #466).* The verbs' list
+above has fallen behind, as *Consequences* said it would have to be
+kept up:
+
+- **`install-hook --managed`** (ADR-0040, ADR-0042): 73 when the
+  system refuses a write of the copy, the managed file or the pin, when
+  a folder stands at the managed file's name, or at `full` when a file
+  that is not the installer's pin stands at the pin's name; 73 when the
+  operator's file cannot be rewritten after the managed file is
+  written, which leaves the hook wired in both, or 66 when that file can
+  no longer be read for its backup; 66 when the recorder it would copy
+  cannot be read; 64 when the interpreter, the copy's folder or a file at a copy's name
+  fails ADR-0042's check of reach, before anything is written or again
+  at the write (#574), and when `LOXODONTA_MANAGED_DIR` is shown to
+  name another folder and `LOXODONTA_PROGRAM_DIR` is not.
+- **`install-hook`**, plain: 73 while the managed file holds the
+  entries (ADR-0040 ruling 3).
+- **`uninstall-hook --managed`**: 73 when the system refuses a delete
+  of the managed file, the pin or the copy; 64 under the same rule on
+  the two variables.
+- **`supervisor drill`**: 66 for a chain it cannot read (#407), 73 for
+  a sandbox it cannot make afresh (#430). **`supervisor package`**: 73
+  for an `--out` it cannot create, one that already exists included
+  (#422).
+
+*Scope* still holds for the contracts: the supervisor's and the
+receiver's exits are their own. Since #449 (pull request #632) two
+endings are shared with the recorder, through the same `run_main`: a
+crash in the supervisor or the receiver exits 70 with its traceback,
+and a reader that hangs up on either gets a quiet 141. Exit 1 there is
+not `BROKEN` alone: the refusals of `drill`, `package`, `show` and
+`timeline`, and the receiver's "cannot write to", "cannot listen on"
+and TLS refusals, exit 1 by design and did not move. Under
+*Consequences*, "70 has no test through the command line" now holds
+for the recorder only: the supervisor's 70 and the receiver's are run
+through the command line by the suite.

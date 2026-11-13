@@ -270,3 +270,32 @@ file again on a run without the flag, saying so. A narrower matcher in
 the operator's file is named and not carried. Ruling 3 stands: the
 entries still leave the operator's file once the managed one is
 written.
+
+## Addendum, 2026-11-12: a readable URL, the marker under `sudo`, and two files at a name
+
+*Drafted for the author to confirm (#466, #486).* Three things this
+ADR left unsaid, recorded as built.
+
+- **The URL is readable by every account.** The managed file is
+  written readable by all, since every account's sessions run it, so a
+  URL given with `--remote`, `--publish-head` or `--publish-chain`
+  rides on its commands where any account can read it. The installer
+  says so after writing it (ADR-0025: a URL is where a remote's
+  credential rides). It is a consequence of the file being
+  machine-wide, under *Consequences* above.
+- **Ruling 6 under `sudo`.** Run as another account than the one that
+  owns the home, as a `sudo` that keeps `HOME` does, the installer
+  writes the managed file and nothing under that home: no coverage
+  marker, so the operator's marker gains no `level: "managed"` entry
+  and no new profile, and `serve`'s keeper follows the profile the
+  operator's own marker records. A file root wrote there would be
+  root's, not the operator's; the installer says no marker was
+  written.
+- **A foreign file at each name, on purpose.** A file at the hooks
+  file's name that is not the installer's is written over, while a
+  file at the pin's name that is not the installer's pin refuses a
+  `full` install with 73 and is left alone. The pin guards someone
+  else's telemetry setting; the hooks file guards nothing of anyone
+  else's, since the name is the recorder's own. A folder at the hooks
+  file's name is refused all the same, since no right moves a folder
+  (#487).

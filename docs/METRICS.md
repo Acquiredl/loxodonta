@@ -26,7 +26,7 @@ curl http://127.0.0.1:7717/metrics
 
 The response is `text/plain; version=0.0.4; charset=utf-8`, and every family on it is a gauge: the counts are the reading, and the trend over time is your time-series store's job, which is exactly where ADR-0013 declined to grow one.
 
-With no keeper cadence in force, `serve` also looks on a clock of its own every ten minutes, so the completeness watch and the baseline keep their time with no page open and no scrape (`SUPERVISOR_WATCH_TICK_SECONDS`; 0 turns that clock off).
+With no keeper cadence in force, `serve` also looks on a clock of its own every ten minutes, so the completeness watch and the baseline keep their time with no page open and no scrape (`SUPERVISOR_WATCH_TICK_SECONDS`; 0 turns that clock off). Each such look is a full walk of the store, and the next starts a full `SUPERVISOR_WATCH_TICK_SECONDS` after the last one ends, so a store that takes minutes to walk is looked at that much less often.
 
 ## 3. What is on the scrape
 
@@ -72,7 +72,7 @@ Each is the scan's own string, unchanged, and every one of them is on every scra
 
 Four notes on that table.
 
-- **The verdicts are the GLOSSARY's *States and transitions*, as the scan emits them, and the list is wider than the vocabulary.** The scan takes a chain's verdict from the gravest line `verify --anchors` printed, the one that set its exit, so a wait line is never what it reports, whatever order the anchor records are in. `ANCHOR-PENDING` and `ANCHOR-UNANSWERED` stay on the list at zero: earlier releases read the last line instead and could serve them, and a label value once served is never withdrawn.
+- **The verdicts are the GLOSSARY's *States and transitions*, as the scan emits them, and the list is wider than the vocabulary.** The scan takes a chain's verdict from the gravest line `verify --anchors` printed, the one that set its exit, so a wait line is never what it reports, whatever order the anchor records are in. `ANCHOR-PENDING` and `ANCHOR-UNANSWERED` stay on the list at zero: earlier releases read the last line instead and could serve them, and a label value once listed is never withdrawn.
 - **A torn tail a sibling continued is not in the `BROKEN` count.** `verify` calls it broken; the scan stands it down because another chain carried the recording on (ADR-0004), and it has a gauge of its own, so the broken count says what the dashboard's strip and the day book say.
 - **`BEFORE-MEMORY` is a counted block, not a run of rows.** A session older than the supervisor's first look takes no row anywhere (ADR-0029); the block's count is that label's value, so a store full of them reads as unjudged rather than as a clean bill.
 - **A session with no dormancy tier is in none of the three.** The tier comes from the completeness watch's pairing; a session it never paired has no tier, and the three lifecycle samples will not add up to the session count.
