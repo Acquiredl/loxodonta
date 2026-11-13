@@ -7637,7 +7637,7 @@ class ReceiverReadingTest(unittest.TestCase):
                          "ENDED-SURPLUS")
 
     # The supervisor is compiled before tracemalloc starts: compiling a
-    # file this long peaks at about 20 MiB, which would hide the reading's
+    # file this long peaks at tens of MiB, which would hide the reading's
     # own peak under it (#616).
     TRACED = (
         "import sys\n"
@@ -7672,7 +7672,7 @@ class ReceiverReadingTest(unittest.TestCase):
         # #616: a receiver's folder grows without a bound, and a scan that
         # read each events file whole held its largest day at once. Read
         # a line at a time, a 16 MiB file adds less than 4 MiB to the
-        # scan's traced peak; read whole, it added about 40 MiB.
+        # scan's traced peak; read whole, it added about 39 MiB.
         chain_copy(self.data, FIXTURE_SESSION)
         _, before = self.traced_scan()
         line = json.dumps({
@@ -7731,7 +7731,7 @@ class ReceiverReadingTest(unittest.TestCase):
             msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 4096)
         self.addCleanup(unlock)
 
-        report = json.loads(self.scan().stdout)
+        report = self.report(expect=0)
 
         watch = report["completeness"]
         self.assertIn("events-2026-10-08.jsonl", watch["note"])
@@ -7739,6 +7739,63 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertNotIn("partway-session-0000", self.rows(report))
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
+
+    def test_a_session_split_across_two_days_files_reads_as_one_file(self):
+        # #616: each events file is read on its own and folded into what
+        # the files before it gave, so a session whose events two days'
+        # files hold reads as the one file holding them all reads. The
+        # first file names no tool and holds a hole in the counter (21 to
+        # 42) that only the second file fills; the second holds every
+        # call and the newest arrival, which the row's `last_heard` shows
+        # with the copy dated before the events. One receipt for two
+        # calls: a tool the second file alone names, dropped, would hide
+        # the deficit.
+        lines = [json.loads(line) for line in (
+            self.data / f"events-{FIXTURE_DAY}.jsonl").read_text(
+                encoding="utf-8").splitlines()]
+        lines[5]["received"] = "2026-10-07T02:21:40.000000+00:00"
+        lines = [json.dumps(line) + "\n" for line in lines]
+        (self.data / f"events-{FIXTURE_DAY}.jsonl").write_text(
+            "".join(lines), encoding="utf-8")
+        copy = chain_copy(self.data, FIXTURE_SESSION,
+                          actions=FIXTURE_RECEIPTS[:1])
+        before = datetime.datetime(
+            2026, 10, 7, tzinfo=datetime.timezone.utc).timestamp()
+        os.utime(copy, (before, before))
+        whole = self.report(expect=6)
+        split = receiver_folder(self.base / "split", events=False)
+        shutil.copy2(copy, split / copy.name)
+        (split / "events-2026-10-07.jsonl").write_text(
+            lines[1] + lines[6], encoding="utf-8")
+        (split / "events-2026-10-08.jsonl").write_text(
+            "".join(lines[:1] + lines[2:6]), encoding="utf-8")
+
+        report = self.report(data=split, expect=6)
+
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row, self.rows(whole)[FIXTURE_SESSION])
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["by_tool"], {"Bash": {"owed": 2, "receipts": 1}})
+        self.assertEqual(row["last_heard"], "2026-10-07T02:21:40Z")
+        self.assertNotIn("gap", row)
+        self.assertEqual(report["completeness"]["last_heard"],
+                         whole["completeness"]["last_heard"])
+
+    def test_a_hole_below_old_events_is_overdue_with_a_newer_file_first(self):
+        # #616: the arrival time of each counter number folds across
+        # files too. The hole (29, 30) sits below events that arrived long
+        # ago, in the fixture's day; an event that arrived just now sits
+        # in an earlier day's file, read first. Still overdue.
+        chain_copy(self.data, FIXTURE_SESSION)
+        lay_events(self.data, drop=(29, 30))
+        post_event(self.data, 53, "api_request", received_ago(0),
+                   day="2026-10-06")
+
+        row = self.rows(self.report(settle="3600", expect=6))[
+            FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "PENDING-OVERDUE")
+        self.assertEqual(row["gap"], {"count": 2, "numbers": [29, 30]})
 
     def test_an_object_not_in_the_line_shape_is_counted_too(self):
         chain_copy(self.data, FIXTURE_SESSION)

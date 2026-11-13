@@ -4905,6 +4905,8 @@ def read_events_file(path):
             if not isinstance(session, str) or not session:
                 sessionless += 1
                 continue
+            # A key filled here is folded in fold_events, or a session
+            # two files name loses it (#616).
             seen = sessions.setdefault(session, {
                 "owed": [], "may_owe": {}, "witnessed": set(),
                 "latest": None, "first": None, "worded": 0,
