@@ -646,6 +646,17 @@ class HookTest(unittest.TestCase):
             (vault / "receipts-sess-1234abcd.jsonl").exists()
         )
 
+    def test_the_help_names_the_stores_drawer_as_the_default(self):
+        # The default moved to the store with ADR-0011; the help still
+        # named $CLAUDE_PROJECT_DIR/receipts.
+        said = " ".join(run(LOXODONTA, "hook", "--help", env=isolated_env(
+            temp_folder(self))).stdout.split())
+
+        self.assertNotIn("$CLAUDE_PROJECT_DIR/receipts", said)
+        self.assertIn("the store's drawer for the project in "
+                      "$CLAUDE_PROJECT_DIR, or in the payload's cwd when "
+                      "that is unset", said)
+
 
 class HookWorktreeTest(unittest.TestCase):
     """A session run in a git worktree must leave its chain in its main

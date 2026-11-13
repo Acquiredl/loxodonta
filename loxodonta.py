@@ -9086,8 +9086,10 @@ def main(argv=None):
         help="append one entry from a Claude Code PostToolUse payload on stdin")
     hook_parser.add_argument("--log-dir", default=None, metavar="DIR",
                              help="directory for per-session receipt logs "
-                                  "(default: $CLAUDE_PROJECT_DIR/receipts, "
-                                  "else the working directory)")
+                                  "(default: the store's drawer for the "
+                                  "project in $CLAUDE_PROJECT_DIR, or in "
+                                  "the payload's cwd when that is unset, "
+                                  "else the working directory; ADR-0011)")
     hook_parser.add_argument("--actor", default=CLAUDE_CODE_ACTOR,
                              help="actor recorded for hook entries")
     hook_parser.add_argument("--anchor", action="store_true",
