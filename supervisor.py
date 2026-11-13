@@ -4807,6 +4807,17 @@ def log_records(logs):
                 yield record
 
 
+def event_lines(f):
+    """`read_lines`' lines of the open binary file `f`, a line at a time,
+    and `f` closed at the end, so a scan never holds a receiver's day
+    whole (#616). A binary file's lines end only at `\\n`, so
+    `split_lines` finds one line in each."""
+    with f:
+        for raw in f:
+            for line in split_lines(raw):
+                yield line.decode("utf-8", "replace")
+
+
 def read_events(root, closed=None):
     """The second record a receiver holds, read as read_witness reads a
     transcript (ADR-0041 ruling 4): per session the same dict, so
@@ -4849,68 +4860,21 @@ def read_events(root, closed=None):
     days = [events_day(path) for path in files]  # held, readable or not
     for path in files:
         try:
-            lines = read_lines(path)
+            found, heard, skipped, nameless = read_events_file(path)
         except OSError as error:
             unread.append(f"{path.name} ({error.strerror or error})")
             continue
-        for line in lines:
-            try:
-                arrival = json.loads(line)
-            except (ValueError, RecursionError):
-                arrival = None
-            if not isinstance(arrival, dict) \
-                    or not isinstance(arrival.get("logs"), dict):
-                unparsed += 1
-                continue
-            received = arrival.get("received")
-            when = parse_when(received) if isinstance(received, str) else None
-            if when is not None and when.tzinfo is None:
-                when = when.replace(tzinfo=timezone.utc)
-            sender = arrival.get("from")
-            if when is not None and isinstance(sender, str):
-                heard = addresses.get(sender)
-                if heard is None or when > heard[0]:
-                    addresses[sender] = (when, received)
-            for record in log_records(arrival.get("logs")):
-                attributes = (event_attributes(record)
-                              if isinstance(record, dict) else {})
-                session = attributes.get("session.id")
-                if not isinstance(session, str) or not session:
-                    sessionless += 1
-                    continue
-                seen = sessions.setdefault(session, {
-                    "owed": [], "may_owe": {}, "witnessed": set(),
-                    "latest": None, "first": None, "worded": 0,
-                    "unworded": 0, "closed": [], "sequences": set(),
-                    "results": [], "arrived": {}})
-                if when is not None and (seen["latest"] is None
-                                         or when > seen["latest"]):
-                    seen["latest"] = when
-                sequence = attributes.get("event.sequence")
-                if isinstance(sequence, int) \
-                        and not isinstance(sequence, bool):
-                    seen["sequences"].add(sequence)
-                    if when is not None and (
-                            sequence not in seen["arrived"]
-                            or when < seen["arrived"][sequence]):
-                        seen["arrived"][sequence] = when
-                name = attributes.get("event.name")
-                tool = attributes.get("tool_name")
-                tool = tool if isinstance(tool, str) else None
-                if name == TOOL_DECISION and tool is not None:
-                    seen["witnessed"].add(tool)
-                elif name == TOOL_RESULT:
-                    stamp = attributes.get("event.timestamp")
-                    stamp = stamp if isinstance(stamp, str) else None
-                    call = attributes.get("tool_use_id")
-                    seen["witnessed"].add(tool)
-                    seen["owed"].append((stamp, tool))
-                    seen["results"].append(
-                        (stamp, tool, call if is_call_id(call) else None,
-                         when))
-                    if stamp is not None and (seen["first"] is None
-                                              or stamp < seen["first"]):
-                        seen["first"] = stamp
+        unparsed += skipped
+        sessionless += nameless
+        for sender, (when, received) in heard.items():
+            known = addresses.get(sender)
+            if known is None or when > known[0]:
+                addresses[sender] = (when, received)
+        for session, seen in found.items():
+            if session in sessions:
+                fold_events(sessions[session], seen)
+            else:
+                sessions[session] = seen
     for seen in sessions.values():
         seen["owed"].sort(key=lambda call: call[0] or "")
         seen["results"].sort(key=lambda call: call[0] or "")
@@ -4919,6 +4883,98 @@ def read_events(root, closed=None):
                           for sender, (_, received) in addresses.items()},
             "days": days, "unparsed": unparsed,
             "sessionless": sessionless, "unread": unread}
+
+
+def read_events_file(path):
+    """One events file's share of `read_events`: its sessions, the newest
+    `received` per sending address, and its unparsed and sessionless
+    counts. Raises OSError when the file cannot be opened or cannot be
+    read to its end, so a file whose read stops part-way counts for
+    nothing, as one that cannot be opened (#616)."""
+    sessions = {}
+    addresses = {}
+    unparsed = 0
+    sessionless = 0
+    for line in event_lines(open_regular(path)):
+        try:
+            arrival = json.loads(line)
+        except (ValueError, RecursionError):
+            arrival = None
+        if not isinstance(arrival, dict) \
+                or not isinstance(arrival.get("logs"), dict):
+            unparsed += 1
+            continue
+        received = arrival.get("received")
+        when = parse_when(received) if isinstance(received, str) else None
+        if when is not None and when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        sender = arrival.get("from")
+        if when is not None and isinstance(sender, str):
+            heard = addresses.get(sender)
+            if heard is None or when > heard[0]:
+                addresses[sender] = (when, received)
+        for record in log_records(arrival.get("logs")):
+            attributes = (event_attributes(record)
+                          if isinstance(record, dict) else {})
+            session = attributes.get("session.id")
+            if not isinstance(session, str) or not session:
+                sessionless += 1
+                continue
+            # A key filled here is folded in fold_events, or a session
+            # two files name loses it (#616).
+            seen = sessions.setdefault(session, {
+                "owed": [], "may_owe": {}, "witnessed": set(),
+                "latest": None, "first": None, "worded": 0,
+                "unworded": 0, "closed": [], "sequences": set(),
+                "results": [], "arrived": {}})
+            if when is not None and (seen["latest"] is None
+                                     or when > seen["latest"]):
+                seen["latest"] = when
+            sequence = attributes.get("event.sequence")
+            if isinstance(sequence, int) \
+                    and not isinstance(sequence, bool):
+                seen["sequences"].add(sequence)
+                if when is not None and (
+                        sequence not in seen["arrived"]
+                        or when < seen["arrived"][sequence]):
+                    seen["arrived"][sequence] = when
+            name = attributes.get("event.name")
+            tool = attributes.get("tool_name")
+            tool = tool if isinstance(tool, str) else None
+            if name == TOOL_DECISION and tool is not None:
+                seen["witnessed"].add(tool)
+            elif name == TOOL_RESULT:
+                stamp = attributes.get("event.timestamp")
+                stamp = stamp if isinstance(stamp, str) else None
+                call = attributes.get("tool_use_id")
+                seen["witnessed"].add(tool)
+                seen["owed"].append((stamp, tool))
+                seen["results"].append(
+                    (stamp, tool, call if is_call_id(call) else None,
+                     when))
+                if stamp is not None and (seen["first"] is None
+                                          or stamp < seen["first"]):
+                    seen["first"] = stamp
+    return sessions, addresses, unparsed, sessionless
+
+
+def fold_events(into, seen):
+    """`seen`, one file's reading of a session, folded into `into`, the
+    files' before it, as one reading of both files would leave it: an
+    earlier file's value kept on a tie. `may_owe`, `worded`, `unworded`
+    and `closed` are not folded: `read_events_file` never fills them."""
+    into["owed"] += seen["owed"]
+    into["results"] += seen["results"]
+    into["witnessed"] |= seen["witnessed"]
+    into["sequences"] |= seen["sequences"]
+    for key, pick in (("latest", max), ("first", min)):
+        if seen[key] is not None:
+            into[key] = (seen[key] if into[key] is None
+                         else pick(into[key], seen[key]))
+    for sequence, when in seen["arrived"].items():
+        if sequence not in into["arrived"] \
+                or when < into["arrived"][sequence]:
+            into["arrived"][sequence] = when
 
 
 def missing_numbers(sequences):

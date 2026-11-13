@@ -7644,6 +7644,196 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
                          "ENDED-SURPLUS")
 
+    def test_two_thousand_lines_and_every_ending_read_as_one_rule_says(self):
+        # #616: read a line at a time, an events file keeps the one rule
+        # every reader keeps (SPEC §1): a CRLF ending belongs to the
+        # ending, the torn tail a crash leaves is still a line, and a byte
+        # that is not UTF-8 is one unparsed line, not a broken scan.
+        chain_copy(self.data, FIXTURE_SESSION)
+        bulk = json.dumps({
+            "received": "2026-10-08T00:00:00Z", "from": "127.0.0.1",
+            "logs": {"resourceLogs": [{"scopeLogs": [{"logRecords": [
+                {"attributes": [{"key": "event.name",
+                                 "value": {"stringValue":
+                                           "tool_decision"}}]}]}]}]}})
+        path = self.data / "events-2026-10-08.jsonl"
+        with open(path, "wb") as events:
+            line = bulk.encode() + b"\n"
+            events.write(line * 2000)
+            events.write(bulk.encode() + b"\r\n")
+            events.write(b"\r\n")
+            events.write(b"\xff not json\n")
+            events.write(bulk.encode())
+
+        report = self.report()
+
+        second = report["completeness"]["second_record"]
+        self.assertEqual((second["unparsed"], second["sessionless"]),
+                         (2, 2002))
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    # The supervisor is compiled before tracemalloc starts: compiling a
+    # file this long peaks at tens of MiB, which would hide the reading's
+    # own peak under it (#616).
+    TRACED = (
+        "import sys\n"
+        "import tracemalloc\n"
+        "path = sys.argv[1]\n"
+        "with open(path, 'rb') as f:\n"
+        "    code = compile(f.read(), path, 'exec')\n"
+        "sys.argv = sys.argv[1:]\n"
+        "tracemalloc.start()\n"
+        "try:\n"
+        "    exec(code, {'__name__': '__main__', '__file__': path})\n"
+        "finally:\n"
+        "    sys.stderr.write('traced peak %d\\n'\n"
+        "                     % tracemalloc.get_traced_memory()[1])\n")
+
+    def traced_scan(self):
+        """The report of one settled `scan --receiver`, and the most
+        memory the scan held at once, as tracemalloc counts it."""
+        script = temp_folder(self) / "traced.py"
+        script.write_text(self.TRACED, encoding="utf-8")
+        result = run(script, SUPERVISOR, "scan", "--receiver",
+                     str(self.data), "--json", timeout=300,
+                     env={**self.env, "SUPERVISOR_SETTLE_SECONDS": "0"})
+        self.assertNotIn("Traceback", result.stderr, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        peak = re.fullmatch(r"traced peak (\d+)",
+                            result.stderr.splitlines()[-1])
+        self.assertIsNotNone(peak, result.stderr)
+        return json.loads(result.stdout), int(peak.group(1))
+
+    def test_a_large_events_file_is_never_held_whole(self):
+        # #616: a receiver's folder grows without a bound, and a scan that
+        # read each events file whole held its largest day at once. Read
+        # a line at a time, a 16 MiB file adds less than 4 MiB to the
+        # scan's traced peak; read whole, it added about 39 MiB.
+        chain_copy(self.data, FIXTURE_SESSION)
+        _, before = self.traced_scan()
+        line = json.dumps({
+            "received": "2026-10-08T00:00:00Z", "from": "127.0.0.1",
+            "logs": {"resourceLogs": [{"scopeLogs": [{"logRecords": [
+                {"attributes": [{"key": "event.name",
+                                 "value": {"stringValue":
+                                           "tool_decision"}}]}]}]}]}},
+            separators=(",", ":")).encode() + b"\n"
+        count = (16 << 20) // len(line)
+        with open(self.data / "events-2026-10-08.jsonl", "wb") as events:
+            events.write(line * count)
+
+        report, after = self.traced_scan()
+
+        self.assertEqual(
+            report["completeness"]["second_record"]["sessionless"], count)
+        self.assertLess(after - before, 4 << 20,
+                        f"a 16 MiB events file added {after - before} bytes "
+                        f"to the traced peak ({before} without it)")
+
+    @unittest.skipUnless(sys.platform == "win32",
+                         "a byte-range lock that fails a read is Windows' "
+                         "(msvcrt.locking); a POSIX lock is advisory")
+    def test_a_file_whose_read_stops_part_way_counts_for_nothing(self):
+        # #616: read a line at a time, a file can fail after some of its
+        # lines were read. It is named unread and counts for nothing, as
+        # a file that cannot be opened does and as the whole read did, so
+        # a session only its first lines name is not judged on them.
+        import msvcrt
+        chain_copy(self.data, FIXTURE_SESSION)
+        line = json.dumps({
+            "received": "2026-10-08T00:00:00Z", "from": "127.0.0.1",
+            "logs": {"resourceLogs": [{"scopeLogs": [{"logRecords": [
+                {"attributes": [
+                    {"key": "session.id",
+                     "value": {"stringValue": "partway-session-0000"}},
+                    {"key": "event.name",
+                     "value": {"stringValue": "tool_result"}},
+                    {"key": "tool_name",
+                     "value": {"stringValue": "Bash"}}]}]}]}]}},
+            separators=(",", ":")).encode() + b"\n"
+        path = self.data / "events-2026-10-08.jsonl"
+        with open(path, "wb") as events:
+            events.write(line * ((1 << 20) // len(line)))
+        # Locked by this process from 512 KiB on, the file opens in the
+        # scan and its first lines read; the read that reaches the lock
+        # fails.
+        held = open(path, "rb")
+        self.addCleanup(held.close)
+        held.seek(512 << 10)
+        msvcrt.locking(held.fileno(), msvcrt.LK_NBLCK, 4096)
+
+        def unlock():
+            held.seek(512 << 10)
+            msvcrt.locking(held.fileno(), msvcrt.LK_UNLCK, 4096)
+        self.addCleanup(unlock)
+
+        report = self.report(expect=0)
+
+        watch = report["completeness"]
+        self.assertIn("events-2026-10-08.jsonl", watch["note"])
+        self.assertIn("nothing of them is counted", watch["note"])
+        self.assertNotIn("partway-session-0000", self.rows(report))
+        self.assertEqual(self.rows(report)[FIXTURE_SESSION]["state"],
+                         "ENDED-SURPLUS")
+
+    def test_a_session_split_across_two_days_files_reads_as_one_file(self):
+        # #616: each events file is read on its own and folded into what
+        # the files before it gave, so a session whose events two days'
+        # files hold reads as the one file holding them all reads. The
+        # first file names no tool and holds a hole in the counter (21 to
+        # 42) that only the second file fills; the second holds every
+        # call and the newest arrival, which the row's `last_heard` shows
+        # with the copy dated before the events. One receipt for two
+        # calls: a tool the second file alone names, dropped, would hide
+        # the deficit.
+        lines = [json.loads(line) for line in (
+            self.data / f"events-{FIXTURE_DAY}.jsonl").read_text(
+                encoding="utf-8").splitlines()]
+        lines[5]["received"] = "2026-10-07T02:21:40.000000+00:00"
+        lines = [json.dumps(line) + "\n" for line in lines]
+        (self.data / f"events-{FIXTURE_DAY}.jsonl").write_text(
+            "".join(lines), encoding="utf-8")
+        copy = chain_copy(self.data, FIXTURE_SESSION,
+                          actions=FIXTURE_RECEIPTS[:1])
+        before = datetime.datetime(
+            2026, 10, 7, tzinfo=datetime.timezone.utc).timestamp()
+        os.utime(copy, (before, before))
+        whole = self.report(expect=6)
+        split = receiver_folder(self.base / "split", events=False)
+        shutil.copy2(copy, split / copy.name)
+        (split / "events-2026-10-07.jsonl").write_text(
+            lines[1] + lines[6], encoding="utf-8")
+        (split / "events-2026-10-08.jsonl").write_text(
+            "".join(lines[:1] + lines[2:6]), encoding="utf-8")
+
+        report = self.report(data=split, expect=6)
+
+        row = self.rows(report)[FIXTURE_SESSION]
+        self.assertEqual(row, self.rows(whole)[FIXTURE_SESSION])
+        self.assertEqual(row["state"], "ENDED-DEFICIT")
+        self.assertEqual(row["by_tool"], {"Bash": {"owed": 2, "receipts": 1}})
+        self.assertEqual(row["last_heard"], "2026-10-07T02:21:40Z")
+        self.assertNotIn("gap", row)
+        self.assertEqual(report["completeness"]["last_heard"],
+                         whole["completeness"]["last_heard"])
+
+    def test_a_hole_below_old_events_is_overdue_with_a_newer_file_first(self):
+        # #616: the arrival time of each counter number folds across
+        # files too. The hole (29, 30) sits below events that arrived long
+        # ago, in the fixture's day; an event that arrived just now sits
+        # in an earlier day's file, read first. Still overdue.
+        chain_copy(self.data, FIXTURE_SESSION)
+        lay_events(self.data, drop=(29, 30))
+        post_event(self.data, 53, "api_request", received_ago(0),
+                   day="2026-10-06")
+
+        row = self.rows(self.report(settle="3600", expect=6))[
+            FIXTURE_SESSION]
+
+        self.assertEqual(row["state"], "PENDING-OVERDUE")
+        self.assertEqual(row["gap"], {"count": 2, "numbers": [29, 30]})
+
     def test_an_object_not_in_the_line_shape_is_counted_too(self):
         chain_copy(self.data, FIXTURE_SESSION)
         with open(self.data / f"events-{FIXTURE_DAY}.jsonl", "a",
