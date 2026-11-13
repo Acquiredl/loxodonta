@@ -9,6 +9,7 @@ while fixing one thing — dies on an import error before a test ever runs.
 That test imports every `tests/test_*.py` the way that loop does, as
 `tests.<name>` from the repo root, each in its own subprocess so a broken
 module names itself instead of taking the parent interpreter with it.
+And every module runs in exactly one of CI's shards (#453).
 
 The home guard is armed and says where a start came from (#242). The
 guard itself lives in tests/home_guard.py, which says what it covers;
@@ -108,6 +109,35 @@ class EveryModuleRunsAlone(unittest.TestCase):
                     "tests/%s.py does not import on its own — a contributor "
                     "cannot run `python -m unittest tests.%s`:\n%s"
                     % (name, name, done.stderr))
+
+
+SHARDS_TOOL = REPO_ROOT / "tools" / "shards.py"
+
+
+class EveryModuleRunsInOneShard(unittest.TestCase):
+    """CI splits the modules by tools/shards.py (#453), weighed by the
+    seconds its table holds or by test count where it holds none: at
+    each tier's shard count, every module runs, and runs once."""
+
+    def test_the_workflow_splits_by_the_tool(self):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "tests.yml"
+                    ).read_text(encoding="utf-8")
+        self.assertIn('"tools/shards.py", os.environ["SHARD"]', workflow)
+
+    def test_every_module_is_in_exactly_one_shard(self):
+        modules = sorted(p.stem for p in TESTS_DIR.glob("test_*.py"))
+        for shards in (3, 6):  # the full tier's count, the fast tier's
+            for flags in ((), ("--by-count",)):
+                with self.subTest(shards=shards, flags=flags):
+                    found = []
+                    for shard in range(1, shards + 1):
+                        done = run(SHARDS_TOOL, str(shard), str(shards),
+                                   *flags, timeout=BOUND)
+                        self.assertEqual(done.returncode, 0, done.stderr)
+                        mine = done.stdout.split()
+                        self.assertTrue(mine, f"shard {shard} runs nothing")
+                        found += mine
+                    self.assertEqual(sorted(found), modules)
 
 
 def named_homes(refusal):

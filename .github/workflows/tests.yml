@@ -77,28 +77,15 @@ jobs:
           SHARDS: ${{ github.event_name == 'pull_request' && github.base_ref == 'dev' && 6 || 3 }}
         shell: python
         run: |
-          import os, subprocess, sys, unittest
-          from pathlib import Path
+          import os, subprocess, sys
 
-          # This script runs from a temporary file, so the checkout is not
-          # on the import path until it is put there.
-          sys.path.insert(0, os.getcwd())
-          shard, shards = int(os.environ["SHARD"]), int(os.environ["SHARDS"])
-          assert 1 <= shard <= shards, (shard, shards)
-          # Heaviest module first, each to the lightest shard so far, so the
-          # shards finish together; a module's test count stands in for its
-          # time. Every machine computes the same split from the same tree.
-          names = sorted(p.stem for p in Path("tests").glob("test_*.py"))
-          weight = {n: unittest.defaultTestLoader.loadTestsFromName(
-              "tests." + n).countTestCases() for n in names}
-          shelves, totals = [[] for _ in range(shards)], [0] * shards
-          for n in sorted(names, key=lambda n: (-weight[n], n)):
-              lightest = totals.index(min(totals))
-              shelves[lightest].append(n)
-              totals[lightest] += weight[n]
-          mine = sorted(shelves[shard - 1])
-          print(f"shard {shard} of {shards}, {totals[shard - 1]} tests:",
-                ", ".join(mine), flush=True)
+          # tools/shards.py says which modules this shard runs (#453):
+          # weighed by measured seconds, by test count where it has none.
+          mine = subprocess.run(
+              [sys.executable, "tools/shards.py", os.environ["SHARD"],
+               os.environ["SHARDS"]],
+              stdout=subprocess.PIPE, encoding="utf-8", check=True
+          ).stdout.split()
           sys.exit(subprocess.call([sys.executable, "-m", "unittest", "-v",
                                     *("tests." + n for n in mine)]))
 
