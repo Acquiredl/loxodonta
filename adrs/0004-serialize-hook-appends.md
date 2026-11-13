@@ -107,3 +107,18 @@ ADR fought to keep.
 - Glossary terms **sharpened** (done, same commit): *Writer* — "one writer per log" now says the writer is a **process**, not a session, and names the parallel-tool-call case. *Torn tail* — previously called a crash mid-append "the one honest way a log gets damaged"; concurrent appends are a second honest cause, so the line was stale the moment Stage C shipped. **Added:** *Sibling chain*.
 - Glossary terms **retired**: none. No topology is overruled — the session-keyed chain survives; only its concurrency assumption is corrected.
 - Discussion: the dogfood, 2026-08-14 — the first fault this tool caught in the field rather than in a drill.
+
+## Addendum, 2026-11-12: a final line with no head ends a chain too
+
+*Drafted for the author to confirm (#587).* The addendum above says a
+chain whose final entry's `n` is not its line number cannot be
+extended. Since pull request #634 the rule in `tail_entry` reads the
+final line as SPEC section 6 does for `head` (v0.1.7): a final `n`
+that is absent, a boolean or a float such as `3.0` is no line number,
+and a final `entry_hash` that is not 64 lowercase hex is no chain head.
+A chain ending in either cannot be extended: the hook starts a sibling,
+and the writing verbs refuse with the damaged-tail sentence, as for a
+tear or a fork. Before this, a final `n` of `3.0` or `true` passed,
+since Python takes them as equal to `3` and `1`, and so did an
+`entry_hash` in uppercase hex: an entry was chained to a tail the walk
+calls `BROKEN`.

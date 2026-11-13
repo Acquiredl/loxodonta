@@ -347,8 +347,9 @@ The masking rule is deliberate: a regenerated chain with tidy files must
 shout "not the recorded history," not report a housekeeping issue.
 
 **`report`.** Same walk, zero judgment — a timeline with breaks inlined
-where they sit, closed by the philosophy in one line: *"this timeline is
-testimony only — run `receipts verify` for the verdict."* Narration and
+where they sit, closed, when there are any, by the philosophy in one line:
+*"chain integrity: BROKEN — this timeline is testimony only (run
+`loxodonta verify` for the verdict)"*. Narration and
 judgment are different jobs; neither impersonates the other.
 
 **`explain` — the narrator under contract.** A language model narrates

@@ -79,3 +79,15 @@ The ratified shape, recorded here because the trade-offs were argued
 - **Live push (websockets/SSE)** — rejected: freshness displayed
   honestly beats freshness promised; stdlib SSE is possible but buys
   seconds on a page about minutes.
+
+## Addendum, 2026-11-12: the strip names every condition one look found
+
+*Drafted for the author to confirm (#612).* The ratified shape says a
+full-width verdict strip states one condition. Since pull request #627
+it names every condition one look found, each in the words it has
+alone, the worst first in the page's tier order (not the recorded
+history, receipts that stopped arriving, a finding at the receiver,
+then the amber conditions), and takes the worst one's colour. One
+condition alone draws as before. Picking one hid the others: a broken
+chain hid a finding no one had accepted at the receiver, and a live
+alarm hid a broken chain.

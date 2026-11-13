@@ -7254,7 +7254,8 @@ def profile_notice(profile, matchers, codex=False):
         "caught; a regenerated chain only against a head you keep (`head`, "
         "then `verify --expect-head`).",
         f"  timestamped  --profile timestamped   {leaves}; regeneration is "
-        "caught once the anchor matures.",
+        "caught once the anchor matures, for the entries up to the "
+        "anchored head.",
         "  full         --profile full --remote URL   head and receipts "
         "go to a remote you name; a wiped log survives there as of the "
         "last send.",
