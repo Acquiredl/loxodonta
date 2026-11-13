@@ -1251,7 +1251,8 @@ class WindowsPlacesTest(ChecksOnly, ManagedBase):
     def test_the_folders_under_system32_any_account_writes_are_refused(self):
         for parts in (("Tasks",), ("spool", "drivers", "color"),
                       ("spool", "PRINTERS"), ("FxsTmp",), ("com", "dmp"),
-                      ("Microsoft", "Crypto", "RSA", "MachineKeys")):
+                      ("Microsoft", "Crypto", "RSA", "MachineKeys"),
+                      ("LogFiles", "WMI")):
             program = self.unused(self.system("System32", *parts))
             with self.subTest(program=program):
                 self.assert_refused(program, "may write by default")
@@ -1281,6 +1282,22 @@ class WindowsPlacesTest(ChecksOnly, ManagedBase):
             with self.subTest(program=program):
                 line = self.folder_said(self.checked(program), program)
                 self.assertIsNotNone(line, f"{program} passed the check")
+        # A stream of a refused folder (#638 review): the copy's stand-in
+        # refuses a second colon before the check, so through this verb
+        # it is refused there; the check refuses it too, for the
+        # interpreter's own path, which the suite cannot spell.
+        self.operator_file.unlink()
+        before = self.everything()
+        for program in (tasks + ":python.exe", tasks + ":python.exe:$DATA"):
+            with self.subTest(program=program):
+                env = {**self.env, "LOXODONTA_PROGRAM_DIR": program}
+                with home_guard.left_to_the_machine("LOXODONTA_PROGRAM_DIR"):
+                    done = run(LOXODONTA, "install-hook", "--managed",
+                               env=env)
+
+                self.assertEqual(done.returncode, 64,
+                                 done.stdout + done.stderr)
+                self.assertEqual(self.everything(), before)
 
     def test_a_short_spelling_of_a_passing_place_passes(self):
         x86 = os.environ.get("ProgramFiles(x86)")
@@ -1889,6 +1906,7 @@ class SupervisorReadsBothHomesTest(ManagedBase):
 
 
 FOOTING = "the account this supervisor runs as can write"
+UNTOLD = "this scan could not tell whether the account it runs as can write"
 NAMED_BY_VARIABLE = "LOXODONTA_MANAGED_DIR is set where this scan runs"
 
 
@@ -1989,29 +2007,113 @@ class FootingNoteTest(ManagedBase):
         self.assertNotIn(FOOTING, note)
         self.assertIn(NAMED_BY_VARIABLE, note)
 
-    @unittest.skipUnless(sys.platform == "win32", "icacls is Windows's")
-    def test_a_file_denied_to_this_account_says_nothing(self):
-        # A deny on the test's own files, taken off before they are
-        # removed. Folders are asked of the token: skipped where this
-        # runs elevated, which can write them.
+    def held_open(self, paths):
+        """Each of `paths` held open for reading by this process, sharing
+        reading alone, as a writer could hold the managed files while the
+        harness still reads them (#638 review); let go at cleanup."""
         import ctypes
-        if ctypes.windll.shell32.IsUserAnAdmin():
-            self.skipTest("an elevated token can write the folders")
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = (
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        for path in paths:
+            # GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING.
+            handle = kernel32.CreateFileW(str(path), 0x80000000, 0x1, None,
+                                          3, 0, None)
+            self.assertNotIn(handle, (None, wintypes.HANDLE(-1).value),
+                             ctypes.get_last_error())
+            self.addCleanup(kernel32.CloseHandle, handle)
+
+    @unittest.skipUnless(sys.platform == "win32", "a share mode is Windows's")
+    def test_files_held_open_by_another_never_silence_the_note(self):
+        # A write refused for sharing says nothing of the account's
+        # rights: the note says what it found, or that it could not tell.
         self.install("--managed")
-        denied = [self.managed_file, self.copy, self.copy_supervisor]
+        self.held_open([self.managed_file, self.copy, self.copy_supervisor])
+
+        said = " ".join(self.scan().split())
+
+        self.assertTrue(FOOTING in said or UNTOLD in said, said)
+        self.assertIn(self.managed_file.as_posix(), said)
+
+    def marked_on_windows(self, how):
+        """The managed file and the copies marked read-only (`attrib`) or
+        denied write to this account (`icacls`), each undone at cleanup."""
         account = os.environ.get("USERNAME")
-        for path in denied:
-            done = subprocess.run(["icacls", str(path), "/deny",
-                                   f"{account}:(W)"],
-                                  capture_output=True, encoding="utf-8",
-                                  timeout=60)
+        for path in (self.managed_file, self.copy, self.copy_supervisor):
+            if how == "attrib":
+                mark, undo = (["attrib", "+r", str(path)],
+                              ["attrib", "-r", str(path)])
+            else:
+                mark = ["icacls", str(path), "/deny", f"{account}:(W)"]
+                undo = ["icacls", str(path), "/remove:d", account]
+            done = subprocess.run(mark, capture_output=True,
+                                  encoding="utf-8", timeout=60)
             self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-            self.addCleanup(subprocess.run,
-                            ["icacls", str(path), "/remove:d", account],
-                            capture_output=True, timeout=60)
+            self.addCleanup(subprocess.run, undo, capture_output=True,
+                            timeout=60)
 
-        note = self.scan()
+    @unittest.skipUnless(sys.platform == "win32", "attrib is Windows's")
+    def test_a_read_only_mark_still_says_can(self):
+        # The mark is the account's to take off (#638 review).
+        self.install("--managed")
+        self.marked_on_windows("attrib")
 
+        said = " ".join(self.scan().split())
+
+        self.assertIn(FOOTING, said)
+        self.assertIn(self.managed_file.as_posix(), said)
+
+    @unittest.skipUnless(sys.platform == "win32", "icacls is Windows's")
+    def test_a_deny_on_a_file_the_account_owns_still_says_can(self):
+        # Its owner may rewrite the access list (#638 review).
+        self.install("--managed")
+        self.marked_on_windows("icacls")
+
+        said = " ".join(self.scan().split())
+
+        self.assertIn(FOOTING, said)
+        self.assertIn(self.managed_file.as_posix(), said)
+
+    @unittest.skipIf(sys.platform == "win32", "permission bits are POSIX")
+    def test_files_the_account_owns_marked_unwritable_still_say_can(self):
+        # chmod a-w on a file or a folder the account owns is the
+        # account's to undo (#638 review).
+        if os.geteuid() == 0:
+            self.skipTest("root can write everything")
+        self.install("--managed")
+        for path in (self.managed_file, self.managed_file.parent, self.copy,
+                     self.copy_supervisor, self.program):
+            mode = os.stat(path).st_mode
+            os.chmod(path, mode & ~0o222)
+            self.addCleanup(os.chmod, path, mode)
+
+        said = " ".join(self.scan().split())
+
+        self.assertIn(FOOTING, said)
+        self.assertIn(self.managed_file.as_posix(), said)
+
+    def test_the_variable_unset_is_not_said(self):
+        # The scan then reads the harness's own managed folder, and only
+        # reads it: run only where nothing of the recorder's stands
+        # there, so the answer never rests on what a machine holds.
+        real = os.path.join(HARNESS_FOLDER, "managed-settings.d",
+                            "loxodonta.json")
+        if os.path.lexists(real):
+            self.skipTest("this machine holds a managed install")
+        env = {name: value for name, value in self.env.items()
+               if name != "LOXODONTA_MANAGED_DIR"}
+
+        with home_guard.left_to_the_machine("LOXODONTA_MANAGED_DIR"):
+            result = run_scan(self.root, "--witness", str(self.witness),
+                              env=env)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        note = json.loads(result.stdout).get("settings_note", "")
+        self.assertNotIn(NAMED_BY_VARIABLE, note)
         self.assertNotIn(FOOTING, note)
 
 
