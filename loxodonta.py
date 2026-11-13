@@ -7007,6 +7007,10 @@ def owned_script(command, names):
         return None
     interpreter, script, verb = words[:3]
     name = file_name(script)
+    if os.name == "nt":
+        # Windows drops a name's trailing dots and spaces, so it runs
+        # `loxodonta.py.` as the recorder; on POSIX that is another file.
+        name = name.rstrip(". ")
     if not is_interpreter(interpreter) or name not in names \
             or WIRED_VERB[name] != verb:
         return None

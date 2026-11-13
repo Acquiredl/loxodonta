@@ -44,6 +44,7 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - A reading over a receiver's folder no longer labels its memory, day book, saved views or acceptances writer-reachable: they are kept at the receiver, out of the writer's reach if the receiver is. The agent's machine keeps its labels (#615).
 - The help of `scan --receiver` no longer says every session short of receipts raises the exit until acknowledged: a settled one stands until accepted, and one still arriving with a call overdue until the receipts arrive or it settles (#617).
 - The hook's refusal names a file standing where its drawer's path needs a folder, where Windows said it could not find the path; the unlistable store's warning is printed only once the receipt's chain stands (#589).
+- On Windows a hook command naming `loxodonta.py.`, which Windows runs as the recorder, reads as the recorder's: the supervisor no longer says no recorder hook is wired, and `install-hook` wires no second entry beside it (#589).
 
 ## [0.20.0] - 2026-11-12
 

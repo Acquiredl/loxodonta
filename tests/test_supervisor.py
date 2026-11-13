@@ -5337,6 +5337,25 @@ class RecorderDriftTest(unittest.TestCase):
         self.assertIn("install-hook", older["note"])
         self.assertNotIn("failed tool calls", rewired["note"])
 
+    @unittest.skipUnless(os.name == "nt", "Windows drops a trailing dot")
+    def test_a_name_windows_runs_as_the_recorder_is_wired(self):
+        # #589 item 8: Windows runs `loxodonta.py.` as `loxodonta.py`,
+        # so the notice must not say no recorder hook is wired.
+        home = self.base / "loose"
+        home.mkdir()
+        script = home / "loxodonta.py"
+        script.write_text("# loose recorder\n", encoding="utf-8")
+        for tail in (".", ". .", ".."):
+            with self.subTest(tail=tail):
+                install_witness_hook(
+                    self.witness,
+                    command=f'python "{script.as_posix()}{tail}" hook')
+
+                recorder = self.notice()
+
+                self.assertNotEqual(recorder["state"], "unwired")
+                self.assertNotIn("not on disk", recorder["note"])
+
     def test_no_wired_hook_means_no_recorder_to_report_on(self):
         self.witness.mkdir(parents=True, exist_ok=True)
         (self.witness.parent / "settings.json").write_text(

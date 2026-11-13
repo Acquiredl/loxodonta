@@ -422,6 +422,29 @@ class ManagedInstallTest(ManagedBase):
                               in line)
                 self.assertGreater(lines.index(said[0]), restart)
 
+    @unittest.skipUnless(os.name == "nt", "Windows drops a trailing dot")
+    def test_a_name_windows_runs_as_the_recorder_is_already_installed(self):
+        # #589 item 8: `loxodonta.py.` runs the recorder on Windows, so
+        # a re-install reads it as its own and wires no second entry.
+        self.install()
+        dotted = self.operator_file.read_text(encoding="utf-8").replace(
+            'loxodonta.py\\" hook', 'loxodonta.py.\\" hook').replace(
+            'supervisor.py\\" digest', 'supervisor.py.\\" digest')
+        self.assertIn("loxodonta.py.", dotted)
+        self.assertIn("supervisor.py.", dotted)
+        self.operator_file.write_text(dotted, encoding="utf-8")
+
+        self.install()
+
+        # SessionEnd's command is rewritten to the installer's own
+        # spelling, as any of its own that differs is; never doubled.
+        settings = self.read(self.operator_file)
+        for event in ("PostToolUse", "PostToolUseFailure", "SessionEnd",
+                      "SessionStart"):
+            with self.subTest(event=event):
+                self.assertEqual(len(self.commands(settings, event)), 1,
+                                 settings)
+
     def test_a_plain_install_for_codex_is_another_harness_and_goes_ahead(self):
         self.install("--managed")
 
