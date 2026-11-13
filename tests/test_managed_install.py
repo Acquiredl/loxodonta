@@ -2200,14 +2200,45 @@ class FootingNoteTest(ManagedBase):
 
     @unittest.skipUnless(sys.platform == "win32", "icacls is Windows's")
     def test_a_deny_on_a_file_the_account_owns_still_says_can(self):
-        # Its owner may rewrite the access list (#638 review).
+        # Its owner may rewrite the access list (#638 review). Not
+        # elevated, the files are this user's own; elevated, as on the
+        # hosted runner, they are the Administrators group's, and the
+        # token can write them whatever the deny says.
+        import ctypes
+        case = ("an elevated token" if ctypes.windll.shell32.IsUserAnAdmin()
+                else "the owner, not elevated")
         self.install("--managed")
         self.marked_on_windows("icacls")
 
         said = " ".join(self.scan().split())
 
-        self.assertIn(FOOTING, said)
+        self.assertIn(FOOTING, said, case)
         for path in (self.managed_file, self.copy, self.copy_supervisor):
+            self.assertIn(path.as_posix(), said, case)
+
+    @unittest.skipUnless(sys.platform == "win32", "icacls is Windows's")
+    def test_an_elevated_token_reads_can(self):
+        # An elevated token is Windows's root: it can write anything,
+        # whatever a deny entry says, so the note says can for a copy
+        # every open refuses.
+        import ctypes
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            self.skipTest("this token is not elevated; the hosted Windows "
+                          "runner's is")
+        self.install("--managed")
+        for path in (self.copy, self.copy_supervisor):
+            done = subprocess.run(["icacls", str(path), "/deny",
+                                   "*S-1-1-0:(F)"], capture_output=True,
+                                  encoding="utf-8", timeout=60)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.addCleanup(subprocess.run,
+                            ["icacls", str(path), "/remove:d", "*S-1-1-0"],
+                            capture_output=True, timeout=60)
+
+        said = " ".join(self.scan().split())
+
+        self.assertIn(FOOTING, said)
+        for path in (self.copy, self.copy_supervisor):
             self.assertIn(path.as_posix(), said)
 
     @unittest.skipIf(sys.platform == "win32", "permission bits are POSIX")
