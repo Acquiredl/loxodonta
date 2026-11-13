@@ -1389,6 +1389,71 @@ class ProfileKeeperTest(unittest.TestCase):
         self.assertEqual(len(authority.received), 1)
         self.assertEqual([row["head"] for row in self.tokens_of(log)], [head])
 
+    def stamp_note(self, session, url, torn=False, folder=False):
+        """The anchor row's note after one tick of `serve` following a
+        marker that names `url` as the authority (#589 item 9): a ripe
+        head, `torn` with a half-written line after it, or with a
+        `folder` at the stamps sidecar's name. The keeper's own clock
+        takes the first turn, and its scan answers no request, so the
+        request's look is made a turn too: the note is said on a turn's
+        row and nowhere else."""
+        self.install("--profile", "timestamped", "--authority", url)
+        log = self.aged_chain(session, age=7 * 3600)
+        if torn:
+            with open(log, "a", encoding="utf-8", newline="\n") as f:
+                f.write('{"n":2,"half-written')
+        if folder:
+            Path(str(log) + ".stamps.jsonl").mkdir()
+        self.serve(SUPERVISOR_UPGRADE_EVERY_SECONDS="0")
+        status = self.tick()
+        self.said_at_startup()
+        (chain,) = chains_by_session(status)[("alpha", session)]
+        return chain["anchors"].get("note", "")
+
+    def test_a_granted_token_leaves_no_stamp_note(self):
+        authority = self.authority()
+
+        note = self.stamp_note("sess-granted", authority.url)
+
+        self.assertEqual(len(authority.received), 1)
+        self.assertNotIn("stamp", note)
+
+    def test_an_authority_that_refuses_is_said_to_grant_no_token(self):
+        authority = self.authority()
+        authority.status_code = 500
+
+        note = self.stamp_note("sess-refused", authority.url)
+
+        self.assertTrue(authority.received)
+        self.assertIn("stamping failed — the authority did not grant a token "
+                      "for this head; it stays unstamped and the keeper will "
+                      "try again", note)
+
+    def test_an_unreachable_authority_is_said_to_grant_no_token(self):
+        note = self.stamp_note("sess-unreached", "http://127.0.0.1:1/tsr")
+
+        self.assertIn("stamping failed — the authority did not grant a token",
+                      note)
+
+    def test_a_token_that_cannot_be_written_is_said_so(self):
+        authority = self.authority()
+
+        note = self.stamp_note("sess-unwritten", authority.url, folder=True)
+
+        self.assertTrue(authority.received)
+        self.assertIn("stamping failed — the token could not be written "
+                      "beside the chain", note)
+        self.assertNotIn("did not grant", note)
+
+    def test_a_head_the_recorder_refuses_to_stamp_is_its_refusal(self):
+        authority = self.authority()
+
+        note = self.stamp_note("sess-torn", authority.url, torn=True)
+
+        self.assertEqual(authority.received, [])
+        self.assertIn("the recorder refused to stamp this head", note)
+        self.assertNotIn("authority", note.lower())
+
     def test_a_head_that_already_holds_a_token_is_not_asked_about_again(self):
         # One head, one token: the keeper skips a head the sidecar
         # already holds, and the recorder's own dedupe is the backstop
