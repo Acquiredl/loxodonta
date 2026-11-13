@@ -201,11 +201,16 @@ above has fallen behind, as *Consequences* said it would have to be
 kept up:
 
 - **`install-hook --managed`** (ADR-0040, ADR-0042): 73 when the
-  system refuses a write of the managed file or the pin, or at `full`
-  when a file that is not the installer's pin stands at the pin's name;
-  64 when the interpreter, the copy's folder or a file at a copy's name
-  fails ADR-0042's check of reach, and when `LOXODONTA_MANAGED_DIR` is
-  shown to name another folder and `LOXODONTA_PROGRAM_DIR` is not.
+  system refuses a write of the copy, the managed file or the pin, when
+  a folder stands at the managed file's name, or at `full` when a file
+  that is not the installer's pin stands at the pin's name; 73 when the
+  operator's file cannot be rewritten after the managed file is
+  written, which leaves the hook wired in both, or 66 when that file can
+  no longer be read for its backup; 66 when the recorder it would copy
+  cannot be read; 64 when the interpreter, the copy's folder or a file at a copy's name
+  fails ADR-0042's check of reach, before anything is written or again
+  at the write (#574), and when `LOXODONTA_MANAGED_DIR` is shown to
+  name another folder and `LOXODONTA_PROGRAM_DIR` is not.
 - **`install-hook`**, plain: 73 while the managed file holds the
   entries (ADR-0040 ruling 3).
 - **`uninstall-hook --managed`**: 73 when the system refuses a delete
