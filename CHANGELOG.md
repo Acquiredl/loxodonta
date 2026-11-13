@@ -20,9 +20,11 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 - `anchor --upgrade` asks only the default calendars and each `--calendar` given; a row naming another address is named, skipped and never asked, so upgrading a handed sidecar sends nothing where its issuer chose. The keeper passes its `--calendar` (#415).
 - A git checkout holds the four tool files with LF line endings on every platform, so on Windows their sums match the release's `SHA256SUMS` and a managed install made from a checkout carries the release's bytes (#622).
 - `install-hook`, plain or `--managed`, ends its restart line with the next step: the supervisor's `scan`, spelled as the wired commands are, naming the managed copy on a managed install (#147).
+- `supervisor serve` with no keeper cadence looks on a clock of its own, every `SUPERVISOR_WATCH_TICK_SECONDS` (ten minutes; 0 turns it off), `--receiver` included, and a live alarm such a look finds goes in the day book (#281).
 
 ### Fixed
 
+- `scan --receiver` and `serve --receiver` refuse a keeper's flag (`--anchor-every`, `--calendar`, `--publish-every`, `--publish-url`, `--publish-chain`) by name, exit 64: `scan` took and ignored them, and `serve` answered with the keeper's own rule about URLs (#487).
 - At the receiver, an acknowledged session whose events hold a call naming no tool stays acknowledged: its counts were compared before the memory's JSON had turned the missing name into `"null"`, so they never matched (ADR-0046).
 - The help of `install-hook --publish-chain` and of the supervisor's `--publish-chain` says what ADR-0045 built: each entry leaves as it is written, and a send carries what the remote does not hold.
 - A row appended to a sidecar whose last line is torn starts on a line of its own: it was glued onto the torn line, and both were unreadable. The torn line stays as it lies (#610).

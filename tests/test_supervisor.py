@@ -5942,7 +5942,8 @@ class UsageExitTest(unittest.TestCase):
                        "SUPERVISOR_HOT_TIMES": True,
                        "SUPERVISOR_HOT_FLOOR": True,
                        "SUPERVISOR_SCAN_TTL_SECONDS": False,
-                       "SUPERVISOR_KEEPER_TICK_SECONDS": False}
+                       "SUPERVISOR_KEEPER_TICK_SECONDS": False,
+                       "SUPERVISOR_WATCH_TICK_SECONDS": False}
 
     def version_with(self, name, value):
         return run(SUPERVISOR, "--version", timeout=60,
@@ -5978,6 +5979,8 @@ class UsageExitTest(unittest.TestCase):
     def test_a_number_setting_it_can_use_is_taken(self):
         for name, value in (("SUPERVISOR_SETTLE_SECONDS", "0"),
                             ("SUPERVISOR_KEEPER_TICK_SECONDS", "0.5"),
+                            # 0 is the watch's off (#281), not a spin.
+                            ("SUPERVISOR_WATCH_TICK_SECONDS", "0"),
                             # Never waited on, so no wait's bound is its.
                             ("SUPERVISOR_SCAN_TTL_SECONDS", "1e10")):
             with self.subTest(name=name):
@@ -5991,15 +5994,20 @@ class UsageExitTest(unittest.TestCase):
         # #589 item 17: the keeper's tick is waited on, and a wait past
         # threading.TIMEOUT_MAX raised OverflowError on the keeper's
         # first turn, long after the start said nothing was wrong. 1e10
-        # seconds is past the bound on every platform.
-        result = self.version_with("SUPERVISOR_KEEPER_TICK_SECONDS", "1e10")
+        # seconds is past the bound on every platform. The watch's tick
+        # (#281) is waited on the same way.
+        for name in ("SUPERVISOR_KEEPER_TICK_SECONDS",
+                     "SUPERVISOR_WATCH_TICK_SECONDS"):
+            with self.subTest(name=name):
+                result = self.version_with(name, "1e10")
 
-        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
-        self.assertRegex(result.stderr,
-                         r"\Aerror: SUPERVISOR_KEEPER_TICK_SECONDS='1e10' is "
-                         r"more seconds than a wait can take \(at most "
-                         r"\d+ here\)\n\Z")
-        self.assertEqual(result.stdout, "")
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                self.assertRegex(result.stderr,
+                                 rf"\Aerror: {name}='1e10' is more seconds "
+                                 r"than a wait can take \(at most \d+ "
+                                 r"here\)\n\Z")
+                self.assertEqual(result.stdout, "")
 
 
 def run_into_read_only(tool, sink, *args, env):
@@ -6782,6 +6790,28 @@ def restamp_events(data, received, day=FIXTURE_DAY):
                     encoding="utf-8")
 
 
+# Every flag only a keeper reads, with a value it takes, and the
+# sentence `scan` and `serve` refuse it with beside --receiver, where no
+# keeper runs (#487 item 11, #486 item 10).
+KEEPER_FLAGS = (("--anchor-every", "1h"),
+                ("--calendar", "http://127.0.0.1:9"),
+                ("--publish-every", "1h"),
+                ("--publish-url", "http://127.0.0.1:9/hook"),
+                ("--publish-chain", "http://127.0.0.1:9/chain"))
+NO_KEEPER_THERE = ("--receiver reads a receiver's data directory, and no "
+                   "keeper runs over a receiver's folder: drop ")
+
+
+def keeper_flag_cases():
+    """(the arguments, the flags the refusal names): each keeper flag
+    alone, then the three a cadence beside a receiver is typed with."""
+    cases = [([flag, value], flag) for flag, value in KEEPER_FLAGS]
+    cases.append((["--anchor-every", "1h", "--publish-every", "1h",
+                   "--publish-url", "http://127.0.0.1:9/hook"],
+                  "--anchor-every, --publish-every and --publish-url"))
+    return cases
+
+
 def chain_copy(data, session, actions=FIXTURE_RECEIPTS, epoch=None,
                notes=(), settled=True):
     """A chain copy in the receiver's folder: written by the recorder
@@ -6872,6 +6902,22 @@ class ReceiverReadingTest(unittest.TestCase):
         self.assertEqual(list(chains), [("receiver", FIXTURE_SESSION)])
         self.assertEqual(chains[("receiver", FIXTURE_SESSION)][0]["verdict"],
                          "VALID")
+
+    def test_a_keeper_flag_beside_receiver_is_refused_by_name(self):
+        # #487 item 11: a cadence here was taken and ignored. Refused as
+        # --root beside --receiver is, before the keeper's own rule of
+        # which flag goes with which can answer in its place, and with
+        # nothing written in the folder.
+        chain_copy(self.data, FIXTURE_SESSION)
+        for asked, named in keeper_flag_cases():
+            with self.subTest(asked=asked):
+                result = self.scan(*asked)
+
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                self.assertIn(NO_KEEPER_THERE + named + "\n", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse((self.data / "supervisor").exists())
 
     def test_a_copy_with_the_two_extra_receipts_taken_out_reads_clean(self):
         chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:2])

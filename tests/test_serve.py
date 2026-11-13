@@ -32,10 +32,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (LOXODONTA, SUPERVISOR, isolated_env, run,  # noqa: E402
                      temp_folder)
 
-from test_supervisor import (FIXTURE_RECEIPTS, FIXTURE_SESSION, ago,
+from test_supervisor import (BASELINE_NAME, FIXTURE_RECEIPTS,
+                             FIXTURE_SESSION, NO_KEEPER_THERE, ago,
                              assert_replaced_whole, chain_copy, hold,
-                             install_witness_hook, lay_events, post_event,
-                             prime_memory, read_line_within, received_ago,
+                             install_witness_hook, keeper_flag_cases,
+                             lay_events, post_event, prime_memory,
+                             read_line_within, received_ago,
                              receiver_folder, unreadable_depth,
                              write_transcript)
 
@@ -169,6 +171,27 @@ def note_drawn(test, page, row):
     return json.loads(result.stdout)
 
 
+def wait_for(test, done, within=60, missing="it never came"):
+    """Wait for `done()`, polling to a bound rather than sleeping a fixed
+    time: a slow runner gets longer and a quick one does not wait."""
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        if done():
+            return
+        time.sleep(0.1)
+    test.fail(f"{missing} within {within}s")
+
+
+def todays_row(book):
+    """Today's row of the day book at `book`, or None while it has none;
+    a book caught mid-swap on Windows reads as none yet."""
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    try:
+        return json.loads(book.read_text(encoding="utf-8"))["days"].get(today)
+    except (OSError, ValueError):
+        return None
+
+
 class ServerFixture(unittest.TestCase):
     """A temp root and a real `serve` subprocess on an ephemeral port, in
     a home of the test's own: serve reads the coverage marker and follows
@@ -201,8 +224,11 @@ class ServerFixture(unittest.TestCase):
         self.url = match.group()
 
     def _stop(self):
-        self.proc.kill()
-        self.proc.communicate(timeout=30)
+        # Once: a test that stops the server to read what it left runs
+        # this again at cleanup.
+        if self.proc.returncode is None:
+            self.proc.kill()
+            self.proc.communicate(timeout=30)
 
     def get(self, path):
         with OPENER.open(self.url + path, timeout=30) as response:
@@ -1860,6 +1886,80 @@ class ScanBatchingTest(ServerFixture):
         self.assertEqual(first, second)
 
 
+class WatchTickTest(ServerFixture):
+    """With no keeper cadence in force, `serve` looks on a clock of its
+    own (#281): a `serve` left running with no page open and no scrape
+    used to compute no completeness state, compare no baseline and run
+    no tail keeper. Nothing here asks the server anything; what the
+    clock's look left on disk is what is read."""
+
+    def test_a_live_alarm_reaches_the_day_book_with_nobody_asking(self):
+        # The alarm band itself: ALARM-SILENT is the state that says
+        # recording stopped. A look nobody asked for stays out of the
+        # book while it has nothing new (ADR-0014), and goes in when it
+        # finds an alarm the book does not show yet; once, not on every
+        # later turn while the alarm stands (ADR-0039).
+        witness = temp_folder(self) / "witness"
+        install_witness_hook(witness)
+        prime_memory(self.root)
+        write_transcript(witness, self.root / "beta", "sess-nowhere",
+                         event_times=[ago(600), ago(400), ago(120)])
+        book = self.root / ".supervisor-daybook.json"
+        baseline = self.root / BASELINE_NAME
+
+        self.serve(extra_env={"SUPERVISOR_WATCH_TICK_SECONDS": "0.5"},
+                   extra_args=("--witness", str(witness)))
+        said = read_line_within(self.proc.stdout)
+        wait_for(self, lambda: todays_row(book) is not None,
+                 missing="the watch's look wrote no day book")
+        caught = todays_row(book)
+
+        def turned_twice_since():
+            # Every look rewrites the baseline's stamp; two seconds past
+            # the catching look is several turns at half a second each.
+            try:
+                memory = json.loads(baseline.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+            later = datetime.datetime.strptime(memory["scanned"],
+                                               "%Y-%m-%dT%H:%M:%SZ")
+            first = datetime.datetime.strptime(caught["last"],
+                                               "%Y-%m-%dT%H:%M:%SZ")
+            return (later - first).total_seconds() >= 2
+
+        wait_for(self, turned_twice_since, missing="the clock stopped turning")
+        self._stop()
+
+        row = todays_row(book)
+        self.assertEqual((row["alarms"], row["worst"], row["looks"]),
+                         (1, 6, 0))
+        self.assertEqual(row["scans"], 1, "a turn wrote the day book for an "
+                                          "alarm already standing")
+        self.assertIn("publish off", said)
+        self.assertTrue(said.strip().endswith(
+            "; watch: a look of its own every 0.5s "
+            "(SUPERVISOR_WATCH_TICK_SECONDS)"), said)
+
+    def test_a_request_after_the_clock_looked_is_still_somebody_looking(self):
+        # #538 kept: the clock's look is held, but a request is answered
+        # from a look of its own, which is the one the day book counts.
+        make_chain(self.root / "alpha" / "receipts", "sess-aaaa")
+        book = self.root / ".supervisor-daybook.json"
+        baseline = self.root / BASELINE_NAME
+
+        self.serve(extra_env={"SUPERVISOR_WATCH_TICK_SECONDS": "0.5",
+                              "SUPERVISOR_SCAN_TTL_SECONDS": "600"})
+        wait_for(self, baseline.exists, missing="the clock never looked")
+        self.assertFalse(book.exists(), "a quiet look wrote the day book")
+        _, _, body = self.get("/api/status")
+        self._stop()
+
+        row = todays_row(book)
+        self.assertEqual((row["worst"], row["scans"]), (0, 1))
+        self.assertTrue(json.loads(body)["history"][-1]["watched"],
+                        "the request painted its day unread")
+
+
 class ReceiverServeTest(ServerFixture):
     """`serve --receiver DIR` (ADR-0041 ruling 4): the face over a
     receiver's data directory, its status endpoint carrying the same
@@ -2031,14 +2131,62 @@ class ReceiverServeTest(ServerFixture):
         self.assertNotIn("acknowledge", strip["why"])
 
     def test_the_startup_line_says_no_keeper_runs_at_the_far_end(self):
-        # #487 item 12.
+        # #487 item 12, and #281: no keeper, and the watch's own clock.
         self.assertIsNotNone(self.serve_receiver())
 
         keeper = read_line_within(self.proc.stdout)
 
         self.assertEqual(keeper.strip(), (
             "keeper: none over a receiver's folder; nothing is anchored, "
-            "sent or appended from the far end (ADR-0041)"))
+            "sent or appended from the far end (ADR-0041); watch: a look "
+            "of its own every 10m (SUPERVISOR_WATCH_TICK_SECONDS)"))
+
+    def test_the_startup_line_says_when_the_watch_is_off(self):
+        # #281: 0 is today's `serve`, a look only when somebody asks.
+        self.env["SUPERVISOR_WATCH_TICK_SECONDS"] = "0"
+        self.assertIsNotNone(self.serve_receiver())
+
+        keeper = read_line_within(self.proc.stdout)
+
+        self.assertTrue(keeper.strip().endswith(
+            "(ADR-0041); watch: none of its own "
+            "(SUPERVISOR_WATCH_TICK_SECONDS=0), a look only when a page or "
+            "a scrape asks"), keeper)
+
+    def test_a_finding_reaches_the_receivers_day_book_with_nobody_asking(self):
+        # #281: `serve --receiver` never has a keeper, so ADR-0046's
+        # findings were computed only when a page or a scrape asked. The
+        # watch's clock looks with nothing asking, and a finding the
+        # book does not show yet goes in it, as one a request found.
+        chain_copy(self.data, FIXTURE_SESSION, actions=FIXTURE_RECEIPTS[:1])
+        self.env["SUPERVISOR_WATCH_TICK_SECONDS"] = "0.5"
+        book = self.data / "supervisor" / "daybook.json"
+        self.assertIsNotNone(self.serve_receiver())
+        said = read_line_within(self.proc.stdout)
+
+        wait_for(self, lambda: todays_row(book) is not None,
+                 missing="the watch's look wrote no day book")
+        self._stop()
+
+        row = todays_row(book)
+        self.assertEqual((row["alarms"], row["worst"], row["looks"]),
+                         (1, 6, 0))
+        self.assertIn("watch: a look of its own every 0.5s", said)
+
+    def test_a_keeper_flag_beside_receiver_is_refused_by_name(self):
+        # #487 item 11: `--publish-every` here exited 64 with the
+        # keeper's own rule about URLs, and the three flags together
+        # started a server that ran no keeper. Refused as --root is.
+        for asked, named in keeper_flag_cases():
+            with self.subTest(asked=asked):
+                result = run(SUPERVISOR, "serve", "--receiver",
+                             str(self.data), "--port", "0", *asked,
+                             timeout=60, env=self.env)
+
+                self.assertEqual(result.returncode, 64,
+                                 result.stdout + result.stderr)
+                self.assertIn(NO_KEEPER_THERE + named + "\n", result.stderr)
+                self.assertEqual(result.stdout, "")
 
     def test_the_views_and_the_acknowledged_lines_say_whose_reach(self):
         # #615: the saved views sit in the receiver's folder, out of the
