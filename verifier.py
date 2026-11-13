@@ -145,21 +145,6 @@ def unreadable_log(path, error):
     return EX_NOINPUT
 
 
-def tail_entry(lines):
-    """The chain's final entry, or None if the tail is damaged: torn (a
-    line left partial by a crash or an overlapping append, or holding a
-    byte that is not UTF-8), forked (a well-formed entry whose `n` is
-    not its line number, left by a lock taken from a paused holder), or
-    ending in an `entry_hash` that is no chain head. None can be built
-    on: a new entry laid over a fork would bury an innocent race under
-    later receipts until it read as tampering in the middle of the file,
-    so damage stays at the tail (SPEC §6, §8)."""
-    last = tail_line(lines)
-    if last is None or not is_chain_head(last["entry_hash"]):
-        return None
-    return last
-
-
 def is_chain_head(value):
     """A SHA256 in lowercase hex and nothing else: the only form an
     entry_hash takes, so any other is BROKEN to the walk (SPEC §6)."""
@@ -169,8 +154,8 @@ def is_chain_head(value):
 
 def tail_line(lines):
     """The final line as an entry whose `n` is its line number, whatever
-    its `entry_hash` holds, or None: `tail_entry` without the head's
-    form, so `head` can name that refusal on its own."""
+    its `entry_hash` holds, or None; `head` asks the hash's form itself,
+    so it can name that refusal apart."""
     if not lines:
         return None
     try:
