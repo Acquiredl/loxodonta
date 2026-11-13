@@ -64,6 +64,14 @@ The supervisor's remembered copy of chain heads, used to detect change between l
 
 The supervisor's remembered copy of its own days: one row per UTC day holding that day's worst claim, its counts, and how often the page was opened. Sits beside the [baseline](#baseline) and shares its posture exactly — writer-reachable, trusted for nothing, owning no verdicts. Where the baseline answers "did anything change since the last look?", the day book answers "is this a trend or a one-off?", and a day nobody watched is recorded as a gap rather than a quiet day. That distinction is the point: detection latency is a function of how often the operator looks, so a run of unread days is the one failure mode the chains themselves can never report (ADR-0014).
 
+### Look
+
+One reading of the store by the [supervisor](#supervisor): one run of `scan_root`, whether `scan` asked for it, a request to `serve` did, or one of `serve`'s own clocks. The [baseline](#baseline) holds what one look found for the next to diff against, so a change is one between two looks.
+
+### Tick
+
+A [look](#look) in which the keepers may act: the anchor and publish keepers take their turn, and the tail keeper writes a missing exit commitment ([session lifecycle](#session-lifecycle)). A look with `tick=False` is a *reading*, as `package` takes one, appending nothing to a chain and sending nothing off the machine; over a receiver's folder no keeper acts on any look.
+
 ### Recorder notice
 
 The supervisor's reading of *which recorder is actually running*: the file the harness executes for `PostToolUse`, the branch and commit it sits on, whether that file has uncommitted changes, and how far its checkout is from its upstream as of the last fetch; where git has nothing to say, as for a managed install's copy, its `TOOL_VERSION` line and SHA-256, and whether the supervisor reading it is another version (ADR-0042). The harness wires an absolute path, not a version, so the recorder tracks whatever is checked out there — a branch, a dirty tree, a half-finished rebase — and nothing else on the machine reports that. Read from local files and git only: the notice never fetches, because a recorder that updated itself from a remote would hand the [writer](#writer) a second road to the one file that has to stay honest (ADR-0015, on ADR-0002's threat model). [Testimony](#testimony) like everything else local, and never an alarm — drift is a reason to look, and the operator's to resolve.
@@ -216,6 +224,10 @@ The property the tool deliberately does **not** guarantee: that every action pro
 
 The [supervisor](#supervisor)'s checking role: it reads a session's [second record](#second-record), counts the tool events that owed a receipt under the [coverage](#coverage) in force at the time, and reconciles that count against the chain, tool by tool (ADR-0034). It judges [completeness](#completeness) and nothing else; verdicts about the chain stay with [verify](#verify). On the agent's machine it catches faults and is no defence against a writer in the same account, since every file it reads is in that account's reach. At the [receiver](#receiver) it reads the [harness events](#harness-events), pairs a call with its receipt by the call's id where both name it, and a settled session that falls short raises the exit until someone there acknowledges it (ADR-0046). A session still arriving whose calls, by the receiver's clock, were reported more than the settle window ago with no receipt, or whose counter has a hole below such an event, is `PENDING-OVERDUE`: it raises the exit, and cannot be acknowledged until the session settles (ADR-0046 ruling 6). Not the transparency-log sense of the word, where a witness cosigns a log's checkpoints; the nearest thing here to that role is the [receiver](#receiver).
 
+### Family
+
+One session's [sibling chains](#sub-terms-and-orthogonal-categories) in one drawer, whose receipts a look counts together for the [witness](#witness). One session's receipts can land in more than one drawer, as a worktree session's do (ADR-0011), so the completeness watch merges its families across drawers and judges the session once.
+
 ### Second record
 
 A record of a session's tool events produced by something other than the recorder's own path, so that a fault which silences the hook does not silence it. It is [testimony](#testimony). Its **reach** is stated wherever the [witness](#witness)'s count is shown: *writer-reachable*, or *out of reach* by the [head record](#head-record) test (ADR-0025). A writer-reachable second record catches faults: the disabled hook, the wedged lock, the silent fork. It gives no guarantee against a writer who can edit or delete it. Two are named: the Claude Code transcript, writer-reachable, and the [harness events](#harness-events), out of reach once they have left the machine (ADR-0041).
@@ -238,7 +250,7 @@ The supervisor's reading of a session's temporal state (ADR-0018), decided by **
 
 ### Bookkeeping entry
 
-An entry the recorder writes in its own voice — `actor: "receipts"`, the same voice as [genesis](#genesis) — rather than on behalf of a tool call: today, genesis and the [transcript commitment](#transcript-commitment). The actor field is the mechanical marker every reader keys on: the witness excludes bookkeeping from the receipts count (an entry no tool event owes must not manufacture `SURPLUS`), and the [digest](#digest) skips bookkeeping rows (they are the chain talking about itself, not memory of the work). Search and `show` still reach them by [entry address](#entry-address) — unweighted, never hidden (ADR-0017).
+An entry the recorder writes in its own voice — `actor: "receipts"`, the same voice as [genesis](#genesis) — rather than on behalf of a tool call: today, genesis, the [transcript commitment](#transcript-commitment) and the `second-record-cut:` note (SPEC §2.2). The actor field is the mechanical marker every reader keys on: the witness excludes bookkeeping from the receipts count (an entry no tool event owes must not manufacture `SURPLUS`), and the [digest](#digest) skips bookkeeping rows (they are the chain talking about itself, not memory of the work). Search and `show` still reach them by [entry address](#entry-address) — unweighted, never hidden (ADR-0017).
 
 ### Transcript commitment
 
