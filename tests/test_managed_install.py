@@ -480,8 +480,9 @@ class ManagedInstallTest(ManagedBase):
                     self.assertEqual(installed.returncode, 0,
                                      installed.stdout + installed.stderr)
                     _, command = self.next_step(installed)
-                    self.assertIn(name, command.replace("''", "'").replace(
-                        chr(0x2019) * 2, chr(0x2019)))
+                    copy = base / ("program" if flags else "tools")
+                    self.assertIn(
+                        quoted((copy / "supervisor.py").as_posix()), command)
 
                     done = subprocess.run(
                         [*shell, command], cwd=str(here),
