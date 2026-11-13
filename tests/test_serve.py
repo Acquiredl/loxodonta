@@ -1188,6 +1188,10 @@ class ServeTest(ServerFixture):
         self.assertIn("not the recorded history", page)
         self.assertIn("superseded", page)
         self.assertIn("verify", page, "verdicts come from loxodonta verify")
+        # The command by its name since ADR-0010; the page is no tour,
+        # which keeps the old name on purpose.
+        self.assertNotIn("receipts verify", page)
+        self.assertIn("<code>loxodonta verify</code>", page)
         # The band renders only what the scan can say: the tick never
         # passes --files (.out-of-scope/002), so a FILES-DIVERGED tier
         # would be dead display code wearing a claim nothing can earn.
