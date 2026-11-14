@@ -236,3 +236,38 @@ What it still does not claim: a receipt posted through the URL inside
 the grace period, or before any settled look has named its call
 missing, pays the call it names, and a receipt naming any MCP tool pays
 a call the events name `mcp_tool`.
+
+## Addendum, 2026-11-14: a receipt naming another tool is a finding
+
+The author ruled this after the code walk of the 0.21.0 round, in these
+words: "A receipt naming another tool is a finding until accepted." It
+is built by #651, with the two points beside it that change point 3 of
+the addendum above.
+
+1. **A receipt naming another tool is a finding until accepted.**
+   Point 1 above made such a receipt pay nothing, but once another
+   receipt paid the call the session read `ENDED-SURPLUS`, exit 0,
+   with the mismatch only in the row's note. An honest hook takes the
+   tool's name from the same harness that sends the event, so a
+   receipt carrying a call's id under another tool's name has the
+   shape of one written by hand. A settled session holding one is a
+   finding at the receiver: it raises the exit until someone there
+   acknowledges it, and again if its counts change, as ruling 2 holds
+   for every finding. If an honest split in naming turns up for some
+   tool, as `mcp_tool` is for MCP servers, that tool gets its own
+   exception, and the finding shows on every such session until it
+   does.
+2. **A late receipt is timed by when it reached the receiver.** Point
+   3 above dated a receipt by the first look that saw it, so the grace
+   was measured between looks, and a scan that ran rarely refused
+   honest tails. A receipt is now dated by the modification time of
+   the chain copy that holds it, where that is earlier than the look.
+   The receiver only appends to a copy, so that time is never earlier
+   than the receipt's arrival, and the writer cannot set it.
+3. **The grace is six hours.** At one hour, a killed session's tail
+   that the keeper delivers at its cadence, six hours by default, paid
+   nothing and left a finding to accept by hand. Six hours, the
+   panel's high point, is the keeper's cadence.
+
+No new precedent was read for these: point 1 applies ruling 2's rule,
+whose prior art is above, to one more disagreement.
