@@ -52,7 +52,7 @@ the same release, then ask the file which version it is.
 
 ```
 sha256sum loxodonta.py            # certutil -hashfile loxodonta.py SHA256 on Windows
-python loxodonta.py --version     # loxodonta 0.15.1 (format 0.1, commit unknown)
+python loxodonta.py --version     # loxodonta 0.21.0 (format 0.1, commit unknown)
 ```
 
 That last word is `unknown` on purpose, and it is the first thing you will
