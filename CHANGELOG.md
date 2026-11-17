@@ -10,6 +10,10 @@ from the receipt format, which stays at `0.1` (ADR-0022).
 
 ## [Unreleased]
 
+### Changed
+
+- The README's last section asks for feedback in three sizes, 2 minutes, 10 minutes or a week, and a first-impression issue form takes the smallest: a few questions answered from the README alone.
+
 ## [0.21.0] - 2026-11-13
 
 ### Added

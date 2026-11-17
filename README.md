@@ -77,6 +77,12 @@ Three things hold something a rebuilt log cannot match:
 
 ## Try it, and try to break it
 
-Everything measured so far came from my machines, so the gap is other people, other setups and other workloads. Use it for a week, break it any way you can, and tell me what you think. A way around a promise is the most useful issue this repository can get.
+Everything measured so far came from my machines, so the gap is other people, other setups and other workloads. Any of these helps, and the smallest takes 2 minutes:
+
+- **2 minutes.** You read this page, so [tell me what you think it does](https://github.com/Acquiredl/loxodonta/issues/new?template=first-impression.yml), in your own words. If your answer is not what the tool does, this page is what gets fixed.
+- **10 minutes.** Run the block under [See it work](#see-it-work) and say what surprised you, in the same form.
+- **A week.** Install it, work the way you were going to anyway, and send back what your machine saw. [docs/START.md](docs/START.md) walks it.
+
+And break it any way you can. A way around a promise is the most useful issue this repository can get.
 
 Every other page is in [docs/](docs/README.md), and [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md) and the [CHANGELOG](CHANGELOG.md) sit beside this file. MIT licensed.
