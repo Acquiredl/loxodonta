@@ -1,0 +1,47 @@
+name: First impression
+description: 2 minutes. Say what you think it does, in your own words, after reading the README.
+title: "first impression: "
+labels: ["first-impression"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        You read the README, or part of it, and that is all this needs. Nothing to install.
+
+        There is no wrong answer here. If what you write is not what the tool does, the README is what gets fixed. Short answers are fine, and so is "I did not get it".
+  - type: dropdown
+    id: how-far
+    attributes:
+      label: How far did you get?
+      options:
+        - I read the README
+        - I ran the demo block
+        - I installed it
+    validations:
+      required: false
+  - type: textarea
+    id: what
+    attributes:
+      label: What does it do?
+      description: In your own words. One sentence is plenty.
+    validations:
+      required: true
+  - type: textarea
+    id: who
+    attributes:
+      label: Who is it for?
+    validations:
+      required: false
+  - type: textarea
+    id: trust
+    attributes:
+      label: Would you run it? What would make you trust it more?
+    validations:
+      required: false
+  - type: textarea
+    id: surprised
+    attributes:
+      label: Anything that surprised or confused you?
+      description: A sentence you read twice, a word you had to guess at, an output you did not expect.
+    validations:
+      required: false
